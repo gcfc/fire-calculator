@@ -20,6 +20,16 @@ const fmtM = (n) =>
 export function simulate(p) {
   const ret = p.nominalReturn;
 
+  // ---- continuous-time conventions ------------------------------------------
+  // Defined up front because EVERY sub-model has to use them. The 529 sinking fund once used
+  // year-end lumps while the portfolio compounded continuously, which quietly taxed each 529
+  // contribution ~3.4% of a year's growth and made saving for college destroy wealth.
+  const G = 1 + ret;                                    // one-year growth factor
+  const delta = Math.log(G);                            // the equivalent continuous rate
+  const grow = (dt) => Math.pow(G, dt);                 // what $1 becomes after dt years
+  const fv = (dt) => (grow(dt) - 1) / delta;            // future value of $1/yr flowing for dt years
+  const pvFlow = (dt) => (1 - Math.pow(G, -dt)) / delta; // present value of the same
+
   // --- homes: any number of them, each with its own loan ---------------------
   // Every home is an independent stream of cash: a lump at closing, level P&I until its own
   // payoff, and carrying costs for as long as you own it. Nothing here assumes there is only one.
@@ -109,29 +119,36 @@ export function simulate(p) {
     }
     return c;
   };
-  // present value (nominal, discounted to each age) of remaining gross college — the funding target
+  // gross college bill in year `age`, as a nominal RATE ($/yr) like every other flow
+  const collegeGrossAt = (age) =>
+    collegeGrossToday(age) * Math.pow(1 + p.inflation, age - p.currentAge);
+
+  // value at the start of `age` of all the college still to come — the 529's funding target.
+  // Same recursion as Need[], because the fund compounds on exactly the same terms as the portfolio.
   const pvCollege = {}; pvCollege[END + 1] = 0;
   for (let age = END; age >= p.currentAge; age--) {
-    const infl = Math.pow(1 + p.inflation, age - p.currentAge);
-    pvCollege[age] = collegeGrossToday(age) * infl + pvCollege[age + 1] / (1 + ret);
+    pvCollege[age] = (pvCollege[age + 1] + collegeGrossAt(age) * fv(1)) / G;
   }
-  // pre-pass: 529 balance is independent of the main portfolio, so compute net-of-529 college up front.
-  // Contribute up to the annual amount, but only until the fund covers remaining college (no overfunding).
+  // pre-pass: the 529 is a side fund, independent of the main portfolio, so settle net-of-529
+  // college up front. Contribute up to the annual cap, but never past what college still costs.
+  // Everything here accrues continuously, exactly like the portfolio it is diverted from —
+  // otherwise the diversion itself would leak value.
   const netCollege = {}, contrib529 = {};
   {
     let bal = 0;
     const annual = p.use529 ? Math.min(p.annual529, cap529) : 0;
     for (let age = p.currentAge; age <= END; age++) {
       const infl = Math.pow(1 + p.inflation, age - p.currentAge);
-      const c = (annual > 0 && age <= lastCollegeAge)
-        ? Math.min(annual * infl, Math.max(0, pvCollege[age] - bal))   // fund toward target, cap at annual
-        : 0;
-      contrib529[age] = c;
-      bal = bal * (1 + ret) + c;
-      const gross = collegeGrossToday(age) * infl;
-      const pay = annual > 0 ? Math.min(bal, gross) : 0;
-      bal -= pay;
-      netCollege[age] = gross - pay;                      // remainder the main portfolio must cover
+      const room = Math.max(0, pvCollege[age] - bal) / pvFlow(1);      // headroom, as a rate
+      const c = (annual > 0 && age <= lastCollegeAge) ? Math.min(annual * infl, room) : 0;
+      contrib529[age] = c;                                             // a rate, like every other flow
+
+      const grossRate = collegeGrossAt(age);
+      const endBal = bal * G + c * fv(1);                              // fund at year end
+      const billFV = grossRate * fv(1);                                // tuition, valued at year end
+      const paid = annual > 0 ? Math.min(endBal, billFV) : 0;
+      bal = endBal - paid;
+      netCollege[age] = (billFV - paid) / fv(1);                       // back to a rate for the portfolio
     }
   }
 
@@ -143,20 +160,19 @@ export function simulate(p) {
     return p.retirementSpendToday * infl   // non-housing budget
          + housingAt(age)                  // rent, or carry + P&I on every home owned that year
          + downAt(age)                     // closing cash on anything bought this year
-         + (netCollege[age] || 0);         // college the 529 didn't cover
+         + (netCollege[age] || 0)          // college the 529 didn't cover
+         + (contrib529[age] || 0);         // …and the 529 you are still feeding. Retiring does not
+                                           // stop the sinking fund: if these were left out, any
+                                           // contribution scheduled after retirement would be free
+                                           // money, and a slow 529 would buy you an earlier date.
   };
-  // ---- continuous-time core -------------------------------------------------
-  // Salary, spending and saving accrue continuously, not as a lump on your birthday, and money
-  // compounds continuously. That is what lets retirement land on a real-valued instant. Retiring
-  // on the integer ceiling of the crossing (the old behaviour) made the leftover at the horizon
-  // jump: nudge income up, the crossing slides earlier, and the moment it tips past a whole year
-  // you retire 12 months sooner with barely enough — so the terminal balance sawtoothed.
-  const G = 1 + ret;                                    // one-year growth factor
-  const delta = Math.log(G);                            // the equivalent continuous rate
-  const grow = (dt) => Math.pow(G, dt);                 // what $1 becomes after dt years
-  const fv = (dt) => (grow(dt) - 1) / delta;            // future value of $1/yr flowing for dt years
-  const pvFlow = (dt) => (1 - Math.pow(G, -dt)) / delta; // present value of the same
-
+  // ---- the retirement requirement -------------------------------------------
+  // Salary, spending and saving accrue continuously (see the conventions at the top), which is what
+  // lets retirement land on a real-valued instant. Retiring on the integer ceiling of the crossing
+  // (the old behaviour) made the leftover at the horizon jump: nudge income up, the crossing slides
+  // earlier, and the moment it tips past a whole year you retire 12 months sooner with barely
+  // enough — so the terminal balance sawtoothed.
+  //
   // Need[age] = nominal balance at the START of `age` that funds age..END and lands exactly on zero,
   // with the balance still compounding while it is being drawn down.
   const Need = {}; Need[END + 1] = 0;
@@ -408,22 +424,49 @@ export function simulate(p) {
   };
 }
 
+// The one number box everything uses. Two things it gets right that a raw <input type=number> does not:
+// clicking in SELECTS the current value, so typing replaces it instead of landing after the leading 0;
+// and the box is allowed to sit empty while you type, instead of a 0 snapping back in behind the cursor.
+const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small = false }) => {
+  const [draft, setDraft] = useState(null);            // the raw string while editing; null when idle
+  const clamp = (n) => Math.min(max, Math.max(min, n));
+  return (
+    <input
+      type="number"
+      step={step}
+      min={min}
+      value={draft ?? value}
+      onFocus={(e) => e.target.select()}
+      onChange={(e) => {
+        const raw = e.target.value;
+        setDraft(raw);                                  // keep exactly what was typed, empty included
+        if (raw === "") return;                         // …and don't force a 0 back into the box
+        const n = Number(raw);
+        if (!Number.isNaN(n)) onCommit(clamp(n));
+      }}
+      onBlur={() => {
+        if (draft === "") onCommit(min);                // left empty: settle on the floor
+        setDraft(null);
+      }}
+      style={{
+        background: C.bg, border: `1px solid ${C.line}`, color: C.ink,
+        padding: small ? "6px 8px" : "8px 10px", borderRadius: small ? 5 : 6,
+        fontFamily: "'JetBrains Mono', monospace", fontSize: small ? 13 : 14,
+        width: "100%", boxSizing: "border-box",
+      }}
+    />
+  );
+};
+
 // compact numeric input for the repeatable home/kid cards. `pct` stores a fraction but shows a %.
 const Num = ({ label, value, onChange, step = 1, pct = false }) => (
   <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
     <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
-    <input
-      type="number" min={0} step={step}
+    <NumberInput
+      small
+      step={step}
       value={pct ? Number((value * 100).toFixed(4)) : value}
-      onChange={(e) => {
-        const n = Math.max(0, Number(e.target.value) || 0);
-        onChange(pct ? n / 100 : n);
-      }}
-      style={{
-        background: C.bg, border: `1px solid ${C.line}`, color: C.ink, padding: "6px 8px",
-        borderRadius: 5, fontFamily: "'JetBrains Mono', monospace", fontSize: 13,
-        width: "100%", boxSizing: "border-box",
-      }}
+      onCommit={(v) => onChange(pct ? v / 100 : v)}
     />
   </label>
 );
@@ -458,18 +501,7 @@ const field = (label, key, val, set, opts = {}) => (
     <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
       {label}
     </span>
-    <input
-      type="number"
-      value={val}
-      step={opts.step || 1}
-      min={0}
-      onChange={(e) => set(key, e.target.value === "" ? 0 : Math.max(0, Number(e.target.value)))}
-      style={{
-        background: C.bg, border: `1px solid ${C.line}`, color: C.ink,
-        padding: "8px 10px", borderRadius: 6, fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 14, width: "100%", boxSizing: "border-box",
-      }}
-    />
+    <NumberInput value={val} step={opts.step || 1} onCommit={(v) => set(key, v)} />
   </label>
 );
 
@@ -789,11 +821,9 @@ export default function FireModel() {
                 <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
                   529 set-aside / yr (today's $) · cap ${cap529.toLocaleString()}
                 </span>
-                <input
-                  type="number" value={p.annual529} step={1000} min={0} max={cap529}
-                  onChange={(e) => set("annual529", Math.max(0, Math.min(cap529, Number(e.target.value) || 0)))}
-                  style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, padding: "8px 10px",
-                    borderRadius: 6, fontFamily: "'JetBrains Mono', monospace", fontSize: 14, width: "100%", boxSizing: "border-box" }}
+                <NumberInput
+                  value={p.annual529} step={1000} max={cap529}
+                  onCommit={(v) => set("annual529", v)}
                 />
                 <span style={{ fontSize: 10, color: C.mute }}>
                   gift-tax-free max ${cap529.toLocaleString()} ({kidsCount}× $19k single donor); married/superfunding allows more
