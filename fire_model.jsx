@@ -18,14 +18,54 @@ const fmtM = (n) =>
 
 // exported so the model can be exercised headlessly, without mounting the UI
 export function simulate(p) {
-  const loan = p.homePrice * (1 - p.downPct);
-  const r = p.mortgageRate / 12, n = p.mortgageTerm * 12;
-  const mPI = p.buyHome
-    ? (loan * r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1) * 12
-    : 0;
-  const payoffAge = p.purchaseAge + p.mortgageTerm;
-  const naiveNumber = p.retirementSpendToday / p.swr;
   const ret = p.nominalReturn;
+
+  // --- homes: any number of them, each with its own loan ---------------------
+  // Every home is an independent stream of cash: a lump at closing, level P&I until its own
+  // payoff, and carrying costs for as long as you own it. Nothing here assumes there is only one.
+  const homes = (p.homes || []).filter((h) => h.price > 0).map((h) => {
+    const loan = h.price * (1 - h.downPct);
+    const i = h.rate / 12, n = Math.max(1, h.term) * 12;
+    // level-payment amortisation; a 0% loan is just principal spread over the term
+    const mPI = loan <= 0 ? 0
+      : i > 0 ? (loan * i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1) * 12
+              : loan / Math.max(1, h.term);
+    return {
+      ...h, loan, mPI,
+      payoff: h.purchaseAge + h.term,                  // the year P&I stops
+      down: (h.downPct + h.closingPct) * h.price,      // cash you must have at closing
+    };
+  });
+  // property tax drifts ~2%/yr with assessments; insurance + upkeep track inflation
+  const carryOf = (h, age) => {
+    if (age < h.purchaseAge) return 0;
+    const yrs = age - h.purchaseAge;
+    return h.price * h.propTaxRate * Math.pow(1.02, yrs)
+         + h.price * h.insMaintRate * Math.pow(1 + p.inflation, yrs);
+  };
+  // total housing cost in year `age`: carry + live P&I on every home you own by then, and rent
+  // for as long as you own nothing to live in.
+  const housingAt = (age) => {
+    let owned = 0, cost = 0;
+    for (const h of homes) {
+      if (age < h.purchaseAge) continue;
+      owned++;
+      cost += carryOf(h, age);
+      if (age < h.payoff) cost += h.mPI;
+    }
+    if (owned === 0) cost += p.rentAnnual * Math.pow(1 + p.inflation, age - p.currentAge);
+    return cost;
+  };
+  const downAt = (age) => homes.reduce((s, h) => s + (age === h.purchaseAge ? h.down : 0), 0);
+  const piAt = (age) =>
+    homes.reduce((s, h) => s + (age >= h.purchaseAge && age < h.payoff ? h.mPI : 0), 0);
+  const lastPayoff = homes.length ? Math.max(...homes.map((h) => h.payoff)) : null;
+
+  // the naive 4%-rule number, for contrast — spending plus whatever housing costs in steady state
+  const steadyHousing = homes.length
+    ? homes.reduce((s, h) => s + h.price * (h.propTaxRate + h.insMaintRate), 0)
+    : p.rentAnnual;
+  const naiveNumber = (p.retirementSpendToday + steadyHousing) / p.swr;
 
   // --- household ages -------------------------------------------------------
   // The timeline is indexed by YOUR age, but every partner INPUT is given in the partner's own
@@ -42,18 +82,31 @@ export function simulate(p) {
   const accessYou = p.accessAge;
   const accessPartner = yourAgeWhenPartnerIs(p.accessAge);
 
-  // --- college schedule (single lump at 18, or spread over ages 18–21) with optional 529 pre-funding ---
-  const kidsCount = [p.kid1BirthAge, p.kid2BirthAge].filter((b) => b > 0).length;
+  // --- kids: any number of them, each born whenever ---------------------------
+  const kids = (p.kids || []).filter((k) => k.birthAge > 0);
+  const kidsCount = kids.length;
   const cap529 = kidsCount * 19000;                       // gift-tax-free annual max, single donor, today's $
-  const lastCollegeAge = Math.max(p.kid1BirthAge, p.kid2BirthAge) + (p.collegeSpread ? 21 : 18);
+  const lastCollegeAge = kidsCount
+    ? Math.max(...kids.map((k) => k.birthAge)) + (p.collegeSpread ? 21 : 18) : 0;
+  // college: one lump at 18, or spread over 18–21
   const collegeGrossToday = (age) => {
     let c = 0;
-    [p.kid1BirthAge, p.kid2BirthAge].forEach((b) => {
-      if (b <= 0) return;
-      const ka = age - b;
+    for (const k of kids) {
+      const ka = age - k.birthAge;
       if (p.collegeSpread) { if (ka >= 18 && ka <= 21) c += p.collegePerKid / 4; }
       else if (ka === 18) c += p.collegePerKid;
-    });
+    }
+    return c;
+  };
+  // daycare while they're little, then a lighter ongoing cost until they leave home
+  const kidCostAt = (age) => {
+    const infl = Math.pow(1 + p.inflation, age - p.currentAge);
+    let c = 0;
+    for (const k of kids) {
+      const ka = age - k.birthAge;
+      if (ka >= 0 && ka <= 5) c += p.daycarePerKid * infl;
+      else if (ka >= 6 && ka <= 17) c += p.ongoingPerKid * infl;
+    }
     return c;
   };
   // present value (nominal, discounted to each age) of remaining gross college — the funding target
@@ -82,29 +135,15 @@ export function simulate(p) {
     }
   }
 
-  // ownership carrying costs (property tax + insurance/maintenance) at a given age, nominal
-  const ownCarry = (age) => {
-    const yrs = age - p.purchaseAge;
-    return p.homePrice * p.propTaxRate * Math.pow(1.02, yrs) +
-           p.homePrice * p.insMaintRate * Math.pow(1 + p.inflation, yrs);
-  };
-  const downPayment = (p.downPct + p.closingPct) * p.homePrice;   // nominal, paid at purchaseAge
-
-  // nominal retirement expense at `age`. retirementSpendToday assumes a PAID-OFF home, so it already
-  // contains ownership carry. Adjust when that isn't yet true:
-  //   - still renting (before purchase): swap the baked-in carry for actual rent
-  //   - purchase year: add the down payment + closing lump
-  //   - mortgage still running: add P&I on top
+  // Nominal spending in year `age` once retired. retirementSpendToday now EXCLUDES housing —
+  // with several homes coming and going there is no single "housing cost" to bake into it, so
+  // housing is priced from the homes themselves every year instead of being assumed away.
   const retireExpense = (age) => {
     const infl = Math.pow(1 + p.inflation, age - p.currentAge);
-    let e = p.retirementSpendToday * infl;
-    if (p.buyHome && age < p.purchaseAge) {
-      e += p.rentAnnual * infl - ownCarry(age);      // renting: pay rent, not ownership carry
-    }
-    if (p.buyHome && age === p.purchaseAge) e += downPayment;          // the lump that was being skipped
-    if (p.buyHome && age >= p.purchaseAge && age < payoffAge) e += mPI; // mortgage P&I during overlap
-    e += netCollege[age] || 0;
-    return e;
+    return p.retirementSpendToday * infl   // non-housing budget
+         + housingAt(age)                  // rent, or carry + P&I on every home owned that year
+         + downAt(age)                     // closing cash on anything bought this year
+         + (netCollege[age] || 0);         // college the 529 didn't cover
   };
   // ---- continuous-time core -------------------------------------------------
   // Salary, spending and saving accrue continuously, not as a lump on your birthday, and money
@@ -189,19 +228,11 @@ export function simulate(p) {
     const taxAdvYou = p.annualTaxAdv * infl;
     const taxAdvPartner = partnerOn ? p.partnerTaxAdv * infl : 0;
     const living = p.nonHousingLiving * infl;
-    const mort = (p.buyHome && age >= p.purchaseAge && age < payoffAge) ? mPI : 0;
-    const housing = (p.buyHome && age >= p.purchaseAge) ? mort + ownCarry(age) : p.rentAnnual * infl;
-    let kids = 0;
-    [p.kid1BirthAge, p.kid2BirthAge].forEach((b) => {
-      if (b <= 0) return;
-      const ka = age - b;
-      if (ka >= 0 && ka <= 5) kids += p.daycarePerKid * infl;
-      else if (ka >= 6 && ka <= 17) kids += p.ongoingPerKid * infl;
-    });
-    // every lump (house, college, 529) can only come out of taxable
-    const lumps = (age === p.purchaseAge && p.buyHome ? downPayment : 0)
-                + (netCollege[age] || 0) + (contrib529[age] || 0);
-    const surplus = takeHome - (living + housing + kids);
+    const housing = housingAt(age);
+    const kidCost = kidCostAt(age);
+    // every lump (down payments, college, 529) can only come out of taxable
+    const lumps = downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0);
+    const surplus = takeHome - (living + housing + kidCost);
     return { taxable: surplus - lumps, taxAdvYou, taxAdvPartner, save: surplus + taxAdvYou + taxAdvPartner };
   };
 
@@ -293,8 +324,8 @@ export function simulate(p) {
     if (working && realSave < minSave) { minSave = realSave; minSaveAge = age; }
 
     const events = [];
-    if (age === p.purchaseAge && p.buyHome) events.push("home");
-    if (age === p.kid1BirthAge || age === p.kid2BirthAge) events.push("kid");
+    if (homes.some((h) => h.purchaseAge === age)) events.push("home");
+    if (kids.some((k) => k.birthAge === age)) events.push("kid");
     if (collegeGrossToday(age) > 0) events.push("college");
 
     rows.push({
@@ -359,7 +390,14 @@ export function simulate(p) {
   const lockedShare = fireCrossValue > 0 ? fireLocked / fireCrossValue : 0;
   return {
     naiveNumber, fireAge: T == null ? null : Math.ceil(T), fireCross: T,
-    fireCrossValue, fireReq, payoffAge, mPI,
+    fireCrossValue, fireReq,
+    // per-home derived numbers, so the UI can show what each one actually costs
+    homes: homes.map((h) => ({
+      price: h.price, purchaseAge: h.purchaseAge, payoff: h.payoff,
+      mPI: h.mPI, down: h.down, carryAtBuy: carryOf(h, h.purchaseAge),
+    })),
+    lastPayoff,
+    mortgageAtFire: T == null ? 0 : piAt(Math.floor(T)),   // P&I still running when you retire
     minSave: Math.round(minSave), minSaveAge, end, rows, END,
     accessYou, accessPartner, partnerOffset, hasPartner,
     fireTaxable, fireLocked, fireBridge, lockedShare, illiquidAge,
@@ -369,6 +407,51 @@ export function simulate(p) {
     partnerAgeAtEnd: hasPartner ? partnerAgeAt(END) : null,
   };
 }
+
+// compact numeric input for the repeatable home/kid cards. `pct` stores a fraction but shows a %.
+const Num = ({ label, value, onChange, step = 1, pct = false }) => (
+  <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+    <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
+    <input
+      type="number" min={0} step={step}
+      value={pct ? Number((value * 100).toFixed(4)) : value}
+      onChange={(e) => {
+        const n = Math.max(0, Number(e.target.value) || 0);
+        onChange(pct ? n / 100 : n);
+      }}
+      style={{
+        background: C.bg, border: `1px solid ${C.line}`, color: C.ink, padding: "6px 8px",
+        borderRadius: 5, fontFamily: "'JetBrains Mono', monospace", fontSize: 13,
+        width: "100%", boxSizing: "border-box",
+      }}
+    />
+  </label>
+);
+
+const AddButton = ({ onClick, label }) => (
+  <button
+    onClick={onClick}
+    style={{
+      background: "transparent", border: `1px dashed ${C.teal}`, color: C.teal, borderRadius: 999,
+      padding: "3px 10px", cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif",
+      fontSize: 11, letterSpacing: ".03em",
+    }}
+  >
+    + {label}
+  </button>
+);
+
+const DropButton = ({ onClick }) => (
+  <button
+    onClick={onClick} title="remove"
+    style={{
+      background: "transparent", border: `1px solid ${C.line}`, color: C.mute, borderRadius: 5,
+      width: 26, height: 26, cursor: "pointer", fontSize: 13, lineHeight: 1, flexShrink: 0,
+    }}
+  >
+    ×
+  </button>
+);
 
 const field = (label, key, val, set, opts = {}) => (
   <label key={key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -394,15 +477,21 @@ export const DEFAULTS = {
   currentAge: 27, startPortfolio: 400000, startPortfolioTaxAdv: 0,
   annualTakeHome: 144000, annualTaxAdv: 40000,
   nonHousingLiving: 36000, rentAnnual: 36000, inflation: 0.03, nominalReturn: 0.07,
-  buyHome: true, homePrice: 1500000, downPct: 0.20, mortgageRate: 0.065, mortgageTerm: 30,
-  purchaseAge: 31, propTaxRate: 0.011, insMaintRate: 0.013, closingPct: 0.02,
-  kid1BirthAge: 30, kid2BirthAge: 32, daycarePerKid: 26000, ongoingPerKid: 8000, collegePerKid: 200000,
+  // add or drop as many as you like; each home carries its own loan and each kid its own clock
+  homes: [{
+    price: 1500000, purchaseAge: 31, downPct: 0.20, rate: 0.065, term: 30,
+    closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013,
+  }],
+  kids: [{ birthAge: 30 }, { birthAge: 32 }],
+  daycarePerKid: 26000, ongoingPerKid: 8000, collegePerKid: 200000,
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
   partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000,
   // both in the PARTNER's own age: "earns from 26 until 100". They used to be given in your age,
   // which silently threw away four years of a working partner's income.
   partnerStart: 26, partnerEnd: 100,
-  retirementSpendToday: 110000, swr: 0.035, endAge: 100, coastAge: 48,
+  // EXCLUDES housing — every home now prices its own carry, mortgage and closing costs, so
+  // baking a paid-off house into this number would double-count it. (Was 110k incl. ~36k carry.)
+  retirementSpendToday: 74000, swr: 0.035, endAge: 100, coastAge: 48,
   collegeSpread: true, use529: false, annual529: 0,
   enforceAccess: true, rothLadder: true, ladderYears: 5, accessAge: 59.5,
 };
@@ -431,14 +520,42 @@ export default function FireModel() {
   const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
   const setPct = (k, v) => setP((s) => ({ ...s, [k]: v / 100 }));
 
+  // --- add / edit / drop homes and kids -------------------------------------
+  const setHome = (i, k, v) =>
+    setP((s) => ({ ...s, homes: s.homes.map((h, j) => (j === i ? { ...h, [k]: v } : h)) }));
+  const addHome = () =>
+    setP((s) => {
+      const last = s.homes[s.homes.length - 1];
+      return { ...s, homes: [...s.homes, {
+        // a sensible next home: same terms, bought a few years after the previous one
+        price: last ? last.price : 800000,
+        purchaseAge: last ? last.purchaseAge + 5 : s.currentAge + 3,
+        downPct: last ? last.downPct : 0.20,
+        rate: last ? last.rate : 0.065,
+        term: last ? last.term : 30,
+        closingPct: last ? last.closingPct : 0.02,
+        propTaxRate: last ? last.propTaxRate : 0.011,
+        insMaintRate: last ? last.insMaintRate : 0.013,
+      }] };
+    });
+  const dropHome = (i) => setP((s) => ({ ...s, homes: s.homes.filter((_, j) => j !== i) }));
+  const setKid = (i, v) =>
+    setP((s) => ({ ...s, kids: s.kids.map((k, j) => (j === i ? { birthAge: v } : k)) }));
+  const addKid = () =>
+    setP((s) => {
+      const last = s.kids[s.kids.length - 1];
+      return { ...s, kids: [...s.kids, { birthAge: last ? last.birthAge + 2 : s.currentAge + 2 }] };
+    });
+  const dropKid = (i) => setP((s) => ({ ...s, kids: s.kids.filter((_, j) => j !== i) }));
+
   const sim = useMemo(() => simulate(p), [p]);
   // the same world with the 59.5 gate switched off — the difference IS the cost of the rule
   const simFree = useMemo(() => simulate({ ...p, enforceAccess: false }), [p]);
   const delay = sim.fireCross && simFree.fireCross ? sim.fireCross - simFree.fireCross : null;
 
-  const homeRow = sim.rows.find((r) => r.events.includes("home"));
+  const homeRows = sim.rows.filter((r) => r.events.includes("home"));
   const kidRows = sim.rows.filter((r) => r.events.includes("kid"));
-  const kidsCount = [p.kid1BirthAge, p.kid2BirthAge].filter((b) => b > 0).length;
+  const kidsCount = p.kids.length;
   const cap529 = kidsCount * 19000;
 
   // --- what actually moves the needle -------------------------------------
@@ -454,8 +571,12 @@ export default function FireModel() {
       { label: "Living costs −$5k/yr", over: { nonHousingLiving: Math.max(0, p.nonHousingLiving - 5000) } },
       ...(p.partnerAge > 0
         ? [{ label: "Partner take-home +$10k/yr", over: { partnerIncome: p.partnerIncome + 10000 } }] : []),
-      ...(p.buyHome
-        ? [{ label: "Home price −$100k", over: { homePrice: Math.max(0, p.homePrice - 100000) } }] : []),
+      ...(p.homes.length
+        ? [{ label: p.homes.length > 1 ? "Every home −$100k" : "Home price −$100k",
+             over: { homes: p.homes.map((h) => ({ ...h, price: Math.max(0, h.price - 100000) })) } }] : []),
+      ...(p.homes.length
+        ? [{ label: "Mortgage rate −1pt",
+             over: { homes: p.homes.map((h) => ({ ...h, rate: Math.max(0, h.rate - 0.01) })) } }] : []),
       ...(kidsCount
         ? [{ label: "College −$50k/kid", over: { collegePerKid: Math.max(0, p.collegePerKid - 50000) } }] : []),
       { label: "Move $10k/yr from 401k → taxable",
@@ -540,18 +661,8 @@ export default function FireModel() {
               ["Partner earns from their age", "partnerStart", {}],
               ["…until their age", "partnerEnd", {}],
             ]],
-            ["Home", [
-              ["Home price", "homePrice", { step: 25000 }],
-              ["Purchase age", "purchaseAge", {}],
-            ]],
-            ["Kids", [
-              ["Kid 1 — your age at birth", "kid1BirthAge", {}],
-              ["Kid 2 — your age at birth", "kid2BirthAge", {}],
-              ["Daycare / kid / yr (ages 0–5)", "daycarePerKid", { step: 1000 }],
-              ["College / kid (today's $)", "collegePerKid", { step: 10000 }],
-            ]],
             ["Retirement", [
-              ["Retirement spend / yr (today's $)", "retirementSpendToday", { step: 5000 }],
+              ["Retirement spend / yr — excl. housing", "retirementSpendToday", { step: 5000 }],
               ["Money must last to age", "endAge", {}],
               ["Coast FIRE: retire at age", "coastAge", {}],
             ]],
@@ -582,6 +693,78 @@ export default function FireModel() {
               )}
             </div>
           ))}
+
+          {/* HOMES — any number, each with its own loan */}
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
+                Homes {p.homes.length > 0 && <span style={{ color: C.mute }}>· {p.homes.length}</span>}
+              </div>
+              <AddButton onClick={addHome} label="add home" />
+            </div>
+            {p.homes.length === 0 && (
+              <div style={{ fontSize: 11, color: C.mute }}>
+                Renting forever at {fmt(p.rentAnnual)}/yr. Add a home to take on a mortgage.
+              </div>
+            )}
+            {p.homes.map((h, i) => {
+              const m = sim.homes[i];
+              return (
+                <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, background: C.bg }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <span style={{ fontSize: 11, color: C.brass, letterSpacing: ".06em", textTransform: "uppercase" }}>
+                      Home {i + 1}
+                    </span>
+                    <DropButton onClick={() => dropHome(i)} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <Num label="Price" value={h.price} step={25000} onChange={(v) => setHome(i, "price", v)} />
+                    <Num label="Buy at your age" value={h.purchaseAge} onChange={(v) => setHome(i, "purchaseAge", v)} />
+                    <Num label="Down %" value={h.downPct} pct step={1} onChange={(v) => setHome(i, "downPct", v)} />
+                    <Num label="Rate %" value={h.rate} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
+                    <Num label="Term (yrs)" value={h.term} onChange={(v) => setHome(i, "term", v)} />
+                    <Num label="Closing %" value={h.closingPct} pct step={0.5} onChange={(v) => setHome(i, "closingPct", v)} />
+                    <Num label="Prop tax %" value={h.propTaxRate} pct step={0.1} onChange={(v) => setHome(i, "propTaxRate", v)} />
+                    <Num label="Ins + maint %" value={h.insMaintRate} pct step={0.1} onChange={(v) => setHome(i, "insMaintRate", v)} />
+                  </div>
+                  {m && (
+                    <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
+                      cash at closing <b style={{ color: C.ink }}>{fmt(m.down)}</b> ·
+                      P&I <b style={{ color: C.ink }}>{fmt(m.mPI)}</b>/yr ·
+                      carry <b style={{ color: C.ink }}>{fmt(m.carryAtBuy)}</b>/yr ·
+                      clear at <b style={{ color: C.brass }}>age {m.payoff}</b>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* KIDS — any number, each with their own birth year */}
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
+                Kids {kidsCount > 0 && <span style={{ color: C.mute }}>· {kidsCount}</span>}
+              </div>
+              <AddButton onClick={addKid} label="add kid" />
+            </div>
+            {kidsCount === 0 && <div style={{ fontSize: 11, color: C.mute }}>No kids — no daycare, no college.</div>}
+            {p.kids.map((k, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                <div style={{ flex: 1 }}>
+                  <Num label={`Kid ${i + 1} — your age at birth`} value={k.birthAge} onChange={(v) => setKid(i, v)} />
+                </div>
+                <DropButton onClick={() => dropKid(i)} />
+              </div>
+            ))}
+            {kidsCount > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 2 }}>
+                {field("Daycare / kid / yr (ages 0–5)", "daycarePerKid", p.daycarePerKid, set, { step: 1000 })}
+                {field("Ongoing / kid / yr (ages 6–17)", "ongoingPerKid", p.ongoingPerKid, set, { step: 1000 })}
+                {field("College / kid (today's $)", "collegePerKid", p.collegePerKid, set, { step: 10000 })}
+              </div>
+            )}
+          </div>
 
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>Access to retirement accounts</div>
@@ -649,7 +832,10 @@ export default function FireModel() {
             <Stat label="Coast reached at" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast} />
             <Stat label="Liquid (taxable) at that point" value={sim.fireTaxable != null ? fmtM(sim.fireTaxable) : "—"} accent={C.liquid} />
             <Stat label="Locked until 59.5" value={sim.lockedShare ? (sim.lockedShare * 100).toFixed(0) + "%" : "—"} accent={sim.lockedShare > 0.6 ? C.coral : C.ink} />
-            <Stat label="Mortgage clear at" value={`age ${sim.payoffAge}`} />
+            <Stat
+              label={sim.homes.length > 1 ? "Last mortgage clear at" : "Mortgage clear at"}
+              value={sim.lastPayoff ? `age ${sim.lastPayoff}` : "—"}
+            />
             <Stat
               label={`Tightest saving year · age ${sim.minSaveAge ?? "—"}`}
               value={sim.minSave === Infinity ? "—" : fmt(sim.minSave)}
@@ -681,10 +867,13 @@ export default function FireModel() {
             </div>
           )}
 
-          {sim.fireCross && sim.fireCross < sim.payoffAge && (
+          {sim.fireCross && sim.mortgageAtFire > 0 && (
             <div style={{ background: C.panel2, border: `1px solid ${C.brass}55`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
-              You'd still owe the mortgage (~{fmt(sim.mPI)}/yr) until <b>{sim.payoffAge}</b>, which is why the number
-              (<b>{fmtM(sim.fireCrossValue)}</b>) sits above the naive {fmtM(sim.naiveNumber)}.
+              You'd retire still owing <b>{fmt(sim.mortgageAtFire)}/yr</b> of principal and interest across{" "}
+              {sim.homes.filter((h) => sim.fireCross < h.payoff && sim.fireCross >= h.purchaseAge).length} live
+              mortgage{sim.homes.filter((h) => sim.fireCross < h.payoff && sim.fireCross >= h.purchaseAge).length === 1 ? "" : "s"},
+              the last clearing at <b>{sim.lastPayoff}</b> — which is why the number (<b>{fmtM(sim.fireCrossValue)}</b>)
+              sits above the naive {fmtM(sim.naiveNumber)}.
             </div>
           )}
 
@@ -716,7 +905,7 @@ export default function FireModel() {
                 {show.bridge ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
                 {show.taxable ? <Line type="monotone" dataKey="taxable" stroke={C.liquid} strokeWidth={1.5} dot={false} /> : null}
                 {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
-                {show.home && homeRow ? <ReferenceDot x={homeRow.age} y={homeRow.portfolio} r={5} fill={C.brass} stroke={C.bg} /> : null}
+                {show.home ? homeRows.map((h) => <ReferenceDot key={h.age} x={h.age} y={h.portfolio} r={5} fill={C.brass} stroke={C.bg} />) : null}
                 {show.kids ? kidRows.map((k) => <ReferenceDot key={k.age} x={k.age} y={k.portfolio} r={4} fill={C.ink} stroke={C.bg} />) : null}
                 {show.coast && sim.coastCross ? <ReferenceDot x={sim.coastCross} y={sim.coastCrossValue} r={5} fill={C.coast} stroke={C.bg} strokeWidth={2} /> : null}
                 {show.retire && sim.fireCross ? <ReferenceDot x={sim.fireCross} y={sim.fireCrossValue} r={7} fill={C.brass} stroke={C.ink} strokeWidth={2} /> : null}
