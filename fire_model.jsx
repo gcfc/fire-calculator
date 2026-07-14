@@ -28,16 +28,19 @@ export function simulate(p) {
   const ret = p.nominalReturn;
 
   // --- household ages -------------------------------------------------------
-  // Everything below is indexed by YOUR age. The partner enters through two offsets:
-  // when their retirement accounts unlock, and how long the money has to last.
+  // The timeline is indexed by YOUR age, but every partner INPUT is given in the partner's own
+  // age — "earns until 65" means until *they* are 65. `partnerAgeAt` is the only bridge between
+  // the two frames; nothing else should be doing the arithmetic by hand.
   const hasPartner = p.partnerAge > 0;
   const partnerOffset = hasPartner ? p.currentAge - p.partnerAge : 0;  // >0 when partner is younger
+  const partnerAgeAt = (age) => age - partnerOffset;                   // your age -> their age
+  const yourAgeWhenPartnerIs = (pa) => pa + partnerOffset;             // …and back again
   // the money must survive the LAST survivor: if the partner is younger by d, they reach the
   // target age when you are endAge + d, so the horizon stretches by d.
   const END = p.endAge + Math.max(0, partnerOffset);
-  // tax-advantaged money unlocks at each person's own 59.5, expressed in your age
+  // each person's accounts open at their OWN 59.5; accessPartner is that instant on your clock
   const accessYou = p.accessAge;
-  const accessPartner = p.accessAge + partnerOffset;
+  const accessPartner = yourAgeWhenPartnerIs(p.accessAge);
 
   // --- college schedule (single lump at 18, or spread over ages 18–21) with optional 529 pre-funding ---
   const kidsCount = [p.kid1BirthAge, p.kid2BirthAge].filter((b) => b > 0).length;
@@ -103,48 +106,66 @@ export function simulate(p) {
     e += netCollege[age] || 0;
     return e;
   };
-  // backward induction: Need[age] = min nominal portfolio at start of `age` to fund age..END ending >= 0.
-  // Expenses are paid at year end, so a balance grows for a year before it is drawn on.
+  // ---- continuous-time core -------------------------------------------------
+  // Salary, spending and saving accrue continuously, not as a lump on your birthday, and money
+  // compounds continuously. That is what lets retirement land on a real-valued instant. Retiring
+  // on the integer ceiling of the crossing (the old behaviour) made the leftover at the horizon
+  // jump: nudge income up, the crossing slides earlier, and the moment it tips past a whole year
+  // you retire 12 months sooner with barely enough — so the terminal balance sawtoothed.
+  const G = 1 + ret;                                    // one-year growth factor
+  const delta = Math.log(G);                            // the equivalent continuous rate
+  const grow = (dt) => Math.pow(G, dt);                 // what $1 becomes after dt years
+  const fv = (dt) => (grow(dt) - 1) / delta;            // future value of $1/yr flowing for dt years
+  const pvFlow = (dt) => (1 - Math.pow(G, -dt)) / delta; // present value of the same
+
+  // Need[age] = nominal balance at the START of `age` that funds age..END and lands exactly on zero,
+  // with the balance still compounding while it is being drawn down.
   const Need = {}; Need[END + 1] = 0;
   for (let age = END; age >= p.currentAge; age--) {
-    Need[age] = (retireExpense(age) + Need[age + 1]) / (1 + ret);
+    Need[age] = (Need[age + 1] + retireExpense(age) * fv(1)) / G;
   }
+  // …and the same requirement evaluated at ANY instant, not just birthdays
+  const needAt = (t) => {
+    if (t >= END + 1) return 0;
+    const A = Math.floor(t), rest = A + 1 - t;
+    return (Need[A + 1] + retireExpense(A) * fv(rest)) / grow(rest);
+  };
 
   // --- the liquidity (age-59.5) machinery ----------------------------------
   // Need[] answers "is there enough money?". It does NOT answer "can you legally touch it?".
   // A 401k/IRA/HSA dollar cannot pay a bill before 59.5 without a 10% penalty, so a retirement
   // before then must be bridged out of the TAXABLE bucket alone.
-  //
-  // cum[k] discounts every expense back to `currentAge`, which lets us price any window in O(1).
-  const cum = {}; cum[p.currentAge - 1] = 0;
-  for (let age = p.currentAge; age <= END; age++) {
-    cum[age] = cum[age - 1] + retireExpense(age) / Math.pow(1 + ret, age - p.currentAge + 1);
-  }
-  // nominal cost, valued at the start of age `a`, of funding expenses for years a..k
-  const pvExp = (a, k) =>
-    k < a ? 0 : (cum[Math.min(k, END)] - cum[a - 1]) * Math.pow(1 + ret, a - p.currentAge);
 
-  // first age at which a bucket may legally pay a bill. A Roth conversion ladder seasons each
-  // conversion for 5 years, so retiring at `a` opens the pipe at a+5 — but never later than 59.5,
-  // since you'd simply wait for the statutory age instead.
-  const unlockAge = (access, a) => {
-    if (!p.enforceAccess) return p.currentAge;                       // gate switched off
-    const eff = p.rothLadder ? Math.min(access, a + p.ladderYears) : access;
-    return Math.ceil(eff);
+  // present value, at instant `t`, of every dollar you must spend between `t` and `u`
+  const pvSpend = (t, u) => {
+    let acc = 0, disc = 1, s = t;
+    const stop = Math.min(u, END + 1);
+    while (s < stop) {
+      const yr = Math.floor(s), s1 = Math.min(stop, yr + 1), dt = s1 - s;
+      acc += disc * retireExpense(yr) * pvFlow(dt);
+      disc *= Math.pow(G, -dt);
+      s = s1;
+    }
+    return acc;
   };
 
-  // Minimum TAXABLE balance at the start of age `a` to stay liquid through the locked years,
-  // given the tax-advantaged balances you'd be sitting on. Each bucket adds a checkpoint: taxable
-  // (plus anything already unlocked) must cover every expense up to the year before that bucket opens.
-  const bridgeNeed = (a, balYou, balPartner) => {
+  // The instant a bucket may legally start paying bills — a real number, not a rounded year.
+  // A Roth conversion ladder seasons each conversion for 5 years, so retiring at T opens the pipe
+  // at T+5 — but never later than 59.5, since you'd simply wait for the statutory age instead.
+  const unlockAt = (access, T) =>
+    !p.enforceAccess ? T : (p.rothLadder ? Math.min(access, T + p.ladderYears) : access);
+
+  // Minimum TAXABLE balance at instant T to stay liquid through the locked years. Each bucket adds
+  // a checkpoint: taxable (plus whatever unlocked earlier) must cover all spending up to its opening.
+  const bridgeAt = (T, balYou, balPartner) => {
     if (!p.enforceAccess) return 0;
     const buckets = [
-      { u: unlockAge(accessYou, a), bal: balYou },
-      { u: unlockAge(accessPartner, a), bal: balPartner },
+      { u: unlockAt(accessYou, T), bal: balYou },
+      { u: unlockAt(accessPartner, T), bal: balPartner },
     ].filter((b) => b.bal > 0).sort((x, y) => x.u - y.u);
     let need = 0, unlocked = 0;
     for (const b of buckets) {
-      need = Math.max(need, pvExp(a, b.u - 1) - unlocked);
+      need = Math.max(need, pvSpend(T, b.u) - unlocked);
       unlocked += b.bal;
     }
     return Math.max(0, need);
@@ -152,120 +173,124 @@ export function simulate(p) {
 
   // --- coast FIRE ----------------------------------------------------------
   // "Coast" = stop SAVING but keep working, letting the pot compound untouched until you retire
-  // at coastAge. So the coast bar at age `a` is simply the retirement requirement at the coast
-  // target, discounted back to `a` with no further contributions. It meets the Need curve exactly
-  // at coastAge, which is what makes the two lines readable together.
+  // at coastAge. So the coast bar is the retirement requirement at the coast target, discounted
+  // back with no further contributions. It meets the Need curve exactly at coastAge.
   // NB: this assumes your income still covers everything on the way — including the college lumps.
   const coastTarget = Math.min(Math.max(p.coastAge, p.currentAge + 1), END);
-  const coastNeed = (age) => Need[coastTarget] / Math.pow(1 + ret, coastTarget - age);
-  let coastCross = null, coastCrossValue = null, prevCoastGap = null;
+  const coastAt = (t) => needAt(coastTarget) / grow(coastTarget - t);
+
+  // --- annual flow RATES (nominal $/yr) during a working year ---------------
+  const flows = (age) => {
+    const infl = Math.pow(1 + p.inflation, age - p.currentAge);
+    // the working window is stated in the partner's own age, so translate before comparing
+    const pAge = partnerAgeAt(age);
+    const partnerOn = hasPartner && pAge >= p.partnerStart && pAge <= p.partnerEnd;
+    const takeHome = p.annualTakeHome * infl + (partnerOn ? p.partnerIncome * infl : 0);
+    const taxAdvYou = p.annualTaxAdv * infl;
+    const taxAdvPartner = partnerOn ? p.partnerTaxAdv * infl : 0;
+    const living = p.nonHousingLiving * infl;
+    const mort = (p.buyHome && age >= p.purchaseAge && age < payoffAge) ? mPI : 0;
+    const housing = (p.buyHome && age >= p.purchaseAge) ? mort + ownCarry(age) : p.rentAnnual * infl;
+    let kids = 0;
+    [p.kid1BirthAge, p.kid2BirthAge].forEach((b) => {
+      if (b <= 0) return;
+      const ka = age - b;
+      if (ka >= 0 && ka <= 5) kids += p.daycarePerKid * infl;
+      else if (ka >= 6 && ka <= 17) kids += p.ongoingPerKid * infl;
+    });
+    // every lump (house, college, 529) can only come out of taxable
+    const lumps = (age === p.purchaseAge && p.buyHome ? downPayment : 0)
+                + (netCollege[age] || 0) + (contrib529[age] || 0);
+    const surplus = takeHome - (living + housing + kids);
+    return { taxable: surplus - lumps, taxAdvYou, taxAdvPartner, save: surplus + taxAdvYou + taxAdvPartner };
+  };
+
+  // work for dt years: balances compound while the year's flows stream in
+  const work = (st, age, dt) => {
+    const f = flows(age), g = grow(dt), a = fv(dt);
+    return {
+      taxable: st.taxable * g + f.taxable * a,
+      taxAdvYou: st.taxAdvYou * g + f.taxAdvYou * a,
+      taxAdvPartner: st.taxAdvPartner * g + f.taxAdvPartner * a,
+    };
+  };
+
+  // spend for dt years inside one calendar year, drawing taxable first and then each
+  // tax-advantaged bucket that has already opened. `t0..t1` never straddles an unlock.
+  const spend = (st, t0, t1, T) => {
+    const age = Math.floor(t0), dt = t1 - t0, g = grow(dt);
+    let taxable = st.taxable * g, ty = st.taxAdvYou * g, tp = st.taxAdvPartner * g;
+    let owed = retireExpense(age) * fv(dt);
+    const draw = (bal) => { const x = Math.min(bal, owed); owed -= x; return bal - x; };
+    taxable = draw(taxable);
+    if (t0 >= unlockAt(accessYou, T) - 1e-9) ty = draw(ty);
+    if (t0 >= unlockAt(accessPartner, T) - 1e-9) tp = draw(tp);
+    let short = false;
+    if (owed > 1) { taxable -= owed; short = true; }          // illiquid: money exists, can't be reached
+    return { st: { taxable, taxAdvYou: ty, taxAdvPartner: tp }, short };
+  };
+
+  // spend from t0 to t1, splitting at any unlock instant that falls inside
+  const spendSpan = (st, t0, t1, T) => {
+    const cuts = [t0, t1];
+    [unlockAt(accessYou, T), unlockAt(accessPartner, T)].forEach((u) => {
+      if (u > t0 && u < t1) cuts.push(u);
+    });
+    cuts.sort((a, b) => a - b);
+    let s = st, short = false;
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const r = spend(s, cuts[i], cuts[i + 1], T);
+      s = r.st; short = short || r.short;
+    }
+    return { st: s, short };
+  };
 
   // --- three buckets, because "whose account is it" now changes the answer ---
-  let taxable = Math.max(0, p.startPortfolio - p.startPortfolioTaxAdv)
-              + Math.max(0, p.partnerPortfolio - p.partnerPortfolioTaxAdv);
-  let taxAdvYou = p.startPortfolioTaxAdv;
-  let taxAdvPartner = p.partnerPortfolioTaxAdv;
+  let st = {
+    taxable: Math.max(0, p.startPortfolio - p.startPortfolioTaxAdv)
+           + Math.max(0, p.partnerPortfolio - p.partnerPortfolioTaxAdv),
+    taxAdvYou: p.startPortfolioTaxAdv,
+    taxAdvPartner: p.partnerPortfolioTaxAdv,
+  };
 
-  let fireAge = null, minSave = Infinity, minSaveAge = null, fireReq = null;
-  let fireCross = null, fireCrossValue = null, prevGap = null, prev = null;
-  let fireTaxable = null, fireLocked = null, fireBridge = null, illiquidAge = null;
+  // You may retire only when BOTH hold: enough money in total, and enough of it reachable before
+  // 59.5. The binding one is whichever gap is smaller — and it is zero exactly at retirement.
+  const gapAt = (t, s) => Math.min(
+    (s.taxable + s.taxAdvYou + s.taxAdvPartner) - needAt(t),
+    s.taxable - bridgeAt(t, s.taxAdvYou, s.taxAdvPartner),
+  );
+
+  let T = null;                                   // the retirement instant, a real number
+  let fireCrossValue = null, fireReq = null, fireTaxable = null, fireBridge = null;
+  let coastCross = null, coastCrossValue = null, prevCoastGap = null, prevCoastReal = null;
+  let minSave = Infinity, minSaveAge = null, illiquidAge = null;
   const rows = [];
 
   for (let age = p.currentAge; age <= END; age++) {
     const infl = Math.pow(1 + p.inflation, age - p.currentAge);
-    const startReal = (taxable + taxAdvYou + taxAdvPartner) / infl;   // start-of-year, today's $
-    const taxableReal = taxable / infl;
-    const reqReal = Need[age] / infl;
-    const bridgeReal = bridgeNeed(age, taxAdvYou, taxAdvPartner) / infl;
-    // the coast bar only exists up to the coast target; past it, coasting isn't a thing
-    const coastReal = age <= coastTarget ? coastNeed(age) / infl : null;
+    const total = st.taxable + st.taxAdvYou + st.taxAdvPartner;
+    const startReal = total / infl;
+    const working = T === null;
+    const coastReal = age <= coastTarget ? coastAt(age) / infl : null;
 
     // hitting the coast bar means you could stop saving today and still retire on time
     const coastGap = coastReal == null ? null : startReal - coastReal;
     if (coastCross === null && coastGap != null && coastGap >= 0) {
-      if (prev && prevCoastGap != null && prevCoastGap < 0) {
+      if (prevCoastGap != null && prevCoastGap < 0) {
         const f = prevCoastGap / (prevCoastGap - coastGap);
         coastCross = (age - 1) + f;
-        coastCrossValue = prev.startReal + (startReal - prev.startReal) * f;
+        coastCrossValue = prevCoastReal + (startReal - prevCoastReal) * f;
       } else {
         coastCross = age;
         coastCrossValue = startReal;
       }
     }
     prevCoastGap = coastGap;
+    prevCoastReal = startReal;
 
-    // You may retire only when BOTH hold: enough money in total, and enough of it reachable
-    // before 59.5. The binding one is whichever gap is smaller.
-    const gap = Math.min(startReal - reqReal, taxableReal - bridgeReal);
-
-    if (fireAge === null && age > p.currentAge && gap >= 0) {
-      // continuous crossing: interpolate the fractional age where the binding gap hits zero
-      const f = prevGap !== null && prevGap < 0 ? prevGap / (prevGap - gap) : 0;
-      const lerp = (a0, a1) => a0 + (a1 - a0) * f;
-      fireCross = prevGap !== null && prevGap < 0 ? (age - 1) + f : age;
-      fireCrossValue = prevGap !== null && prevGap < 0 ? lerp(prev.startReal, startReal) : startReal;
-      fireAge = Math.ceil(fireCross);                  // integer boundary used to switch the sim to drawdown
-      fireReq = prevGap !== null && prevGap < 0 ? lerp(prev.reqReal, reqReal) : reqReal;
-      fireTaxable = prevGap !== null && prevGap < 0 ? lerp(prev.taxableReal, taxableReal) : taxableReal;
-      fireBridge = prevGap !== null && prevGap < 0 ? lerp(prev.bridgeReal, bridgeReal) : bridgeReal;
-      fireLocked = fireCrossValue - fireTaxable;
-      const inflAt = Math.pow(1 + p.inflation, fireCross - p.currentAge);
-      rows.push({
-        age: fireCross, portfolio: Math.round(fireCrossValue), required: Math.round(fireReq),
-        taxable: Math.round(fireTaxable), bridge: Math.round(fireBridge),
-        coast: fireCross <= coastTarget ? Math.round(coastNeed(fireCross) / inflAt) : null,
-        save: 0, drawdown: 0, events: [],
-      });
-    }
-    prevGap = gap;
-    prev = { startReal, taxableReal, reqReal, bridgeReal };
-
-    const working = fireAge === null;
-    const mort = (p.buyHome && age >= p.purchaseAge && age < payoffAge) ? mPI : 0;
-    let realSave = 0;
-
-    if (working) {
-      const partnerWorking = hasPartner && age >= p.partnerStart && age <= p.partnerEnd;
-      const takeHome = p.annualTakeHome * infl + (partnerWorking ? p.partnerIncome * infl : 0);
-      const taxAdvFlowYou = p.annualTaxAdv * infl;
-      const taxAdvFlowPartner = partnerWorking ? p.partnerTaxAdv * infl : 0;
-
-      const living = p.nonHousingLiving * infl;
-      const housing = (p.buyHome && age >= p.purchaseAge)
-        ? mort + ownCarry(age)
-        : p.rentAnnual * infl;
-      let kids = 0;
-      [p.kid1BirthAge, p.kid2BirthAge].forEach((b) => {
-        if (b <= 0) return;
-        const ka = age - b;
-        if (ka >= 0 && ka <= 5) kids += p.daycarePerKid * infl;
-        else if (ka >= 6 && ka <= 17) kids += p.ongoingPerKid * infl;
-      });
-      const expenses = living + housing + kids;
-
-      // payroll splits at the source: tax-advantaged contributions land in the locked buckets,
-      // and every lump (house, college, 529) can only come out of taxable.
-      taxable = taxable * (1 + ret) + (takeHome - expenses);
-      if (age === p.purchaseAge && p.buyHome) taxable -= downPayment;
-      taxable -= (netCollege[age] || 0) + (contrib529[age] || 0);
-      taxAdvYou = taxAdvYou * (1 + ret) + taxAdvFlowYou;
-      taxAdvPartner = taxAdvPartner * (1 + ret) + taxAdvFlowPartner;
-
-      realSave = (takeHome - expenses + taxAdvFlowYou + taxAdvFlowPartner) / infl;
-      if (realSave < minSave) { minSave = realSave; minSaveAge = age; }
-    } else {
-      // retired: grow, then pay the year's bill from whatever is legally reachable —
-      // taxable first, then each tax-advantaged bucket once its owner is past 59.5.
-      taxable *= (1 + ret); taxAdvYou *= (1 + ret); taxAdvPartner *= (1 + ret);
-      let owed = retireExpense(age);
-      const draw = (bal) => { const x = Math.min(bal, owed); owed -= x; return bal - x; };
-      taxable = draw(taxable);
-      if (age >= unlockAge(accessYou, fireAge)) taxAdvYou = draw(taxAdvYou);
-      if (age >= unlockAge(accessPartner, fireAge)) taxAdvPartner = draw(taxAdvPartner);
-      if (owed > 1) { taxable -= owed; if (illiquidAge === null) illiquidAge = age; }
-    }
-
-    if (working && taxable < 0 && illiquidAge === null) illiquidAge = age;
+    const f0 = flows(age);
+    const realSave = working ? f0.save / infl : 0;
+    if (working && realSave < minSave) { minSave = realSave; minSaveAge = age; }
 
     const events = [];
     if (age === p.purchaseAge && p.buyHome) events.push("home");
@@ -274,25 +299,74 @@ export function simulate(p) {
 
     rows.push({
       age,
-      portfolio: Math.round(working ? startReal : (taxable + taxAdvYou + taxAdvPartner) / infl),
-      taxable: Math.round(working ? taxableReal : taxable / infl),
-      required: Math.round(reqReal),
-      bridge: Math.round(bridgeReal),
+      portfolio: Math.round(startReal),
+      taxable: Math.round(st.taxable / infl),
+      required: Math.round(needAt(age) / infl),
+      bridge: Math.round(bridgeAt(age, st.taxAdvYou, st.taxAdvPartner) / infl),
       coast: coastReal == null ? null : Math.round(coastReal),
       save: Math.round(realSave),
       drawdown: working && realSave < 0 ? Math.round(realSave) : 0,
       events,
     });
+
+    if (working) {
+      // Does the crossing fall inside this year? Solve for the exact instant rather than
+      // rounding up to the next birthday.
+      if (gapAt(age, st) >= 0) {
+        T = age;
+      } else if (gapAt(age + 1, work(st, age, 1)) >= 0) {
+        let lo = 0, hi = 1;                                  // bisection: gap is increasing in dt
+        for (let i = 0; i < 60; i++) {
+          const mid = (lo + hi) / 2;
+          if (gapAt(age + mid, work(st, age, mid)) >= 0) hi = mid; else lo = mid;
+        }
+        T = age + hi;
+      }
+
+      if (T !== null) {
+        const inflT = Math.pow(1 + p.inflation, T - p.currentAge);
+        const sT = T === age ? st : work(st, age, T - age);   // balances at the retirement instant
+        fireCrossValue = (sT.taxable + sT.taxAdvYou + sT.taxAdvPartner) / inflT;
+        fireReq = needAt(T) / inflT;
+        fireTaxable = sT.taxable / inflT;
+        fireBridge = bridgeAt(T, sT.taxAdvYou, sT.taxAdvPartner) / inflT;
+        if (T > age) {
+          rows.push({
+            age: T, portfolio: Math.round(fireCrossValue), required: Math.round(fireReq),
+            taxable: Math.round(fireTaxable), bridge: Math.round(fireBridge),
+            coast: T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
+            save: 0, drawdown: 0, events: [],
+          });
+        }
+        const r = spendSpan(sT, T, age + 1, T);               // retired for the rest of the year
+        st = r.st;
+        if (r.short && illiquidAge === null) illiquidAge = Math.floor(T);
+      } else {
+        st = work(st, age, 1);
+        if (st.taxable < 0 && illiquidAge === null) illiquidAge = age;
+      }
+    } else {
+      const r = spendSpan(st, age, age + 1, T);
+      st = r.st;
+      if (r.short && illiquidAge === null) illiquidAge = age;
+    }
   }
 
-  const end = rows[rows.length - 1].portfolio;
+  // terminal balance, AFTER the final year is spent — zero by construction when total wealth binds
+  const inflEnd = Math.pow(1 + p.inflation, END + 1 - p.currentAge);
+  const end = (st.taxable + st.taxAdvYou + st.taxAdvPartner) / inflEnd;
+  const fireLocked = fireCrossValue == null ? null : fireCrossValue - fireTaxable;
   const lockedShare = fireCrossValue > 0 ? fireLocked / fireCrossValue : 0;
   return {
-    naiveNumber, fireAge, fireCross, fireCrossValue, fireReq, payoffAge, mPI,
+    naiveNumber, fireAge: T == null ? null : Math.ceil(T), fireCross: T,
+    fireCrossValue, fireReq, payoffAge, mPI,
     minSave: Math.round(minSave), minSaveAge, end, rows, END,
     accessYou, accessPartner, partnerOffset, hasPartner,
     fireTaxable, fireLocked, fireBridge, lockedShare, illiquidAge,
-    coastTarget, coastCross, coastCrossValue, coastToday: coastNeed(p.currentAge),
+    coastTarget, coastCross, coastCrossValue, coastToday: coastAt(p.currentAge),
+    // the partner's own age at the moments that matter, so the UI never has to do the offset math
+    partnerAgeAtFire: hasPartner && T != null ? partnerAgeAt(T) : null,
+    partnerAgeAtEnd: hasPartner ? partnerAgeAt(END) : null,
   };
 }
 
@@ -325,7 +399,9 @@ export const DEFAULTS = {
   kid1BirthAge: 30, kid2BirthAge: 32, daycarePerKid: 26000, ongoingPerKid: 8000, collegePerKid: 200000,
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
   partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000,
-  partnerStart: 31, partnerEnd: 70,
+  // both in the PARTNER's own age: "earns from 26 until 100". They used to be given in your age,
+  // which silently threw away four years of a working partner's income.
+  partnerStart: 26, partnerEnd: 100,
   retirementSpendToday: 110000, swr: 0.035, endAge: 100, coastAge: 48,
   collegeSpread: true, use529: false, annual529: 0,
   enforceAccess: true, rothLadder: true, ladderYears: 5, accessAge: 59.5,
@@ -364,6 +440,40 @@ export default function FireModel() {
   const kidRows = sim.rows.filter((r) => r.events.includes("kid"));
   const kidsCount = [p.kid1BirthAge, p.kid2BirthAge].filter((b) => b > 0).length;
   const cap529 = kidsCount * 19000;
+
+  // --- what actually moves the needle -------------------------------------
+  // simulate() is pure and cheap, so instead of guessing at advice we re-run the whole model
+  // once per lever and report what each one is really worth, in years of retirement.
+  const levers = useMemo(() => {
+    if (sim.fireCross == null) return [];
+    const defs = [
+      { label: "Real return +1pt", assumption: true, over: { nominalReturn: p.nominalReturn + 0.01 } },
+      { label: "Inflation +1pt", assumption: true, over: { inflation: p.inflation + 0.01 } },
+      { label: "Retirement spend −$10k/yr", over: { retirementSpendToday: Math.max(0, p.retirementSpendToday - 10000) } },
+      { label: "Your take-home +$10k/yr", over: { annualTakeHome: p.annualTakeHome + 10000 } },
+      { label: "Living costs −$5k/yr", over: { nonHousingLiving: Math.max(0, p.nonHousingLiving - 5000) } },
+      ...(p.partnerAge > 0
+        ? [{ label: "Partner take-home +$10k/yr", over: { partnerIncome: p.partnerIncome + 10000 } }] : []),
+      ...(p.buyHome
+        ? [{ label: "Home price −$100k", over: { homePrice: Math.max(0, p.homePrice - 100000) } }] : []),
+      ...(kidsCount
+        ? [{ label: "College −$50k/kid", over: { collegePerKid: Math.max(0, p.collegePerKid - 50000) } }] : []),
+      { label: "Move $10k/yr from 401k → taxable",
+        over: { annualTaxAdv: Math.max(0, p.annualTaxAdv - 10000), annualTakeHome: p.annualTakeHome + 10000 } },
+    ];
+    return defs
+      .map((d) => {
+        const alt = simulate({ ...p, ...d.over });
+        return { ...d, delta: alt.fireCross == null ? null : alt.fireCross - sim.fireCross };
+      })
+      .sort((a, b) => Math.abs(b.delta ?? 0) - Math.abs(a.delta ?? 0));
+  }, [p, sim.fireCross]);
+
+  const maxLever = Math.max(...levers.map((l) => Math.abs(l.delta ?? 0)), 0.01);
+  const bestBehaviour = Math.max(...levers.filter((l) => !l.assumption).map((l) => Math.abs(l.delta ?? 0)), 0);
+  const topLever = levers[0];
+  // if the biggest mover is a market assumption rather than anything you decide, say so plainly
+  const assumptionRules = topLever?.assumption && Math.abs(topLever.delta) > bestBehaviour;
   const ticks = []; for (let a = 30; a <= sim.END; a += 10) ticks.push(a);
 
   const Stat = ({ label, value, accent }) => (
@@ -421,6 +531,15 @@ export default function FireModel() {
               ["Non-housing living / yr", "nonHousingLiving", { step: 1000 }],
               ["Current rent / yr", "rentAnnual", { step: 1000 }],
             ]],
+            ["Partner", [
+              ["Partner's age now (0 = single)", "partnerAge", {}],
+              ["Partner take-home / yr", "partnerIncome", { step: 5000 }],
+              ["Partner tax-advantaged / yr", "partnerTaxAdv", { step: 500 }],
+              ["Partner portfolio", "partnerPortfolio", { step: 10000 }],
+              ["…of which in 401k / IRA / HSA", "partnerPortfolioTaxAdv", { step: 10000 }],
+              ["Partner earns from their age", "partnerStart", {}],
+              ["…until their age", "partnerEnd", {}],
+            ]],
             ["Home", [
               ["Home price", "homePrice", { step: 25000 }],
               ["Purchase age", "purchaseAge", {}],
@@ -430,13 +549,6 @@ export default function FireModel() {
               ["Kid 2 — your age at birth", "kid2BirthAge", {}],
               ["Daycare / kid / yr (ages 0–5)", "daycarePerKid", { step: 1000 }],
               ["College / kid (today's $)", "collegePerKid", { step: 10000 }],
-            ]],
-            ["Partner (the dominant lever)", [
-              ["Partner's age now (0 = single)", "partnerAge", {}],
-              ["Partner take-home / yr", "partnerIncome", { step: 5000 }],
-              ["Partner tax-advantaged / yr", "partnerTaxAdv", { step: 500 }],
-              ["Partner portfolio", "partnerPortfolio", { step: 10000 }],
-              ["…of which in 401k / IRA / HSA", "partnerPortfolioTaxAdv", { step: 10000 }],
             ]],
             ["Retirement", [
               ["Retirement spend / yr (today's $)", "retirementSpendToday", { step: 5000 }],
@@ -450,12 +562,22 @@ export default function FireModel() {
                 {fields.map(([l, k, o]) => field(l, k, p[k], set, o))}
               </div>
               {group.startsWith("Partner") && p.partnerAge > 0 && (
-                <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.5 }}>
-                  {sim.partnerOffset > 0
-                    ? `${sim.partnerOffset}y younger — their 401k opens when you're ${sim.accessPartner.toFixed(1)}, and the money must last to your ${sim.END}.`
-                    : sim.partnerOffset < 0
-                      ? `${-sim.partnerOffset}y older — their 401k opens when you're only ${sim.accessPartner.toFixed(1)}, which shortens your bridge.`
-                      : "same age — both accounts open at 59.5."}
+                <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
+                  <b style={{ color: C.ink }}>Every field above is in your partner's own age.</b>{" "}
+                  {sim.partnerOffset === 0
+                    ? "They're the same age as you, so the two clocks agree."
+                    : `They're ${Math.abs(sim.partnerOffset)}y ${sim.partnerOffset > 0 ? "younger" : "older"} than you, so their clock runs ${Math.abs(sim.partnerOffset)}y ${sim.partnerOffset > 0 ? "behind" : "ahead"} of yours.`}
+                  <br />
+                  Their 401k opens at their {p.accessAge} — when you are{" "}
+                  <span style={{ color: C.brass }}>{sim.accessPartner.toFixed(1)}</span>.
+                  {sim.partnerAgeAtFire != null && (
+                    <> You retire together when they are{" "}
+                      <span style={{ color: C.brass }}>{sim.partnerAgeAtFire.toFixed(1)}</span>.</>
+                  )}
+                  {sim.partnerOffset > 0 && (
+                    <> The money must last until they reach {p.endAge} — your age{" "}
+                      <span style={{ color: C.brass }}>{sim.END}</span>.</>
+                  )}
                 </div>
               )}
             </div>
@@ -528,6 +650,11 @@ export default function FireModel() {
             <Stat label="Liquid (taxable) at that point" value={sim.fireTaxable != null ? fmtM(sim.fireTaxable) : "—"} accent={C.liquid} />
             <Stat label="Locked until 59.5" value={sim.lockedShare ? (sim.lockedShare * 100).toFixed(0) + "%" : "—"} accent={sim.lockedShare > 0.6 ? C.coral : C.ink} />
             <Stat label="Mortgage clear at" value={`age ${sim.payoffAge}`} />
+            <Stat
+              label={`Tightest saving year · age ${sim.minSaveAge ?? "—"}`}
+              value={sim.minSave === Infinity ? "—" : fmt(sim.minSave)}
+              accent={sim.minSave < 0 ? C.coral : C.ink}
+            />
           </div>
 
           {!sim.fireAge && (
@@ -537,19 +664,13 @@ export default function FireModel() {
             </div>
           )}
 
-          {delay != null && (
-            <div style={{ background: C.panel2, border: `1px solid ${delay > 0.05 ? C.coral : C.teal}55`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
-              {delay > 0.05 ? (
-                <>
-                  <b>The 59.5 rule costs you {delay.toFixed(1)} years.</b> Ignoring it, you'd have enough in total at{" "}
-                  <b>{simFree.fireCross.toFixed(1)}</b> — but only {fmtM(sim.fireTaxable)} of the pot would be taxable
-                  against a bridge of {fmtM(sim.fireBridge)}, so you keep working until <b>{sim.fireCross.toFixed(1)}</b>.
-                  {!p.rothLadder && " A Roth conversion ladder shortens the bridge to 5 years — try the toggle."}
-                </>
-              ) : (
-                <>Total wealth, not liquidity, is what binds here — the taxable bucket already covers the bridge at{" "}
-                <b>{sim.fireCross.toFixed(1)}</b>, so the 59.5 rule costs you nothing.</>
-              )}
+          {/* only worth a banner when the rule actually costs something; otherwise it's wallpaper */}
+          {delay != null && delay > 0.05 && (
+            <div style={{ background: C.panel2, border: `1px solid ${C.coral}55`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
+              <b>The 59.5 rule costs you {delay.toFixed(1)} years.</b> Ignoring it, you'd have enough in total at{" "}
+              <b>{simFree.fireCross.toFixed(1)}</b> — but only {fmtM(sim.fireTaxable)} of the pot would be taxable
+              against a bridge of {fmtM(sim.fireBridge)}, so you keep working until <b>{sim.fireCross.toFixed(1)}</b>.
+              {!p.rothLadder && " A Roth conversion ladder shortens the bridge to 5 years — try the toggle."}
             </div>
           )}
 
@@ -628,6 +749,52 @@ export default function FireModel() {
               })}
             </div>
           </div>
+
+          {/* WHAT MOVES THE NEEDLE — each row is a full re-run of the model, not a rule of thumb */}
+          {levers.length > 0 && (
+            <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18 }}>
+              <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 4 }}>
+                What moves the needle
+              </div>
+              <p style={{ margin: "0 0 14px", fontSize: 12, color: C.mute }}>
+                Years of retirement bought by changing one thing, everything else held fixed.
+                <span style={{ color: C.teal }}> Teal = retire earlier.</span>
+              </p>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {levers.map((l) => {
+                  const d = l.delta;
+                  const earlier = d != null && d < 0;
+                  const col = d == null ? C.mute : Math.abs(d) < 0.05 ? C.mute : earlier ? C.teal : C.coral;
+                  return (
+                    <div key={l.label} style={{ display: "grid", gridTemplateColumns: "1fr 90px 46px", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontSize: 12, color: l.assumption ? C.brass : C.ink }}>
+                        {l.label}{l.assumption && <span style={{ color: C.mute }}> · not your choice</span>}
+                      </span>
+                      <div style={{ height: 6, background: `${C.line}80`, borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{
+                          width: `${Math.min(100, (Math.abs(d ?? 0) / maxLever) * 100)}%`,
+                          height: "100%", background: col, borderRadius: 3,
+                        }} />
+                      </div>
+                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: col, textAlign: "right" }}>
+                        {d == null ? "—" : (d > 0 ? "+" : "") + d.toFixed(1) + "y"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {assumptionRules && (
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.line}`, fontSize: 12, color: C.ink, lineHeight: 1.6 }}>
+                  ⚠ <b>Your retirement date is dominated by an assumption you don't control.</b>{" "}
+                  “{topLever.label}” moves it <b>{Math.abs(topLever.delta).toFixed(1)} years</b> — more than any decision
+                  you can make, the best of which is worth {bestBehaviour.toFixed(1)}y. Treat the headline age as a
+                  midpoint, not a date: drag the return slider to see the range you're really planning inside.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
