@@ -85,6 +85,12 @@ export function simulate(p) {
   const partnerOffset = hasPartner ? p.currentAge - p.partnerAge : 0;  // >0 when partner is younger
   const partnerAgeAt = (age) => age - partnerOffset;                   // your age -> their age
   const yourAgeWhenPartnerIs = (pa) => pa + partnerOffset;             // …and back again
+  // The earning window has to be a real interval on the partner's own clock: it cannot start
+  // before they exist today, and it cannot end before it starts. Clamped here as well as in the
+  // UI — an inverted window would silently pay them nothing at all, which is exactly the kind of
+  // quiet income-discarding that cost 2.5 years when partnerStart was in the wrong age frame.
+  const earnFrom = Math.max(p.partnerStart, p.partnerAge);
+  const earnTo = Math.max(p.partnerEnd, earnFrom);
   // the money must survive the LAST survivor: if the partner is younger by d, they reach the
   // target age when you are endAge + d, so the horizon stretches by d.
   const END = p.endAge + Math.max(0, partnerOffset);
@@ -239,7 +245,7 @@ export function simulate(p) {
     const infl = Math.pow(1 + p.inflation, age - p.currentAge);
     // the working window is stated in the partner's own age, so translate before comparing
     const pAge = partnerAgeAt(age);
-    const partnerOn = hasPartner && pAge >= p.partnerStart && pAge <= p.partnerEnd;
+    const partnerOn = hasPartner && pAge >= earnFrom && pAge <= earnTo;
     const takeHome = p.annualTakeHome * infl + (partnerOn ? p.partnerIncome * infl : 0);
     const taxAdvYou = p.annualTaxAdv * infl;
     const taxAdvPartner = partnerOn ? p.partnerTaxAdv * infl : 0;
@@ -293,11 +299,16 @@ export function simulate(p) {
   };
 
   // --- three buckets, because "whose account is it" now changes the answer ---
+  // The tax-advantaged slice can never exceed the portfolio it is a slice OF. Clamping here (not
+  // just in the UI) keeps the buckets summing to the stated portfolio: without it, a tax-advantaged
+  // figure larger than the total would invent money — taxable floors at 0 while the locked bucket
+  // keeps the whole oversized number.
+  const lockedYou = Math.min(p.startPortfolioTaxAdv, p.startPortfolio);
+  const lockedPartner = Math.min(p.partnerPortfolioTaxAdv, p.partnerPortfolio);
   let st = {
-    taxable: Math.max(0, p.startPortfolio - p.startPortfolioTaxAdv)
-           + Math.max(0, p.partnerPortfolio - p.partnerPortfolioTaxAdv),
-    taxAdvYou: p.startPortfolioTaxAdv,
-    taxAdvPartner: p.partnerPortfolioTaxAdv,
+    taxable: (p.startPortfolio - lockedYou) + (p.partnerPortfolio - lockedPartner),
+    taxAdvYou: lockedYou,
+    taxAdvPartner: lockedPartner,
   };
 
   // You may retire only when BOTH hold: enough money in total, and enough of it reachable before
@@ -435,6 +446,7 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
       type="number"
       step={step}
       min={min}
+      max={Number.isFinite(max) ? max : undefined}   // let the spinner + native validity know the ceiling too
       value={draft ?? value}
       onFocus={(e) => e.target.select()}
       onChange={(e) => {
@@ -501,29 +513,43 @@ const field = (label, key, val, set, opts = {}) => (
     <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
       {label}
     </span>
-    <NumberInput value={val} step={opts.step || 1} onCommit={(v) => set(key, v)} />
+    <NumberInput
+      value={val}
+      step={opts.step || 1}
+      min={opts.min ?? 0}
+      max={opts.max ?? Infinity}
+      onCommit={(v) => set(key, v)}
+    />
   </label>
 );
 
+// inline caution, for when the inputs contradict each other
+const Warn = ({ children }) => (
+  <div style={{
+    marginTop: 8, padding: "7px 9px", borderRadius: 6, fontSize: 10, lineHeight: 1.6,
+    color: C.ink, background: `${C.coral}14`, border: `1px solid ${C.coral}66`,
+  }}>
+    ⚠ {children}
+  </div>
+);
+
 export const DEFAULTS = {
-  currentAge: 27, startPortfolio: 400000, startPortfolioTaxAdv: 0,
+  currentAge: 27, startPortfolio: 400000, startPortfolioTaxAdv: 200000,
   annualTakeHome: 144000, annualTaxAdv: 40000,
   nonHousingLiving: 36000, rentAnnual: 36000, inflation: 0.03, nominalReturn: 0.07,
   // add or drop as many as you like; each home carries its own loan and each kid its own clock
   homes: [{
-    price: 1500000, purchaseAge: 31, downPct: 0.20, rate: 0.065, term: 30,
+    price: 2000000, purchaseAge: 31, downPct: 0.20, rate: 0.065, term: 30,
     closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013,
   }],
   kids: [{ birthAge: 30 }, { birthAge: 32 }],
   daycarePerKid: 26000, ongoingPerKid: 8000, collegePerKid: 200000,
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
   partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000,
-  // both in the PARTNER's own age: "earns from 26 until 100". They used to be given in your age,
-  // which silently threw away four years of a working partner's income.
-  partnerStart: 26, partnerEnd: 100,
+  partnerStart: 26, partnerEnd: 60,
   // EXCLUDES housing — every home now prices its own carry, mortgage and closing costs, so
   // baking a paid-off house into this number would double-count it. (Was 110k incl. ~36k carry.)
-  retirementSpendToday: 74000, swr: 0.035, endAge: 100, coastAge: 48,
+  retirementSpendToday: 100000, swr: 0.035, endAge: 100, coastAge: 48,
   collegeSpread: true, use529: false, annual529: 0,
   enforceAccess: true, rothLadder: true, ladderYears: 5, accessAge: 59.5,
 };
@@ -678,7 +704,7 @@ export default function FireModel() {
             ["You", [
               ["Current age", "currentAge", {}],
               ["Current portfolio ← your real #", "startPortfolio", { step: 10000 }],
-              ["…of which in 401k / IRA / HSA", "startPortfolioTaxAdv", { step: 10000 }],
+              ["…of which in 401k / IRA / HSA", "startPortfolioTaxAdv", { step: 10000, max: p.startPortfolio }],
               ["Take-home / yr (after contrib.)", "annualTakeHome", { step: 1000 }],
               ["Tax-advantaged / yr (401k+HSA+IRA)", "annualTaxAdv", { step: 500 }],
               ["Non-housing living / yr", "nonHousingLiving", { step: 1000 }],
@@ -686,12 +712,12 @@ export default function FireModel() {
             ]],
             ["Partner", [
               ["Partner's age now (0 = single)", "partnerAge", {}],
+              ["Partner portfolio", "partnerPortfolio", { step: 10000 }],
+              ["…of which in 401k / IRA / HSA", "partnerPortfolioTaxAdv", { step: 10000, max: p.partnerPortfolio }],
               ["Partner take-home / yr", "partnerIncome", { step: 5000 }],
               ["Partner tax-advantaged / yr", "partnerTaxAdv", { step: 500 }],
-              ["Partner portfolio", "partnerPortfolio", { step: 10000 }],
-              ["…of which in 401k / IRA / HSA", "partnerPortfolioTaxAdv", { step: 10000 }],
-              ["Partner earns from their age", "partnerStart", {}],
-              ["…until their age", "partnerEnd", {}],
+              ["Partner earns from their age", "partnerStart", { min: p.partnerAge }],
+              ["…until their age", "partnerEnd", { min: p.partnerStart }],
             ]],
             ["Retirement", [
               ["Retirement spend / yr — excl. housing", "retirementSpendToday", { step: 5000 }],
@@ -704,6 +730,38 @@ export default function FireModel() {
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {fields.map(([l, k, o]) => field(l, k, p[k], set, o))}
               </div>
+
+              {/* the locked slice cannot exceed the pot it is a slice of — this fires if the
+                  portfolio is later lowered beneath a 401k figure that was already valid */}
+              {group === "You" && p.startPortfolioTaxAdv > p.startPortfolio && (
+                <Warn>
+                  Your 401k/IRA (<b>{fmt(p.startPortfolioTaxAdv)}</b>) is more than your whole portfolio
+                  (<b>{fmt(p.startPortfolio)}</b>). The model caps it at the portfolio, so all of it counts as
+                  locked and <b>nothing is taxable</b> — which will strand your bridge. Raise the portfolio or
+                  lower the 401k figure.
+                </Warn>
+              )}
+              {group === "Partner" && p.partnerAge > 0 && p.partnerPortfolioTaxAdv > p.partnerPortfolio && (
+                <Warn>
+                  Your partner's 401k/IRA (<b>{fmt(p.partnerPortfolioTaxAdv)}</b>) is more than their whole
+                  portfolio (<b>{fmt(p.partnerPortfolio)}</b>). The model caps it at the portfolio — all locked,
+                  none taxable.
+                </Warn>
+              )}
+              {group === "Partner" && p.partnerAge > 0 && p.partnerStart < p.partnerAge && (
+                <Warn>
+                  Your partner can't start earning at <b>{p.partnerStart}</b> — they're already{" "}
+                  <b>{p.partnerAge}</b>. The model starts their income now, at <b>{p.partnerAge}</b>.
+                </Warn>
+              )}
+              {group === "Partner" && p.partnerAge > 0 && p.partnerEnd < p.partnerStart && (
+                <Warn>
+                  Their earning window ends (<b>{p.partnerEnd}</b>) before it starts (<b>{p.partnerStart}</b>).
+                  Left alone that would pay them <b>nothing at all</b>; the model instead holds the end at{" "}
+                  <b>{Math.max(p.partnerStart, p.partnerAge)}</b>. Raise the end age.
+                </Warn>
+              )}
+
               {group.startsWith("Partner") && p.partnerAge > 0 && (
                 <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
                   <b style={{ color: C.ink }}>Every field above is in your partner's own age.</b>{" "}

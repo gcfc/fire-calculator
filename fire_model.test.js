@@ -365,6 +365,65 @@ describe("core invariants (must hold for every scenario)", () => {
   }
 });
 
+describe("the tax-advantaged slice can never exceed the portfolio it slices", () => {
+  // Without the clamp, taxable floors at 0 while the locked bucket keeps the whole oversized
+  // number — so an over-large 401k figure would INVENT money.
+  const startingTotal = (s) => s.rows[0].portfolio;   // age-0 row, already in today's $
+
+  it("does not invent money when the 401k figure exceeds your portfolio", () => {
+    const sane = run({ startPortfolio: 400000, startPortfolioTaxAdv: 400000 });
+    const silly = run({ startPortfolio: 400000, startPortfolioTaxAdv: 900000 });
+    expect(startingTotal(silly)).toBe(startingTotal(sane));
+    expect(startingTotal(silly)).toBe(400000 + DEFAULTS.partnerPortfolio);
+  });
+
+  it("does the same for the partner", () => {
+    const silly = run({ partnerPortfolio: 150000, partnerPortfolioTaxAdv: 900000 });
+    expect(startingTotal(silly)).toBe(DEFAULTS.startPortfolio + 150000);
+  });
+
+  it("treats an over-large figure as 'all locked, nothing taxable'", () => {
+    const s = run({
+      startPortfolio: 400000, startPortfolioTaxAdv: 900000,
+      partnerPortfolio: 150000, partnerPortfolioTaxAdv: 900000,
+    });
+    expect(s.rows[0].taxable).toBe(0);
+  });
+
+  it("never lets an over-large figure retire you EARLIER than the honest cap", () => {
+    const capped = run({ startPortfolio: 400000, startPortfolioTaxAdv: 400000 });
+    const silly = run({ startPortfolio: 400000, startPortfolioTaxAdv: 900000 });
+    expect(silly.fireCross).toBeCloseTo(capped.fireCross, 9);
+  });
+});
+
+describe("the partner's earning window must be a real interval", () => {
+  // An inverted or backdated window would silently pay the partner nothing — the same class of
+  // quiet income-discarding that the partnerStart age-frame bug caused.
+  it("starts income now when the window starts before the partner exists today", () => {
+    // partner is 26; "earns from 20" cannot mean anything but "already earning"
+    expect(run({ partnerStart: 20 }).fireCross).toBeCloseTo(run({ partnerStart: 26 }).fireCross, 9);
+  });
+
+  it("never pays the partner nothing just because the window is inverted", () => {
+    const inverted = run({ partnerStart: 40, partnerEnd: 30 });     // ends before it starts
+    const noPartnerIncome = run({ partnerIncome: 0, partnerTaxAdv: 0 });
+    // an empty window would be indistinguishable from having no partner income at all
+    expect(inverted.fireCross).toBeLessThan(noPartnerIncome.fireCross);
+  });
+
+  it("holds the end of an inverted window at its start", () => {
+    // earning exactly one year from 40 is what the clamp produces
+    expect(run({ partnerStart: 40, partnerEnd: 30 }).fireCross)
+      .toBeCloseTo(run({ partnerStart: 40, partnerEnd: 40 }).fireCross, 9);
+  });
+
+  it("still lets a valid window bind normally", () => {
+    expect(run({ partnerStart: 26, partnerEnd: 35 }).fireCross)
+      .toBeGreaterThan(run({ partnerStart: 26, partnerEnd: 60 }).fireCross);
+  });
+});
+
 describe("purity", () => {
   it("does not mutate the params it is given", () => {
     const p = { ...DEFAULTS, homes: [HOME()], kids: [{ birthAge: 30 }] };
