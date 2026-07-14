@@ -1,0 +1,22 @@
+{
+  "name": "fire-model",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive FIRE trajectory model — portfolio vs. the capital needed to last to 100.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.15.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.21",
+    "vite-plugin-singlefile": "^2.0.3"
+  }
+}
