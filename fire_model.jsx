@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ReferenceDot, ResponsiveContainer,
@@ -10,6 +10,22 @@ const C = {
   brass: "#C9A24B", teal: "#5FB0A6", coral: "#D9695A", mute: "#7A8A8E",
   line: "#26424B", liquid: "#9AD5CB", coast: "#B48EAD",
 };
+
+// track a CSS media query so inline-styled layout can collapse on small screens
+function useMediaQuery(query) {
+  const [matches, setMatches] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(query).matches
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const m = window.matchMedia(query);
+    const on = () => setMatches(m.matches);
+    on();
+    m.addEventListener("change", on);
+    return () => m.removeEventListener("change", on);
+  }, [query]);
+  return matches;
+}
 
 const fmt = (n) =>
   n == null ? "—" : "$" + Math.round(n).toLocaleString();
@@ -571,6 +587,7 @@ const SERIES = [
 ];
 
 export default function FireModel() {
+  const isMobile = useMediaQuery("(max-width: 720px)");
   const [p, setP] = useState(DEFAULTS);
   const [show, setShow] = useState(
     Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]))
@@ -678,7 +695,7 @@ export default function FireModel() {
   );
 
   return (
-    <div style={{ background: C.bg, color: C.ink, fontFamily: "'Space Grotesk', system-ui, sans-serif", padding: 24, borderRadius: 12 }}>
+    <div style={{ background: C.bg, color: C.ink, fontFamily: "'Space Grotesk', system-ui, sans-serif", padding: isMobile ? 12 : 24, borderRadius: 12 }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');`}</style>
 
       <div style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 16, marginBottom: 20 }}>
@@ -697,7 +714,7 @@ export default function FireModel() {
         </p>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(240px, 300px) 1fr", gap: 24, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(240px, 300px) 1fr", gap: isMobile ? 18 : 24, alignItems: "start" }}>
         {/* INPUTS */}
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           {[
