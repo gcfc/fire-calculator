@@ -10,6 +10,11 @@ const HOME = (o = {}) => ({
   price: 1500000, purchaseAge: 31, downPct: 0.20, rate: 0.065, term: 30,
   closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013, ...o,
 });
+// no partner at all — note that on the default inputs a lone earner never affords the house,
+// so tests that need a lone earner to actually RETIRE must also drop or shrink the home
+const SINGLE = {
+  partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0,
+};
 
 // sweep an input finely and hand back the per-step jumps in whatever you measure
 const sweep = (key, from, to, step, pick) => {
@@ -80,8 +85,10 @@ describe("age frames — partner inputs are in the PARTNER's own age", () => {
   });
 
   it("is invariant to shifting the whole household forward in time", () => {
-    // same life, started 5 years later: years-to-retirement must be identical
-    const a = run({ partnerStart: 26, partnerEnd: 65 });
+    // same life, started 5 years later: years-to-retirement must be identical.
+    // both sides pin the home explicitly — otherwise `a` would take its home from DEFAULTS and
+    // `b` from HOME(), and the two worlds would not be the same life at all
+    const a = run({ homes: [HOME()], partnerStart: 26, partnerEnd: 65 });
     const b = run({
       currentAge: 32, partnerAge: 31, partnerStart: 26, partnerEnd: 65,
       kids: [{ birthAge: 35 }, { birthAge: 37 }],
@@ -142,10 +149,7 @@ describe("the 59.5 rule — money you cannot legally touch", () => {
   it("needs no bridge at all when you retire after 59.5", () => {
     // single earner, fat budget -> retirement lands past the statutory age, so there is nothing
     // to bridge: every dollar is already reachable on the day you stop working
-    const late = run({
-      retirementSpendToday: 150000,
-      partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0,
-    });
+    const late = run({ ...SINGLE, homes: [], retirementSpendToday: 300000 });
     expect(late.fireCross).toBeGreaterThan(59.5);
     expect(late.fireBridge).toBe(0);
   });
@@ -323,7 +327,10 @@ describe("kids — any number, each on their own clock", () => {
 describe("core invariants (must hold for every scenario)", () => {
   const scenarios = {
     default: {},
-    single: { partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0 },
+    // `retires: false` is an assertion in its own right — on the default inputs a lone earner
+    // simply cannot carry the house, and the model must say so rather than invent an answer
+    "single (never affords the house)": { ...SINGLE, retires: false },
+    "single, renting": { ...SINGLE, homes: [] },
     "no kids, no home": { kids: [], homes: [] },
     "three homes": { homes: [HOME(), HOME({ price: 700000, purchaseAge: 40 }), HOME({ price: 500000, purchaseAge: 45 })] },
     "hard gate": { rothLadder: false, startPortfolioTaxAdv: 250000 },
@@ -334,8 +341,9 @@ describe("core invariants (must hold for every scenario)", () => {
     "four kids": { kids: [30, 32, 34, 36].map((birthAge) => ({ birthAge })) },
   };
 
-  for (const [name, over] of Object.entries(scenarios)) {
+  for (const [name, spec] of Object.entries(scenarios)) {
     describe(name, () => {
+      const { retires = true, ...over } = spec;
       const s = run(over);
 
       it("produces no NaN anywhere in the rows", () => {
@@ -354,11 +362,16 @@ describe("core invariants (must hold for every scenario)", () => {
         expect(s.end).toBeGreaterThanOrEqual(-1);
       });
 
-      if (over.retirementSpendToday !== 160000) {
+      if (retires) {
         it("clears BOTH bars at retirement", () => {
           expect(s.fireCross).not.toBeNull();
           expect(s.fireCrossValue).toBeGreaterThanOrEqual(s.fireReq - 1);
           expect(s.fireTaxable).toBeGreaterThanOrEqual(s.fireBridge - 1);
+        });
+      } else {
+        it("reports 'never' rather than inventing a retirement", () => {
+          expect(s.fireCross).toBeNull();
+          expect(s.fireCrossValue).toBeNull();
         });
       }
     });
@@ -406,16 +419,17 @@ describe("the partner's earning window must be a real interval", () => {
   });
 
   it("never pays the partner nothing just because the window is inverted", () => {
-    const inverted = run({ partnerStart: 40, partnerEnd: 30 });     // ends before it starts
-    const noPartnerIncome = run({ partnerIncome: 0, partnerTaxAdv: 0 });
+    // drop the home so a thin-income world is still solvable and the comparison is meaningful
+    const inverted = run({ homes: [], partnerStart: 40, partnerEnd: 30 });   // ends before it starts
+    const noPartnerIncome = run({ homes: [], partnerIncome: 0, partnerTaxAdv: 0 });
     // an empty window would be indistinguishable from having no partner income at all
     expect(inverted.fireCross).toBeLessThan(noPartnerIncome.fireCross);
   });
 
   it("holds the end of an inverted window at its start", () => {
     // earning exactly one year from 40 is what the clamp produces
-    expect(run({ partnerStart: 40, partnerEnd: 30 }).fireCross)
-      .toBeCloseTo(run({ partnerStart: 40, partnerEnd: 40 }).fireCross, 9);
+    expect(run({ homes: [], partnerStart: 40, partnerEnd: 30 }).fireCross)
+      .toBeCloseTo(run({ homes: [], partnerStart: 40, partnerEnd: 40 }).fireCross, 9);
   });
 
   it("still lets a valid window bind normally", () => {
