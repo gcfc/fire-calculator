@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import {
-  ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ReferenceDot, ReferenceArea, ResponsiveContainer,
 } from "recharts";
 
@@ -8,7 +8,7 @@ import {
 const C = {
   bg: "#0E1A1F", panel: "#14252B", panel2: "#1B303733", ink: "#EAE6DD",
   brass: "#C9A24B", teal: "#5FB0A6", coral: "#D9695A", mute: "#7A8A8E",
-  line: "#26424B", liquid: "#9AD5CB", coast: "#B48EAD",
+  line: "#26424B", liquid: "#9AD5CB", coast: "#B48EAD", locked: "#7FA8D9",
 };
 
 // track a CSS media query so inline-styled layout can collapse on small screens
@@ -402,11 +402,11 @@ export function simulate(p) {
       age,
       portfolio: Math.round(startReal),
       taxable: Math.round(st.taxable / infl),
+      retirement: Math.round((st.taxAdvYou + st.taxAdvPartner) / infl),   // 401k/IRA/HSA buckets
       required: Math.round(needAt(age) / infl),
       bridge: Math.round(bridgeAt(age, st.taxAdvYou, st.taxAdvPartner) / infl),
       coast: coastReal == null ? null : Math.round(coastReal),
       save: Math.round(realSave),
-      drawdown: working && realSave < 0 ? Math.round(realSave) : 0,
       events,
     });
 
@@ -434,9 +434,10 @@ export function simulate(p) {
         if (T > age) {
           rows.push({
             age: T, portfolio: Math.round(fireCrossValue), required: Math.round(fireReq),
-            taxable: Math.round(fireTaxable), bridge: Math.round(fireBridge),
+            taxable: Math.round(fireTaxable), retirement: Math.round((sT.taxAdvYou + sT.taxAdvPartner) / inflT),
+            bridge: Math.round(fireBridge),
             coast: T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
-            save: 0, drawdown: 0, events: [],
+            save: 0, events: [],
           });
         }
         const r = spendSpan(sT, T, age + 1, T);               // retired for the rest of the year
@@ -606,8 +607,8 @@ const SERIES = [
   { key: "retire", label: "retirement point", color: C.brass, mark: "◆", on: true },
   { key: "coast", label: "coast FIRE bar", color: C.coast, dash: true, on: true },
   { key: "taxable", label: "taxable (spendable before 59.5)", color: C.liquid },
+  { key: "retirement", label: "retirement accounts (401k/IRA)", color: C.locked, on: true },
   { key: "bridge", label: "needed in taxable (the bridge)", color: C.coral, dash: true },
-  { key: "drawdown", label: "drawdown years", color: C.coral, mark: "▮" },
   { key: "underwater", label: "taxable underwater (< $0)", color: C.coral, mark: "▨", on: true },
   { key: "access", label: "the 59.5 line", color: C.mute, dash: true, on: true },
   { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
@@ -1077,12 +1078,12 @@ export default function FireModel() {
                   labelStyle={{ color: C.brass }}
                   formatter={(v, name) => [fmt(v), {
                     portfolio: "Portfolio (total)", taxable: "Taxable (spendable now)",
+                    retirement: "Retirement accounts (401k/IRA)",
                     required: "Needed in total", bridge: "Needed in taxable",
                     coast: `Coast bar (stop saving, retire at ${sim.coastTarget})`,
                   }[name] || name]}
                   labelFormatter={(a) => "Age " + a}
                 />
-                {show.drawdown ? <Bar dataKey="drawdown" fill={C.coral} opacity={0.8} barSize={10} /> : null}
                 {show.access && p.enforceAccess ? (
                   <ReferenceLine x={sim.accessYou} stroke={C.mute} strokeDasharray="2 4"
                     label={{ value: "59.5", fill: C.mute, fontSize: 10, position: "top" }} />
@@ -1090,6 +1091,7 @@ export default function FireModel() {
                 {show.coast ? <Line type="monotone" dataKey="coast" stroke={C.coast} strokeWidth={1.5} strokeDasharray="6 3" dot={false} connectNulls={false} /> : null}
                 {show.required ? <Line type="monotone" dataKey="required" stroke={C.brass} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
                 {show.bridge ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
+                {show.retirement ? <Line type="monotone" dataKey="retirement" stroke={C.locked} strokeWidth={1.5} dot={false} /> : null}
                 {show.taxable ? <Line type="monotone" dataKey="taxable" stroke={C.liquid} strokeWidth={1.5} dot={false} /> : null}
                 {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
                 {show.home ? homeRows.map((h) => <ReferenceDot key={h.age} x={h.age} y={h.portfolio} r={5} fill={C.brass} stroke={C.bg} />) : null}
