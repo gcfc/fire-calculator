@@ -178,6 +178,28 @@ describe("the 59.5 rule — money you cannot legally touch", () => {
     expect(simulate({ ...DEFAULTS, ...spend, rothLadder: true }).fireCross)
       .toBeCloseTo(simulate({ ...DEFAULTS, ...spend, rothLadder: false }).fireCross, 6);
   });
+
+  it("lets an unlocked 401k cover a cash shortfall while still working (past 59.5)", () => {
+    // a lone earner carrying a big house runs the taxable account underwater for years. Before this
+    // rule the shortfall compounded forever and retirement never came; now, once the 401k unlocks at
+    // 59.5, the shortfall is paid from it — so retirement lands past the statutory age, pot to zero.
+    const s = run({ ...SINGLE });
+    expect(s.fireCross).toBeGreaterThan(59.5);
+    expect(s.fireCrossValue).toBeGreaterThanOrEqual(s.fireReq - 1);   // clears the total bar
+    expect(s.end).toBeLessThanOrEqual(1);                             // drawn down, no phantom growth
+    // the taxable account is no longer stranded underwater once past the unlock age
+    const afterUnlock = s.rows.filter((r) => r.age >= Math.ceil(DEFAULTS.accessAge));
+    expect(afterUnlock.every((r) => r.taxable >= -1)).toBe(true);
+  });
+
+  it("still reports 'never' when total wealth truly never covers the need", () => {
+    // spending so far beyond income that net worth never reaches the requirement at any age — the
+    // unlock sweep cannot rescue a plan that is simply underfunded, only one that is merely illiquid
+    const s = run({ ...SINGLE, homes: [], annualTakeHome: 60000, annualTaxAdv: 0,
+                    retirementSpendToday: 250000, startPortfolio: 50000, startPortfolioTaxAdv: 0 });
+    expect(s.fireCross).toBeNull();
+    expect(s.rows.some((r) => r.portfolio >= r.required)).toBe(false);
+  });
 });
 
 describe("coast FIRE", () => {
@@ -339,9 +361,9 @@ describe("kids — any number, each on their own clock", () => {
 describe("core invariants (must hold for every scenario)", () => {
   const scenarios = {
     default: {},
-    // `retires: false` is an assertion in its own right — on the default inputs a lone earner
-    // simply cannot carry the house, and the model must say so rather than invent an answer
-    "single (never affords the house)": { ...SINGLE, retires: false },
+    // a lone earner carrying the house runs the cash account underwater for years, but once the
+    // 401k unlocks at 59.5 it covers the shortfall — so retirement lands late rather than never
+    "single earner carrying the house": { ...SINGLE },
     "single, renting": { ...SINGLE, homes: [] },
     "no kids, no home": { kids: [], homes: [] },
     "three homes": { homes: [HOME(), HOME({ price: 700000, purchaseAge: 40 }), HOME({ price: 500000, purchaseAge: 45 })] },

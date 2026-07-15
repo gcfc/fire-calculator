@@ -314,6 +314,29 @@ export function simulate(p) {
     return { st: s, short };
   };
 
+  // From 59.5 on the retirement accounts are legally spendable, so a cash shortfall — a negative
+  // TAXABLE balance — is covered out of whichever bucket has already unlocked, whether you have
+  // retired or are still working. Net worth is unchanged; the dollars just move to the account the
+  // bills are actually paid from, instead of the shortfall compounding forever as taxable "debt".
+  // While still working the statutory 59.5 is the only key that turns; the Roth-ladder shortcut only
+  // exists once you have retired and started converting, which spend()/spendSpan() already handle.
+  const settle = (st, t) => {
+    const openYou = !p.enforceAccess || t >= accessYou - 1e-9;
+    const openPartner = !p.enforceAccess || t >= accessPartner - 1e-9;
+    let { taxable, taxAdvYou, taxAdvPartner } = st;
+    const pull = (bal, open) => {
+      if (!open || taxable >= 0 || bal <= 0) return bal;
+      const move = Math.min(bal, -taxable);       // only enough to bring the cash account back to $0
+      taxable += move;
+      return bal - move;
+    };
+    taxAdvYou = pull(taxAdvYou, openYou);
+    taxAdvPartner = pull(taxAdvPartner, openPartner);
+    return { taxable, taxAdvYou, taxAdvPartner };
+  };
+  // advance a working stretch, then sweep any now-reachable account against a cash shortfall
+  const step = (st, age, dt) => settle(work(st, age, dt), age + dt);
+
   // --- three buckets, because "whose account is it" now changes the answer ---
   // The tax-advantaged slice can never exceed the portfolio it is a slice OF. Clamping here (not
   // just in the UI) keeps the buckets summing to the stated portfolio: without it, a tax-advantaged
@@ -392,18 +415,18 @@ export function simulate(p) {
       // rounding up to the next birthday.
       if (gapAt(age, st) >= 0) {
         T = age;
-      } else if (gapAt(age + 1, work(st, age, 1)) >= 0) {
+      } else if (gapAt(age + 1, step(st, age, 1)) >= 0) {
         let lo = 0, hi = 1;                                  // bisection: gap is increasing in dt
         for (let i = 0; i < 60; i++) {
           const mid = (lo + hi) / 2;
-          if (gapAt(age + mid, work(st, age, mid)) >= 0) hi = mid; else lo = mid;
+          if (gapAt(age + mid, step(st, age, mid)) >= 0) hi = mid; else lo = mid;
         }
         T = age + hi;
       }
 
       if (T !== null) {
         const inflT = Math.pow(1 + p.inflation, T - p.currentAge);
-        const sT = T === age ? st : work(st, age, T - age);   // balances at the retirement instant
+        const sT = T === age ? st : step(st, age, T - age);   // balances at the retirement instant
         fireCrossValue = (sT.taxable + sT.taxAdvYou + sT.taxAdvPartner) / inflT;
         fireReq = needAt(T) / inflT;
         fireTaxable = sT.taxable / inflT;
@@ -420,7 +443,7 @@ export function simulate(p) {
         st = r.st;
         if (r.short && illiquidAge === null) illiquidAge = Math.floor(T);
       } else {
-        st = work(st, age, 1);
+        st = step(st, age, 1);
         if (st.taxable < 0 && illiquidAge === null) illiquidAge = age;
       }
     } else {
