@@ -3,6 +3,7 @@ import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ReferenceDot, ReferenceArea, ResponsiveContainer,
 } from "recharts";
+import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from "lz-string";
 
 // ---- palette (ledger / instrument) ----
 const C = {
@@ -623,15 +624,8 @@ const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]))
 //   plot — ONLY the already-computed chart data, so the raw inputs never leave the sharer's browser
 const SHARE_VERSION = 1;
 
-// UTF-8-safe base64url, dependency-free
-const b64urlEncode = (s) =>
-  btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const b64urlDecode = (s) => {
-  const pad = s.length % 4 ? "=".repeat(4 - (s.length % 4)) : "";
-  return decodeURIComponent(escape(atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad)));
-};
-
-export const encodeShare = (obj) => b64urlEncode(JSON.stringify(obj));
+// lz-string's URL-safe codec keeps links short (it compresses the JSON) and needs no base64 step
+export const encodeShare = (obj) => compressToEncodedURIComponent(JSON.stringify(obj));
 // accepts a bare token, a "#s=…"/"#…" hash, or a whole URL; returns the payload or null
 export const decodeShare = (raw) => {
   if (!raw) return null;
@@ -640,7 +634,9 @@ export const decodeShare = (raw) => {
     if (token.includes("#")) token = token.slice(token.indexOf("#") + 1);
     if (token.startsWith("s=")) token = token.slice(2);
     if (!token) return null;
-    const obj = JSON.parse(b64urlDecode(token));
+    const json = decompressFromEncodedURIComponent(token);
+    if (!json) return null;
+    const obj = JSON.parse(json);
     if (!obj || obj.v !== SHARE_VERSION) return null;
     if (obj.mode !== "full" && obj.mode !== "plot") return null;
     return obj;
@@ -708,6 +704,18 @@ export const sharePayload = (kind, { p, show, sim }) =>
 // ---- the trajectory chart, driven entirely by props so it renders from a live sim OR a snapshot ----
 function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess,
   coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
+  // a series earns a legend entry only when it actually appears on this chart — no point offering to
+  // toggle "child born" with no kids, "the 59.5 line" with the gate off, or "retirement point" if you
+  // never retire. The always-present curves stay; the conditional marks/lines come and go with the data.
+  const applies = {
+    portfolio: true, required: true, taxable: true, retirement: true, coast: true,
+    retire: fireCross != null,
+    bridge: !!enforceAccess,
+    access: !!enforceAccess,
+    underwater: underwaterSpans.length > 0,
+    home: homeRows.length > 0,
+    kids: kidRows.length > 0,
+  };
   return (
     <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: "18px 14px 8px" }}>
       <ResponsiveContainer width="100%" height={340}>
@@ -742,7 +750,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
           ) : null}
           {show.coast ? <Line type="monotone" dataKey="coast" stroke={C.coast} strokeWidth={1.5} strokeDasharray="6 3" dot={false} connectNulls={false} /> : null}
           {show.required ? <Line type="monotone" dataKey="required" stroke={C.brass} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
-          {show.bridge ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
+          {show.bridge && enforceAccess ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
           {show.retirement ? <Line type="monotone" dataKey="retirement" stroke={C.locked} strokeWidth={1.5} dot={false} /> : null}
           {show.taxable ? <Line type="monotone" dataKey="taxable" stroke={C.liquid} strokeWidth={1.5} dot={false} /> : null}
           {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
@@ -752,9 +760,9 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
           {show.retire && fireCross ? <ReferenceDot x={fireCross} y={fireCrossValue} r={7} fill={C.brass} stroke={C.ink} strokeWidth={2} /> : null}
         </ComposedChart>
       </ResponsiveContainer>
-      {/* the legend IS the control: click a series to show or hide it */}
+      {/* the legend IS the control: click a series to show or hide it (only series that apply appear) */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "6px 6px 12px" }}>
-        {SERIES.map((s) => {
+        {SERIES.filter((s) => applies[s.key]).map((s) => {
           const on = show[s.key];
           return (
             <button
