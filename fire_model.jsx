@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from "react";
 import {
   ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ReferenceLine, ReferenceDot, ResponsiveContainer,
+  ReferenceLine, ReferenceDot, ReferenceArea, ResponsiveContainer,
 } from "recharts";
 
 // ---- palette (ledger / instrument) ----
@@ -320,9 +320,13 @@ export function simulate(p) {
   // figure larger than the total would invent money — taxable floors at 0 while the locked bucket
   // keeps the whole oversized number.
   const lockedYou = Math.min(p.startPortfolioTaxAdv, p.startPortfolio);
-  const lockedPartner = Math.min(p.partnerPortfolioTaxAdv, p.partnerPortfolio);
+  // No partner ⇒ no partner assets. Their portfolio is ignored entirely, the same way their income
+  // and their 59.5 unlock already are — otherwise a single filer keeps a phantom account that was
+  // only ever meant to belong to someone who isn't in the plan.
+  const partnerPortfolio = hasPartner ? p.partnerPortfolio : 0;
+  const lockedPartner = hasPartner ? Math.min(p.partnerPortfolioTaxAdv, p.partnerPortfolio) : 0;
   let st = {
-    taxable: (p.startPortfolio - lockedYou) + (p.partnerPortfolio - lockedPartner),
+    taxable: (p.startPortfolio - lockedYou) + (partnerPortfolio - lockedPartner),
     taxAdvYou: lockedYou,
     taxAdvPartner: lockedPartner,
   };
@@ -581,6 +585,7 @@ const SERIES = [
   { key: "taxable", label: "taxable (spendable before 59.5)", color: C.liquid },
   { key: "bridge", label: "needed in taxable (the bridge)", color: C.coral, dash: true },
   { key: "drawdown", label: "drawdown years", color: C.coral, mark: "▮" },
+  { key: "underwater", label: "taxable underwater (< $0)", color: C.coral, mark: "▨", on: true },
   { key: "access", label: "the 59.5 line", color: C.mute, dash: true, on: true },
   { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
   { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
@@ -630,6 +635,28 @@ export default function FireModel() {
 
   const homeRows = sim.rows.filter((r) => r.events.includes("home"));
   const kidRows = sim.rows.filter((r) => r.events.includes("kid"));
+
+  // contiguous age windows where the taxable (spendable) account is underwater — bills are being
+  // met with debt / an early-withdrawal penalty, not real cash. Drives the shaded band on the chart.
+  const underwaterSpans = useMemo(() => {
+    const spans = [];
+    let start = null;
+    for (const r of sim.rows) {
+      if (r.taxable < 0 && start == null) start = r.age;
+      else if (r.taxable >= 0 && start != null) { spans.push([start, r.age]); start = null; }
+    }
+    if (start != null) spans.push([start, sim.END]);
+    return spans;
+  }, [sim]);
+  const neverRetire = sim.fireCross == null;
+  // WHY you're stuck — three genuinely different failures, and the fix differs for each:
+  //  • bridge     — enough in total AND enough liquid; only the 59.5 wall blocks you (gate-off retires)
+  //  • insolvent  — total wealth does reach the requirement, but spendable cash is underwater, so you'd
+  //                 be retiring on debt (gate-off still can't retire because taxable never clears $0)
+  //  • tooPoor    — total wealth never reaches the requirement at any age
+  const totalEverEnough = sim.rows.some((r) => r.portfolio >= r.required);
+  const blockedByBridge = neverRetire && simFree.fireCross != null;
+  const blockedByDebt = neverRetire && !blockedByBridge && totalEverEnough && underwaterSpans.length > 0;
   const kidsCount = p.kids.length;
   const cap529 = kidsCount * 19000;
 
@@ -930,8 +957,8 @@ export default function FireModel() {
         {/* OUTPUT */}
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
-            <Stat label={`FIRE number · lasts to ${sim.END}`} value={sim.fireCrossValue ? fmtM(sim.fireCrossValue) : "—"} accent={C.brass} />
-            <Stat label="Retire at age" value={sim.fireCross ? sim.fireCross.toFixed(1) : ">" + sim.END} accent={sim.fireCross && sim.fireCross <= 47 ? C.teal : C.ink} />
+            <Stat label={`FIRE number · lasts to ${sim.END}`} value={sim.fireCrossValue ? fmtM(sim.fireCrossValue) : "—"} accent={neverRetire ? C.coral : C.brass} />
+            <Stat label="Retire at age" value={sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink} />
             <Stat label="Years from now" value={sim.fireCross ? (sim.fireCross - p.currentAge).toFixed(1) : "—"} />
             <Stat label={`Coast bar today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
             <Stat label="Coast reached at" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast} />
@@ -948,10 +975,34 @@ export default function FireModel() {
             />
           </div>
 
-          {!sim.fireAge && (
-            <div style={{ background: C.panel2, border: `1px solid ${C.coral}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
-              ⚠ On these inputs you never clear both bars. Lower the retirement budget, add partner income, trim the
-              home price — or shift savings from the 401k into a taxable account so the bridge can be funded.
+          {neverRetire && (
+            <div style={{ background: `${C.coral}1A`, border: `2px solid ${C.coral}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, alignItems: "flex-start" }}>
+              <span style={{ fontSize: 22, lineHeight: 1.1 }} aria-hidden>🚫</span>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: C.coral, marginBottom: 4, letterSpacing: ".01em" }}>
+                  You never reach retirement on these inputs
+                </div>
+                <div style={{ fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
+                  {blockedByBridge ? (
+                    <>Your <b>total</b> wealth would be enough by age <b>{simFree.fireCross.toFixed(1)}</b>, but too much of
+                      it is locked until 59.5 — the <b>taxable “bridge” never gets funded</b>, so the pot just compounds
+                      untouched instead of ever supporting you. Shift savings from the 401k into a taxable account, turn on
+                      the <b>Roth conversion ladder</b>, or switch off <b>“Enforce the 59.5 rule”</b>.</>
+                  ) : blockedByDebt ? (
+                    <>Your <b>total</b> wealth is more than enough, but your <b>spendable (taxable) cash is underwater</b> —
+                      you’d be retiring on debt, so the model won’t let you stop. The surplus is trapped in retirement
+                      accounts while your cash account stays negative. Move savings from the 401k into a taxable account,
+                      or lower the years of heavy spending (home, kids, college) that drain it.</>
+                  ) : (
+                    <>Spending outruns saving across the whole horizon — <b>total wealth never covers the requirement</b>.
+                      Lower the retirement budget, add income, or trim the home price.</>
+                  )}
+                  {underwaterSpans.length > 0 && (
+                    <> Your spendable (taxable) cash goes <b style={{ color: C.coral }}>underwater at age {underwaterSpans[0][0]}</b> —
+                      shaded on the chart below.</>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -986,6 +1037,14 @@ export default function FireModel() {
             <ResponsiveContainer width="100%" height={340}>
               <ComposedChart data={sim.rows} margin={{ top: 8, right: 12, left: 8, bottom: 4 }}>
                 <CartesianGrid stroke={C.line} vertical={false} />
+                {/* shade every stretch where spendable cash is negative — drawn first so it sits behind the curves */}
+                {show.underwater ? underwaterSpans.map(([a, b], i) => (
+                  <ReferenceArea key={`uw${i}`} x1={a} x2={b} fill={C.coral} fillOpacity={0.14} stroke="none"
+                    label={i === 0 ? { value: "taxable < $0", fill: C.coral, fontSize: 10, position: "insideTopLeft" } : undefined} />
+                )) : null}
+                {show.underwater && underwaterSpans.length ? (
+                  <ReferenceLine y={0} stroke={`${C.coral}99`} strokeDasharray="2 3" />
+                ) : null}
                 <XAxis dataKey="age" type="number" domain={[p.currentAge, sim.END]} ticks={ticks}
                   stroke={C.mute} tick={{ fill: C.mute, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }} />
                 <YAxis stroke={C.mute} tickFormatter={(v) => "$" + (v / 1e6).toFixed(1) + "M"}

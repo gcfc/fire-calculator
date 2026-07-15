@@ -123,6 +123,18 @@ describe("age frames — partner inputs are in the PARTNER's own age", () => {
     const required = (s, age) => s.rows.find((r) => r.age === age).required;
     expect(required(run({ partnerAge: 19 }), 60)).toBeGreaterThan(required(run({ partnerAge: 27 }), 60));
   });
+
+  it("ignores the partner's portfolio entirely once there is no partner", () => {
+    // a lone earner must not keep a phantom account: dropping the partner (age 0) has to zero out
+    // their portfolio the same way it already zeroes their income and their 59.5 unlock.
+    const single = run({ partnerAge: 0, partnerPortfolio: 250000, partnerPortfolioTaxAdv: 100000 });
+    const explicitZero = run({ partnerAge: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0 });
+    expect(single.rows[0].portfolio).toBe(explicitZero.rows[0].portfolio);
+    expect(single.rows[0].portfolio).toBe(DEFAULTS.startPortfolio);   // only YOUR money is left
+    // …but a real partner's portfolio still counts
+    expect(run({ partnerPortfolio: 250000 }).rows[0].portfolio)
+      .toBeGreaterThan(run({ partnerPortfolio: 0 }).rows[0].portfolio);
+  });
 });
 
 describe("the 59.5 rule — money you cannot legally touch", () => {
