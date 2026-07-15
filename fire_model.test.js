@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { simulate, DEFAULTS } from "./fire_model.jsx";
+import {
+  simulate, DEFAULTS,
+  encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
+} from "./fire_model.jsx";
 
 // Every test below pins a bug that was actually found, or an invariant the model must not break.
 // The comments say WHICH — a failing test here should tell you what regressed, not just that
@@ -504,5 +507,80 @@ describe("reported figures line up with each other", () => {
     const s = run({ homes: [HOME()] });
     expect(s.mortgageAtFire).toBeGreaterThan(0);
     expect(s.fireCrossValue).toBeGreaterThan(s.naiveNumber);
+  });
+});
+
+describe("share links — encode/decode round-trips and hydration", () => {
+  const defaultShow = () => ({
+    portfolio: true, required: true, retire: true, coast: true, taxable: false,
+    retirement: true, bridge: false, underwater: true, access: true, home: true, kids: true,
+  });
+
+  it("round-trips a full-details payload and stores only the diff from DEFAULTS", () => {
+    const p = { ...DEFAULTS, annualTakeHome: 175000, partnerAge: 0,
+      homes: [], kids: [{ birthAge: 33 }] };
+    const show = { ...defaultShow(), taxable: true };
+    const payload = sharePayload("full", { p, show });
+    // only changed keys are carried, keeping links short
+    expect(Object.keys(payload.p).sort()).toEqual(["annualTakeHome", "homes", "kids", "partnerAge"]);
+    expect(payload.show).toEqual({ taxable: true });
+    const decoded = decodeShare(encodeShare(payload));
+    expect(decoded).toEqual(payload);
+    // hydration merges the diff back onto DEFAULTS -> the exact original p
+    expect({ ...DEFAULTS, ...decoded.p }).toEqual(p);
+  });
+
+  it("carries NO inputs in a plot-only link, only computed chart data", () => {
+    const p = { ...DEFAULTS, annualTakeHome: 173456 };   // a distinctive salary to grep for
+    const sim = simulate(p);
+    const token = encodeShare(sharePayload("plot", { p, show: defaultShow(), sim }));
+    // the raw salary must not be recoverable from the link
+    const json = JSON.stringify(decodeShare(token));
+    expect(json).not.toContain("173456");
+    expect(json).not.toContain("annualTakeHome");
+    // and there is no `p` on a plot payload at all
+    expect(decodeShare(token).p).toBeUndefined();
+    expect(decodeShare(token).mode).toBe("plot");
+  });
+
+  it("rebuilds the charted rows from a plot snapshot", () => {
+    const sim = simulate({ ...DEFAULTS });
+    const snap = snapshotFromSim(sim, defaultShow(), true);
+    const rebuilt = rehydrateRows(decodeShare(encodeShare({ v: 1, mode: "plot", snap })).snap);
+    expect(rebuilt.length).toBe(sim.rows.length);
+    for (let i = 0; i < sim.rows.length; i++) {
+      for (const k of ["age", "portfolio", "taxable", "retirement", "required", "bridge", "coast"]) {
+        expect(rebuilt[i][k]).toBe(sim.rows[i][k]);
+      }
+    }
+    // event dots survive the columnar trip
+    const homeAges = sim.rows.filter((r) => r.events.includes("home")).map((r) => r.age);
+    expect(rebuilt.filter((r) => r.events.includes("home")).map((r) => r.age)).toEqual(homeAges);
+  });
+
+  it("recomputes underwater spans from a rebuilt snapshot the same way the live app does", () => {
+    // a lone earner runs the taxable account underwater for years before the 401k unlocks
+    const sim = simulate({ ...DEFAULTS, partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0,
+      partnerPortfolio: 0, partnerPortfolioTaxAdv: 0 });
+    const snap = snapshotFromSim(sim, defaultShow(), true);
+    const rebuilt = rehydrateRows(snap);
+    expect(underwaterOf(rebuilt, snap.END)).toEqual(underwaterOf(sim.rows, sim.END));
+    expect(underwaterOf(rebuilt, snap.END).length).toBeGreaterThan(0);   // there really is a window
+  });
+
+  it("returns null for anything malformed, empty, or the wrong version", () => {
+    expect(decodeShare("")).toBeNull();
+    expect(decodeShare(null)).toBeNull();
+    expect(decodeShare("not-base64-@@@")).toBeNull();
+    expect(decodeShare(encodeShare({ v: 999, mode: "full", p: {} }))).toBeNull();
+    expect(decodeShare(encodeShare({ v: 1, mode: "bogus" }))).toBeNull();
+    expect(decodeShare(encodeShare("plain string"))).toBeNull();
+  });
+
+  it("accepts a bare token, a #s=… hash, or a whole URL", () => {
+    const token = encodeShare(sharePayload("full", { p: { ...DEFAULTS, coastAge: 55 }, show: defaultShow() }));
+    expect(decodeShare(token).p).toEqual({ coastAge: 55 });
+    expect(decodeShare("#s=" + token).p).toEqual({ coastAge: 55 });
+    expect(decodeShare("https://x.io/fire-calculator/#s=" + token).p).toEqual({ coastAge: 55 });
   });
 });

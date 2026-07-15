@@ -615,12 +615,315 @@ const SERIES = [
   { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
 ];
 
+const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
+
+// ---- share links -----------------------------------------------------------
+// The site is static (no backend), so all shared state rides in the URL hash. Two shapes:
+//   full — the sharer's inputs, so the recipient gets the whole calculator, pre-filled and editable
+//   plot — ONLY the already-computed chart data, so the raw inputs never leave the sharer's browser
+const SHARE_VERSION = 1;
+
+// UTF-8-safe base64url, dependency-free
+const b64urlEncode = (s) =>
+  btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const b64urlDecode = (s) => {
+  const pad = s.length % 4 ? "=".repeat(4 - (s.length % 4)) : "";
+  return decodeURIComponent(escape(atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad)));
+};
+
+export const encodeShare = (obj) => b64urlEncode(JSON.stringify(obj));
+// accepts a bare token, a "#s=…"/"#…" hash, or a whole URL; returns the payload or null
+export const decodeShare = (raw) => {
+  if (!raw) return null;
+  try {
+    let token = String(raw);
+    if (token.includes("#")) token = token.slice(token.indexOf("#") + 1);
+    if (token.startsWith("s=")) token = token.slice(2);
+    if (!token) return null;
+    const obj = JSON.parse(b64urlDecode(token));
+    if (!obj || obj.v !== SHARE_VERSION) return null;
+    if (obj.mode !== "full" && obj.mode !== "plot") return null;
+    return obj;
+  } catch {
+    return null;
+  }
+};
+
+// only the keys that differ from a reference object (shallow; arrays compared structurally)
+const diffFrom = (obj, ref) => {
+  const out = {};
+  for (const k of Object.keys(obj)) {
+    if (JSON.stringify(obj[k]) !== JSON.stringify(ref[k])) out[k] = obj[k];
+  }
+  return out;
+};
+
+// the compact, columnar snapshot of everything the chart draws — carries NO inputs
+export const snapshotFromSim = (sim, show, enforceAccess) => {
+  const rows = sim.rows;
+  const col = (k) => rows.map((r) => (r[k] == null ? null : r[k]));
+  const evtAges = (evt) => rows.filter((r) => r.events && r.events.includes(evt)).map((r) => r.age);
+  return {
+    ages: rows.map((r) => r.age),
+    portfolio: col("portfolio"), taxable: col("taxable"), retirement: col("retirement"),
+    required: col("required"), bridge: col("bridge"), coast: col("coast"),
+    homeAges: evtAges("home"), kidAges: evtAges("kid"),
+    END: sim.END, accessYou: sim.accessYou, enforceAccess: !!enforceAccess, coastTarget: sim.coastTarget,
+    fireCross: sim.fireCross, fireCrossValue: sim.fireCrossValue,
+    coastCross: sim.coastCross, coastCrossValue: sim.coastCrossValue,
+    show,
+  };
+};
+
+// rebuild the array-of-objects the chart consumes from a columnar snapshot
+export const rehydrateRows = (snap) => {
+  const homeSet = new Set(snap.homeAges || []);
+  const kidSet = new Set(snap.kidAges || []);
+  return snap.ages.map((age, i) => ({
+    age,
+    portfolio: snap.portfolio[i], taxable: snap.taxable[i], retirement: snap.retirement[i],
+    required: snap.required[i], bridge: snap.bridge[i], coast: snap.coast[i],
+    events: [...(homeSet.has(age) ? ["home"] : []), ...(kidSet.has(age) ? ["kid"] : [])],
+  }));
+};
+
+// contiguous age windows where taxable (spendable) cash is underwater — same rule the live app uses
+export const underwaterOf = (rows, END) => {
+  const spans = [];
+  let start = null;
+  for (const r of rows) {
+    if (r.taxable < 0 && start == null) start = r.age;
+    else if (r.taxable >= 0 && start != null) { spans.push([start, r.age]); start = null; }
+  }
+  if (start != null) spans.push([start, END]);
+  return spans;
+};
+
+// build the object to encode for a given share kind
+export const sharePayload = (kind, { p, show, sim }) =>
+  kind === "plot"
+    ? { v: SHARE_VERSION, mode: "plot", snap: snapshotFromSim(sim, show, p.enforceAccess) }
+    : { v: SHARE_VERSION, mode: "full", p: diffFrom(p, DEFAULTS), show: diffFrom(show, defaultShow()) };
+
+// ---- the trajectory chart, driven entirely by props so it renders from a live sim OR a snapshot ----
+function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess,
+  coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: "18px 14px 8px" }}>
+      <ResponsiveContainer width="100%" height={340}>
+        <ComposedChart data={rows} margin={{ top: 8, right: 12, left: 8, bottom: 4 }}>
+          <CartesianGrid stroke={C.line} vertical={false} />
+          {/* shade every stretch where spendable cash is negative — drawn first so it sits behind the curves */}
+          {show.underwater ? underwaterSpans.map(([a, b], i) => (
+            <ReferenceArea key={`uw${i}`} x1={a} x2={b} fill={C.coral} fillOpacity={0.14} stroke="none"
+              label={i === 0 ? { value: "taxable < $0", fill: C.coral, fontSize: 10, position: "insideTopLeft" } : undefined} />
+          )) : null}
+          {show.underwater && underwaterSpans.length ? (
+            <ReferenceLine y={0} stroke={`${C.coral}99`} strokeDasharray="2 3" />
+          ) : null}
+          <XAxis dataKey="age" type="number" domain={[xStart, END]} ticks={ticks}
+            stroke={C.mute} tick={{ fill: C.mute, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }} />
+          <YAxis stroke={C.mute} tickFormatter={(v) => "$" + (v / 1e6).toFixed(1) + "M"}
+            tick={{ fill: C.mute, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }} />
+          <Tooltip
+            contentStyle={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: 6, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}
+            labelStyle={{ color: C.brass }}
+            formatter={(v, name) => [fmt(v), {
+              portfolio: "Portfolio (total)", taxable: "Taxable (spendable now)",
+              retirement: "Retirement accounts (401k/IRA)",
+              required: "Needed in total", bridge: "Needed in taxable",
+              coast: `Coast bar (stop saving, retire at ${coastTarget})`,
+            }[name] || name]}
+            labelFormatter={(a) => "Age " + a}
+          />
+          {show.access && enforceAccess ? (
+            <ReferenceLine x={accessYou} stroke={C.mute} strokeDasharray="2 4"
+              label={{ value: "59.5", fill: C.mute, fontSize: 10, position: "top" }} />
+          ) : null}
+          {show.coast ? <Line type="monotone" dataKey="coast" stroke={C.coast} strokeWidth={1.5} strokeDasharray="6 3" dot={false} connectNulls={false} /> : null}
+          {show.required ? <Line type="monotone" dataKey="required" stroke={C.brass} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
+          {show.bridge ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
+          {show.retirement ? <Line type="monotone" dataKey="retirement" stroke={C.locked} strokeWidth={1.5} dot={false} /> : null}
+          {show.taxable ? <Line type="monotone" dataKey="taxable" stroke={C.liquid} strokeWidth={1.5} dot={false} /> : null}
+          {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
+          {show.home ? homeRows.map((h) => <ReferenceDot key={h.age} x={h.age} y={h.portfolio} r={5} fill={C.brass} stroke={C.bg} />) : null}
+          {show.kids ? kidRows.map((k) => <ReferenceDot key={k.age} x={k.age} y={k.portfolio} r={4} fill={C.ink} stroke={C.bg} />) : null}
+          {show.coast && coastCross ? <ReferenceDot x={coastCross} y={coastCrossValue} r={5} fill={C.coast} stroke={C.bg} strokeWidth={2} /> : null}
+          {show.retire && fireCross ? <ReferenceDot x={fireCross} y={fireCrossValue} r={7} fill={C.brass} stroke={C.ink} strokeWidth={2} /> : null}
+        </ComposedChart>
+      </ResponsiveContainer>
+      {/* the legend IS the control: click a series to show or hide it */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "6px 6px 12px" }}>
+        {SERIES.map((s) => {
+          const on = show[s.key];
+          return (
+            <button
+              key={s.key}
+              onClick={() => setShow((v) => ({ ...v, [s.key]: !v[s.key] }))}
+              title={on ? "hide" : "show"}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                background: on ? `${s.color}1A` : "transparent",
+                border: `1px solid ${on ? s.color : C.line}`,
+                color: on ? C.ink : C.mute, borderRadius: 999, padding: "4px 10px",
+                fontFamily: "'Space Grotesk', sans-serif", fontSize: 11, letterSpacing: ".02em",
+                opacity: on ? 1 : 0.6,
+              }}
+            >
+              <span style={{ color: s.color, fontSize: 13, lineHeight: 1 }}>
+                {s.mark || (s.dash ? "┄" : "━")}
+              </span>
+              {s.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// the copy-to-clipboard Share control: one button, a popover with the two link kinds
+function ShareMenu({ p, show, sim }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(null);      // which kind was just copied
+  const [manual, setManual] = useState(null);      // fallback URL to copy by hand, if the API fails
+  const ref = React.useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+
+  const linkFor = (kind) => {
+    const token = encodeShare(sharePayload(kind, { p, show, sim }));
+    return window.location.origin + window.location.pathname + "#s=" + token;
+  };
+  const copy = async (kind) => {
+    const url = linkFor(kind);
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(url);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = url; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta); ta.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        if (!ok) throw new Error("execCommand failed");
+      }
+      setManual(null); setCopied(kind);
+      setTimeout(() => setCopied((c) => (c === kind ? null : c)), 1600);
+    } catch {
+      setManual(url);   // last resort: show the URL so it can be selected and copied manually
+    }
+  };
+
+  const item = (kind, label, sub) => (
+    <button onClick={() => copy(kind)} style={{
+      display: "block", width: "100%", textAlign: "left", cursor: "pointer",
+      background: "transparent", border: "none", color: C.ink, padding: "9px 12px",
+      fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, borderRadius: 6,
+    }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = `${C.teal}1A`)}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+      {copied === kind ? "✓ Copied!" : label}
+      <span style={{ display: "block", fontSize: 11, color: C.mute, marginTop: 2 }}>{sub}</span>
+    </button>
+  );
+
+  return (
+    <div ref={ref} style={{ position: "relative", flexShrink: 0 }}>
+      <button onClick={() => setOpen((o) => !o)} style={{
+        background: C.teal, color: C.bg, border: "none", borderRadius: 8, cursor: "pointer",
+        padding: "8px 14px", fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, fontWeight: 500,
+      }}>
+        ⇪ Share
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 20, width: 260,
+          background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 6,
+          boxShadow: "0 10px 30px rgba(0,0,0,.45)",
+        }}>
+          {item("plot", "Copy plot-only link", "Just the chart — your numbers stay private")}
+          {item("full", "Copy full-details link", "The whole calculator, pre-filled and editable")}
+          {manual && (
+            <div style={{ padding: "6px 8px" }}>
+              <div style={{ fontSize: 11, color: C.mute, marginBottom: 4 }}>Copy this link manually:</div>
+              <input readOnly value={manual} onFocus={(e) => e.target.select()} style={{
+                width: "100%", boxSizing: "border-box", background: C.bg, color: C.ink,
+                border: `1px solid ${C.line}`, borderRadius: 5, padding: "6px 8px",
+                fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
+              }} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// the read-only view a "plot only" link opens: just the chart, rebuilt from the snapshot, no inputs
+function SharedPlot({ snap, isMobile }) {
+  const [show, setShow] = useState({ ...defaultShow(), ...(snap.show || {}) });
+  const rows = useMemo(() => rehydrateRows(snap), [snap]);
+  const underwaterSpans = useMemo(() => underwaterOf(rows, snap.END), [rows, snap.END]);
+  const homeRows = rows.filter((r) => r.events.includes("home"));
+  const kidRows = rows.filter((r) => r.events.includes("kid"));
+  const ticks = []; for (let a = 30; a <= snap.END; a += 10) ticks.push(a);
+  const xStart = snap.ages[0];
+
+  return (
+    <div style={{ background: C.bg, color: C.ink, fontFamily: "'Space Grotesk', system-ui, sans-serif", padding: isMobile ? 12 : 24, borderRadius: 12 }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');`}</style>
+      <div style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 16, marginBottom: 20 }}>
+        <div style={{ fontSize: 11, letterSpacing: ".2em", color: C.brass, textTransform: "uppercase", marginBottom: 6 }}>
+          Shared projection · read-only
+        </div>
+        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, lineHeight: 1.15 }}>
+          A FIRE trajectory someone shared with you
+        </h1>
+        <p style={{ margin: "8px 0 0", color: C.mute, fontSize: 14, maxWidth: 680 }}>
+          This is the chart only — the underlying inputs were kept private and are not part of this link.
+          Toggle any series in the legend below.
+        </p>
+      </div>
+      <ChartPanel
+        rows={rows} xStart={xStart} END={snap.END} ticks={ticks} underwaterSpans={underwaterSpans}
+        accessYou={snap.accessYou} enforceAccess={snap.enforceAccess} coastTarget={snap.coastTarget}
+        homeRows={homeRows} kidRows={kidRows}
+        coastCross={snap.coastCross} coastCrossValue={snap.coastCrossValue}
+        fireCross={snap.fireCross} fireCrossValue={snap.fireCrossValue}
+        show={show} setShow={setShow}
+      />
+      <div style={{ marginTop: 16 }}>
+        <a href="#" onClick={(e) => { e.preventDefault(); window.location.assign(window.location.pathname); }}
+          style={{ color: C.teal, fontSize: 13, textDecoration: "none" }}>
+          Build your own projection →
+        </a>
+      </div>
+    </div>
+  );
+}
+
 export default function FireModel() {
   const isMobile = useMediaQuery("(max-width: 720px)");
-  const [p, setP] = useState(DEFAULTS);
-  const [show, setShow] = useState(
-    Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]))
-  );
+  // read any shared state from the URL once. A "plot only" link opens straight into the read-only
+  // snapshot view (no inputs, no simulate()); everything else renders the full calculator.
+  const shared = useMemo(() => decodeShare(typeof window !== "undefined" ? window.location.hash : ""), []);
+  return shared && shared.mode === "plot" && shared.snap
+    ? <SharedPlot snap={shared.snap} isMobile={isMobile} />
+    : <Calculator shared={shared} isMobile={isMobile} />;
+}
+
+function Calculator({ shared, isMobile }) {
+  // a "full details" link pre-fills the whole calculator; anything not in the link falls back to defaults
+  const [p, setP] = useState(() => (shared && shared.mode === "full" ? { ...DEFAULTS, ...shared.p } : DEFAULTS));
+  const [show, setShow] = useState(() => ({ ...defaultShow(), ...(shared && shared.mode === "full" ? shared.show : null) }));
   const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
   const setPct = (k, v) => setP((s) => ({ ...s, [k]: v / 100 }));
 
@@ -750,12 +1053,17 @@ export default function FireModel() {
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');`}</style>
 
       <div style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 16, marginBottom: 20 }}>
-        <div style={{ fontSize: 11, letterSpacing: ".2em", color: C.brass, textTransform: "uppercase", marginBottom: 6 }}>
-          Financial independence · trajectory model
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+            <div style={{ fontSize: 11, letterSpacing: ".2em", color: C.brass, textTransform: "uppercase", marginBottom: 6 }}>
+              Financial independence · trajectory model
+            </div>
+            <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, lineHeight: 1.15 }}>
+              The number that actually lasts — and that you can actually touch
+            </h1>
+          </div>
+          <ShareMenu p={p} show={show} sim={sim} />
         </div>
-        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, lineHeight: 1.15 }}>
-          The number that actually lasts — and that you can actually touch
-        </h1>
         <p style={{ margin: "8px 0 0", color: C.mute, fontSize: 14, maxWidth: 680 }}>
           Age {p.currentAge} to {sim.END}, all in <em>today's dollars</em>. Retiring takes <b>two</b> things, and the
           model makes you clear both. The dashed brass curve is the total you'd need for the money to survive the
@@ -1057,76 +1365,14 @@ export default function FireModel() {
             </div>
           )}
 
-          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: "18px 14px 8px" }}>
-            <ResponsiveContainer width="100%" height={340}>
-              <ComposedChart data={sim.rows} margin={{ top: 8, right: 12, left: 8, bottom: 4 }}>
-                <CartesianGrid stroke={C.line} vertical={false} />
-                {/* shade every stretch where spendable cash is negative — drawn first so it sits behind the curves */}
-                {show.underwater ? underwaterSpans.map(([a, b], i) => (
-                  <ReferenceArea key={`uw${i}`} x1={a} x2={b} fill={C.coral} fillOpacity={0.14} stroke="none"
-                    label={i === 0 ? { value: "taxable < $0", fill: C.coral, fontSize: 10, position: "insideTopLeft" } : undefined} />
-                )) : null}
-                {show.underwater && underwaterSpans.length ? (
-                  <ReferenceLine y={0} stroke={`${C.coral}99`} strokeDasharray="2 3" />
-                ) : null}
-                <XAxis dataKey="age" type="number" domain={[p.currentAge, sim.END]} ticks={ticks}
-                  stroke={C.mute} tick={{ fill: C.mute, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }} />
-                <YAxis stroke={C.mute} tickFormatter={(v) => "$" + (v / 1e6).toFixed(1) + "M"}
-                  tick={{ fill: C.mute, fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }} />
-                <Tooltip
-                  contentStyle={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: 6, fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}
-                  labelStyle={{ color: C.brass }}
-                  formatter={(v, name) => [fmt(v), {
-                    portfolio: "Portfolio (total)", taxable: "Taxable (spendable now)",
-                    retirement: "Retirement accounts (401k/IRA)",
-                    required: "Needed in total", bridge: "Needed in taxable",
-                    coast: `Coast bar (stop saving, retire at ${sim.coastTarget})`,
-                  }[name] || name]}
-                  labelFormatter={(a) => "Age " + a}
-                />
-                {show.access && p.enforceAccess ? (
-                  <ReferenceLine x={sim.accessYou} stroke={C.mute} strokeDasharray="2 4"
-                    label={{ value: "59.5", fill: C.mute, fontSize: 10, position: "top" }} />
-                ) : null}
-                {show.coast ? <Line type="monotone" dataKey="coast" stroke={C.coast} strokeWidth={1.5} strokeDasharray="6 3" dot={false} connectNulls={false} /> : null}
-                {show.required ? <Line type="monotone" dataKey="required" stroke={C.brass} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
-                {show.bridge ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
-                {show.retirement ? <Line type="monotone" dataKey="retirement" stroke={C.locked} strokeWidth={1.5} dot={false} /> : null}
-                {show.taxable ? <Line type="monotone" dataKey="taxable" stroke={C.liquid} strokeWidth={1.5} dot={false} /> : null}
-                {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
-                {show.home ? homeRows.map((h) => <ReferenceDot key={h.age} x={h.age} y={h.portfolio} r={5} fill={C.brass} stroke={C.bg} />) : null}
-                {show.kids ? kidRows.map((k) => <ReferenceDot key={k.age} x={k.age} y={k.portfolio} r={4} fill={C.ink} stroke={C.bg} />) : null}
-                {show.coast && sim.coastCross ? <ReferenceDot x={sim.coastCross} y={sim.coastCrossValue} r={5} fill={C.coast} stroke={C.bg} strokeWidth={2} /> : null}
-                {show.retire && sim.fireCross ? <ReferenceDot x={sim.fireCross} y={sim.fireCrossValue} r={7} fill={C.brass} stroke={C.ink} strokeWidth={2} /> : null}
-              </ComposedChart>
-            </ResponsiveContainer>
-            {/* the legend IS the control: click a series to show or hide it */}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "6px 6px 12px" }}>
-              {SERIES.map((s) => {
-                const on = show[s.key];
-                return (
-                  <button
-                    key={s.key}
-                    onClick={() => setShow((v) => ({ ...v, [s.key]: !v[s.key] }))}
-                    title={on ? "hide" : "show"}
-                    style={{
-                      display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
-                      background: on ? `${s.color}1A` : "transparent",
-                      border: `1px solid ${on ? s.color : C.line}`,
-                      color: on ? C.ink : C.mute, borderRadius: 999, padding: "4px 10px",
-                      fontFamily: "'Space Grotesk', sans-serif", fontSize: 11, letterSpacing: ".02em",
-                      opacity: on ? 1 : 0.6,
-                    }}
-                  >
-                    <span style={{ color: s.color, fontSize: 13, lineHeight: 1 }}>
-                      {s.mark || (s.dash ? "┄" : "━")}
-                    </span>
-                    {s.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+          <ChartPanel
+            rows={sim.rows} xStart={p.currentAge} END={sim.END} ticks={ticks} underwaterSpans={underwaterSpans}
+            accessYou={sim.accessYou} enforceAccess={p.enforceAccess} coastTarget={sim.coastTarget}
+            homeRows={homeRows} kidRows={kidRows}
+            coastCross={sim.coastCross} coastCrossValue={sim.coastCrossValue}
+            fireCross={sim.fireCross} fireCrossValue={sim.fireCrossValue}
+            show={show} setShow={setShow}
+          />
 
           {/* WHAT MOVES THE NEEDLE — each row is a full re-run of the model, not a rule of thumb */}
           {levers.length > 0 && (
