@@ -908,11 +908,19 @@ function SharedPlot({ snap, isMobile }) {
         fireCross={snap.fireCross} fireCrossValue={snap.fireCrossValue}
         show={show} setShow={setShow}
       />
-      <div style={{ marginTop: 16 }}>
-        <a href="#" onClick={(e) => { e.preventDefault(); window.location.assign(window.location.pathname); }}
-          style={{ color: C.teal, fontSize: 13, textDecoration: "none" }}>
+      <div style={{ marginTop: 22, display: "flex", justifyContent: "center" }}>
+        <button
+          onClick={() => window.location.assign(window.location.pathname)}
+          onMouseEnter={(e) => (e.currentTarget.style.filter = "brightness(1.08)")}
+          onMouseLeave={(e) => (e.currentTarget.style.filter = "none")}
+          style={{
+            background: C.teal, color: C.bg, border: "none", borderRadius: 10, cursor: "pointer",
+            padding: "14px 28px", fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 600,
+            letterSpacing: ".02em", boxShadow: "0 6px 22px rgba(95,176,166,.28)",
+          }}
+        >
           Build your own projection →
-        </a>
+        </button>
       </div>
     </div>
   );
