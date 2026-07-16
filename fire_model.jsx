@@ -701,6 +701,60 @@ export const sharePayload = (kind, { p, show, sim }) =>
     ? { v: SHARE_VERSION, mode: "plot", snap: snapshotFromSim(sim, show, p.enforceAccess) }
     : { v: SHARE_VERSION, mode: "full", p: diffFrom(p, DEFAULTS), show: diffFrom(show, defaultShow()) };
 
+// --- tax-advantaged vs. taxable allocation advice ---------------------------
+// In this model the two buckets grow identically; their ONLY difference is the 59.5 lock. So moving
+// saving from tax-advantaged → taxable never changes total wealth — it just adds liquidity, which
+// pulls a bridge-bound retirement earlier and does nothing once liquidity is already ample. We detect
+// the skew by re-running the model. Returns null, or one of:
+//   { dir:"toTaxable", amount, years, newAge, unlocks }  — over-weighted to LOCKED accounts
+//   { dir:"toTaxAdv",  slack }                           — over-weighted to TAXABLE, room to spare
+export const allocationAdvice = (p) => {
+  const sim = simulate(p);
+  const partnerEarns = p.partnerAge > 0;
+  const totalTaxAdv = p.annualTaxAdv + (partnerEarns ? p.partnerTaxAdv : 0);
+  // move a fraction `f` of every tax-advantaged contribution into take-home (i.e. into taxable)
+  const shift = (f) => ({
+    annualTaxAdv: p.annualTaxAdv * (1 - f),
+    annualTakeHome: p.annualTakeHome + p.annualTaxAdv * f,
+    ...(partnerEarns ? {
+      partnerTaxAdv: p.partnerTaxAdv * (1 - f),
+      partnerIncome: p.partnerIncome + p.partnerTaxAdv * f,
+    } : {}),
+  });
+  const cur = sim.fireCross;                                  // may be null (never retire)
+  const alt = simulate({ ...p, ...shift(1) }).fireCross;      // everything redirected to taxable
+
+  // Direction A — over-weighted to LOCKED accounts: shifting toward taxable retires you earlier, or
+  // makes retirement possible at all when the pre-59.5 bridge is currently never funded.
+  if (totalTaxAdv > 0 && alt != null && (cur == null || cur - alt > 0.25)) {
+    let lo = 0, hi = 1;                                       // smallest shift that captures the gain
+    for (let i = 0; i < 16; i++) {
+      const mid = (lo + hi) / 2;
+      const f = simulate({ ...p, ...shift(mid) }).fireCross;
+      if (f != null && f <= alt + 0.1) hi = mid; else lo = mid;
+    }
+    return {
+      dir: "toTaxable",
+      amount: Math.max(500, Math.round((totalTaxAdv * hi) / 500) * 500),
+      years: cur == null ? null : cur - alt,
+      newAge: alt,
+      unlocks: cur == null,
+    };
+  }
+
+  // Direction B — over-weighted to TAXABLE: you retire before 59.5 with liquid to spare, so routing
+  // more saving into tax-advantaged accounts wouldn't push the date back (and those accounts carry tax
+  // benefits this model does not price in). Only fires when the spare liquidity is clearly meaningful.
+  if (cur != null && cur <= sim.accessYou && p.annualTakeHome > 10000) {
+    const toAdv = simulate({ ...p, annualTaxAdv: p.annualTaxAdv + 10000, annualTakeHome: p.annualTakeHome - 10000 });
+    const liquidSlack = (sim.fireTaxable ?? 0) - (sim.fireBridge ?? 0);
+    if (toAdv.fireCross != null && toAdv.fireCross <= cur + 0.02 && liquidSlack > Math.max(250000, 2 * p.retirementSpendToday)) {
+      return { dir: "toTaxAdv", slack: liquidSlack };
+    }
+  }
+  return null;
+};
+
 // ---- the trajectory chart, driven entirely by props so it renders from a live sim OR a snapshot ----
 function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess,
   coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
@@ -1002,6 +1056,10 @@ function Calculator({ shared, isMobile }) {
   const blockedByDebt = neverRetire && !blockedByBridge && totalEverEnough && underwaterSpans.length > 0;
   const kidsCount = p.kids.length;
   const cap529 = kidsCount * 19000;
+
+  // tax-advantaged vs. taxable allocation advice — grounded by re-running the model (see the exported
+  // allocationAdvice() for the full reasoning), so it's not a rule of thumb.
+  const allocAdvice = useMemo(() => allocationAdvice(p), [p]);
 
   // --- what actually moves the needle -------------------------------------
   // simulate() is pure and cheap, so instead of guessing at advice we re-run the whole model
@@ -1361,6 +1419,34 @@ function Calculator({ shared, isMobile }) {
               <b>{simFree.fireCross.toFixed(1)}</b> — but only {fmtM(sim.fireTaxable)} of the pot would be taxable
               against a bridge of {fmtM(sim.fireBridge)}, so you keep working until <b>{sim.fireCross.toFixed(1)}</b>.
               {!p.rothLadder && " A Roth conversion ladder shortens the bridge to 5 years — try the toggle."}
+            </div>
+          )}
+
+          {allocAdvice?.dir === "toTaxable" && (
+            <div style={{ background: `${C.liquid}14`, border: `1px solid ${C.liquid}`, borderRadius: 8, padding: "12px 14px", fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
+              <b style={{ color: C.liquid }}>💧 You're over-weighted to locked accounts.</b>{" "}
+              {allocAdvice.unlocks ? (
+                <>Redirecting about <b>{fmt(allocAdvice.amount)}/yr</b> from your 401k/IRA into a plain
+                  taxable account would let you retire at <b>age {allocAdvice.newAge.toFixed(1)}</b> — right now the
+                  pre-59.5 bridge is never funded, so you never retire on these inputs.</>
+              ) : (
+                <>Redirecting about <b>{fmt(allocAdvice.amount)}/yr</b> from your 401k/IRA into a plain taxable
+                  account would let you retire about <b>{allocAdvice.years.toFixed(1)} years earlier</b> (age{" "}
+                  <b>{allocAdvice.newAge.toFixed(1)}</b>). Your date is gated by pre-59.5 liquidity, not by total wealth.</>
+              )}
+              <span style={{ display: "block", marginTop: 6, color: C.mute, fontSize: 12 }}>
+                Trade-off: this model doesn't price the tax breaks of retirement accounts, so weigh the earlier date
+                against the tax you'd give up by saving less pre-tax.
+              </span>
+            </div>
+          )}
+
+          {allocAdvice?.dir === "toTaxAdv" && (
+            <div style={{ background: `${C.locked}14`, border: `1px solid ${C.locked}`, borderRadius: 8, padding: "12px 14px", fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
+              <b style={{ color: C.locked }}>You have liquidity to spare.</b> You retire before 59.5 with about{" "}
+              <b>{fmtM(allocAdvice.slack)}</b> more spendable cash than the bridge needs, so routing more of your
+              saving into tax-advantaged accounts (401k/IRA) wouldn't push your retirement back — and those accounts
+              carry tax benefits this model doesn't show.
             </div>
           )}
 

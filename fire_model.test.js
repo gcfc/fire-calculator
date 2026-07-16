@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   simulate, DEFAULTS,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
+  allocationAdvice,
 } from "./fire_model.jsx";
 
 // Every test below pins a bug that was actually found, or an invariant the model must not break.
@@ -582,5 +583,55 @@ describe("share links — encode/decode round-trips and hydration", () => {
     expect(decodeShare(token).p).toEqual({ coastAge: 55 });
     expect(decodeShare("#s=" + token).p).toEqual({ coastAge: 55 });
     expect(decodeShare("https://x.io/fire-calculator/#s=" + token).p).toEqual({ coastAge: 55 });
+  });
+});
+
+describe("allocation advice — tax-advantaged vs. taxable split", () => {
+  const SINGLE = { partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0 };
+
+  it("tells a locked-heavy saver to shift toward taxable, and by how much / how much earlier", () => {
+    // a single earner pouring $60k/yr into a 401k while renting is starved of the pre-59.5 bridge
+    const p = { ...DEFAULTS, ...SINGLE, homes: [], annualTaxAdv: 60000, annualTakeHome: 90000 };
+    const a = allocationAdvice(p);
+    expect(a?.dir).toBe("toTaxable");
+    expect(a.years).toBeGreaterThan(1);                 // a real acceleration, not a rounding wobble
+    expect(a.amount).toBeGreaterThan(0);
+    expect(a.amount).toBeLessThanOrEqual(60000);        // never suggest moving more than they contribute
+    // the promised earlier date must actually be reproducible by making the shift
+    const shifted = simulate({ ...p, annualTaxAdv: 0, annualTakeHome: p.annualTakeHome + p.annualTaxAdv });
+    expect(shifted.fireCross).toBeCloseTo(a.newAge, 5);
+    expect(simulate(p).fireCross - shifted.fireCross).toBeCloseTo(a.years, 5);
+  });
+
+  it("only advises within the freedom to allocate — nothing to move means no advice", () => {
+    // no tax-advantaged saving at all: there is nothing to redirect toward taxable
+    const p = { ...DEFAULTS, ...SINGLE, homes: [], annualTaxAdv: 0, annualTakeHome: 60000,
+      retirementSpendToday: 250000, startPortfolio: 50000, startPortfolioTaxAdv: 0 };
+    expect(allocationAdvice(p)).toBeNull();
+  });
+
+  it("shifting toward taxable never delays retirement (liquidity is free in this model)", () => {
+    // whatever the inputs, moving 401k -> taxable keeps total wealth fixed and only adds liquidity,
+    // so the retirement date can only move earlier or stay put — never later
+    for (const over of [{}, { ...SINGLE, homes: [] }, { annualTaxAdv: 80000, annualTakeHome: 104000 }]) {
+      const p = { ...DEFAULTS, ...over };
+      const base = simulate(p).fireCross;
+      const taxable = simulate({ ...p, annualTaxAdv: 0, annualTakeHome: p.annualTakeHome + p.annualTaxAdv }).fireCross;
+      if (base != null && taxable != null) expect(taxable).toBeLessThanOrEqual(base + 1e-9);
+    }
+  });
+
+  it("says nothing about allocation once retirement already lands after 59.5", () => {
+    // past the wall the split is irrelevant, so neither direction should fire
+    const p = { ...DEFAULTS, ...SINGLE, homes: [], retirementSpendToday: 300000 };
+    expect(simulate(p).fireCross).toBeGreaterThan(59.5);
+    expect(allocationAdvice(p)).toBeNull();
+  });
+
+  it("flags spare liquidity when you retire early with taxable to burn", () => {
+    // the default household retires well before 59.5 with far more liquid than the bridge needs
+    const a = allocationAdvice({ ...DEFAULTS });
+    expect(a?.dir).toBe("toTaxAdv");
+    expect(a.slack).toBeGreaterThan(2 * DEFAULTS.retirementSpendToday);
   });
 });
