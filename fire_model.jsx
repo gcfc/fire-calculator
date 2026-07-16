@@ -33,6 +33,15 @@ const fmt = (n) =>
 const fmtM = (n) =>
   n == null ? "—" : "$" + (n / 1e6).toFixed(2) + "M";
 
+// today's real calendar year, so an age field can show "≈ 2031" alongside it. Read once from the
+// browser clock (not the simulation, which is age-indexed) — never hardcoded, so it's always live.
+const CURRENT_YEAR = new Date().getFullYear();
+// age N, anchored off a reference age that is "now": you (or your partner) are `refAge` this year, so
+// age `age` lands in CURRENT_YEAR + (age - refAge). Returns null for a not-yet-meaningful age (<= 0,
+// e.g. the "0 = single" sentinel, or the empty "until" field) so callers can skip the hint entirely.
+const yearAt = (age, refAge) =>
+  Number.isFinite(age) && age > 0 && Number.isFinite(refAge) ? CURRENT_YEAR + Math.round(age - refAge) : null;
+
 // exported so the model can be exercised headlessly, without mounting the UI
 export function simulate(p) {
   const ret = p.nominalReturn;
@@ -627,18 +636,24 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
 };
 
 // compact numeric input for the repeatable home/kid cards. `pct` stores a fraction but shows a %.
-const Num = ({ label, value, onChange, step = 1, pct = false, min = 0 }) => (
-  <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-    <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
-    <NumberInput
-      small
-      step={step}
-      min={min}
-      value={pct ? Number((value * 100).toFixed(4)) : value}
-      onCommit={(v) => onChange(pct ? v / 100 : v)}
-    />
-  </label>
-);
+// `yearRef`, when given, marks this value as an age and shows the calendar year it lands in.
+const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef }) => {
+  const yr = yearRef != null ? yearAt(value, yearRef) : null;
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>
+        {label}{yr != null && <span style={{ opacity: 0.65 }}> · ≈{yr}</span>}
+      </span>
+      <NumberInput
+        small
+        step={step}
+        min={min}
+        value={pct ? Number((value * 100).toFixed(4)) : value}
+        onCommit={(v) => onChange(pct ? v / 100 : v)}
+      />
+    </label>
+  );
+};
 
 // a compact free-text input for card labels (wedding, medical, student loan, …); display only
 const TextField = ({ label, value, onChange, placeholder }) => (
@@ -681,20 +696,24 @@ const DropButton = ({ onClick }) => (
   </button>
 );
 
-const field = (label, key, val, set, opts = {}) => (
-  <label key={key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-    <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
-      {label}
-    </span>
-    <NumberInput
-      value={val}
-      step={opts.step || 1}
-      min={opts.min ?? 0}
-      max={opts.max ?? Infinity}
-      onCommit={(v) => set(key, v)}
-    />
-  </label>
-);
+// `opts.yearRef`, when given, marks this field as an age and shows the calendar year it lands in.
+const field = (label, key, val, set, opts = {}) => {
+  const yr = opts.yearRef != null ? yearAt(val, opts.yearRef) : null;
+  return (
+    <label key={key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
+        {label}{yr != null && <span style={{ opacity: 0.65 }}> · ≈{yr}</span>}
+      </span>
+      <NumberInput
+        value={val}
+        step={opts.step || 1}
+        min={opts.min ?? 0}
+        max={opts.max ?? Infinity}
+        onCommit={(v) => set(key, v)}
+      />
+    </label>
+  );
+};
 
 // inline caution, for when the inputs contradict each other
 const Warn = ({ children }) => (
@@ -1322,7 +1341,7 @@ function Calculator({ shared, isMobile }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           {[
             ["You", [
-              ["Current age", "currentAge", {}],
+              ["Current age", "currentAge", { yearRef: p.currentAge }],
               ["Current portfolio ← your real #", "startPortfolio", { step: 10000 }],
               ["…of which in 401k / IRA / HSA", "startPortfolioTaxAdv", { step: 10000, max: p.startPortfolio }],
               ["Take-home / yr (after contrib.)", "annualTakeHome", { step: 1000 }],
@@ -1331,18 +1350,18 @@ function Calculator({ shared, isMobile }) {
               ["Current rent / yr", "rentAnnual", { step: 1000 }],
             ]],
             ["Partner", [
-              ["Partner's age now (0 = single)", "partnerAge", {}],
+              ["Partner's age now (0 = single)", "partnerAge", { yearRef: p.partnerAge }],
               ["Partner portfolio", "partnerPortfolio", { step: 10000 }],
               ["…of which in 401k / IRA / HSA", "partnerPortfolioTaxAdv", { step: 10000, max: p.partnerPortfolio }],
               ["Partner take-home / yr", "partnerIncome", { step: 5000 }],
               ["Partner tax-advantaged / yr", "partnerTaxAdv", { step: 500 }],
-              ["Partner earns from their age", "partnerStart", { min: p.partnerAge }],
-              ["…until their age", "partnerEnd", { min: p.partnerStart }],
+              ["Partner earns from their age", "partnerStart", { min: p.partnerAge, yearRef: p.partnerAge }],
+              ["…until their age", "partnerEnd", { min: p.partnerStart, yearRef: p.partnerAge }],
             ]],
             ["Retirement", [
               ["Retirement spend / yr — excl. housing", "retirementSpendToday", { step: 5000 }],
-              ["Money must last to age", "endAge", {}],
-              ["Coast FIRE: retire at age", "coastAge", {}],
+              ["Money must last to age", "endAge", { yearRef: p.currentAge }],
+              ["Coast FIRE: retire at age", "coastAge", { yearRef: p.currentAge }],
             ]],
           ].map(([group, fields]) => (
             <div key={group} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14 }}>
@@ -1462,7 +1481,7 @@ function Calculator({ shared, isMobile }) {
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <Num label="Price" value={h.price} step={25000} onChange={(v) => setHome(i, "price", v)} />
-                    <Num label="Buy at your age" value={h.purchaseAge} onChange={(v) => setHome(i, "purchaseAge", v)} />
+                    <Num label="Buy at your age" value={h.purchaseAge} yearRef={p.currentAge} onChange={(v) => setHome(i, "purchaseAge", v)} />
                     <Num label="Down %" value={h.downPct} pct step={1} onChange={(v) => setHome(i, "downPct", v)} />
                     <Num label="Rate %" value={h.rate} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
                     <Num label="Term (yrs)" value={h.term} onChange={(v) => setHome(i, "term", v)} />
@@ -1495,7 +1514,7 @@ function Calculator({ shared, isMobile }) {
             {p.kids.map((k, i) => (
               <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                 <div style={{ flex: 1 }}>
-                  <Num label={`Kid ${i + 1} — your age at birth`} value={k.birthAge} onChange={(v) => setKid(i, v)} />
+                  <Num label={`Kid ${i + 1} — your age at birth`} value={k.birthAge} yearRef={p.currentAge} onChange={(v) => setKid(i, v)} />
                 </div>
                 <DropButton onClick={() => dropKid(i)} />
               </div>
@@ -1531,9 +1550,9 @@ function Calculator({ shared, isMobile }) {
                   <DropButton onClick={() => dropExpense(i)} />
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                  <Num label="at your age" value={e.age} step={1} onChange={(v) => setExpense(i, "age", v)} />
+                  <Num label="at your age" value={e.age} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "age", v)} />
                   <Num label="amount (today's $)" value={e.amount} step={1000} min={-1e12} onChange={(v) => setExpense(i, "amount", v)} />
-                  <Num label="until age (blank=one-off)" value={e.until ?? ""} step={1} onChange={(v) => setExpense(i, "until", v || null)} />
+                  <Num label="until age (blank=one-off)" value={e.until ?? ""} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "until", v || null)} />
                 </div>
                 {e.until && e.until > e.age && (
                   <div style={{ fontSize: 10, color: C.mute }}>
