@@ -178,6 +178,38 @@ export function simulate(p) {
     }
   }
 
+  // ---- one-off life expenses + debts ----------------------------------------
+  // Expenses are lumps in today's $ (inflated to their year): +amount is a cost (wedding, medical, a
+  // new roof), -amount is a windfall (inheritance, gift, a home sale). An optional `until` age turns
+  // one into a yearly cost across a window. Debts are fixed-nominal loans — a balance, an APR, and the
+  // monthly payment you actually make — amortised to a payoff age, then billed as a level annual P&I
+  // stream (a mortgage without the house). Both are just extra outflows, so they net into the
+  // requirement, the bridge, and the drawdown for free.
+  const extraLump = {};
+  for (const e of (p.expenses || [])) {
+    const amt = (e && +e.amount) || 0;
+    if (!amt) continue;
+    const a0 = Math.round(e.age), a1 = e.until ? Math.max(a0, Math.round(e.until)) : a0;
+    for (let y = a0; y <= a1; y++) extraLump[y] = (extraLump[y] || 0) + amt * inflAt(y);
+  }
+  const debts = (p.debts || []).map((d) => {
+    const bal = Math.max(0, +d.balance || 0), pay = Math.max(0, +d.payment || 0), r = (+d.apr || 0) / 100 / 12;
+    const start = Math.round(d.startAge ?? p.currentAge), annual = pay * 12;
+    if (bal <= 0 || pay <= 0) return { start, payoff: start, annual: 0, neverPays: false };
+    const neverPays = pay <= bal * r + 1e-9;   // the payment does not even cover the interest
+    const months = neverPays ? Infinity : (r > 0 ? Math.log(pay / (pay - bal * r)) / Math.log(1 + r) : bal / pay);
+    return { start, payoff: neverPays ? Infinity : start + months / 12, annual, neverPays };
+  });
+  const debtPaymentAt = (age) => debts.reduce((s, d) => {
+    if (d.annual <= 0 || age < d.start) return s;
+    if (d.payoff === Infinity) return s + d.annual;                          // never clears -> perpetual drag
+    if (age >= d.payoff) return s;                                           // paid off
+    if (age >= Math.floor(d.payoff)) return s + d.annual * (d.payoff - age); // partial final year
+    return s + d.annual;
+  }, 0);
+  // total extra outflow in year `age` (nominal): one-off lumps + debt service. Windfalls go negative.
+  const extraOutflowAt = (age) => (extraLump[age] || 0) + debtPaymentAt(age);
+
   // Nominal spending in year `age` once retired. retirementSpendToday now EXCLUDES housing —
   // with several homes coming and going there is no single "housing cost" to bake into it, so
   // housing is priced from the homes themselves every year instead of being assumed away.
@@ -187,10 +219,11 @@ export function simulate(p) {
          + housingAt(age)                  // rent, or carry + P&I on every home owned that year
          + downAt(age)                     // closing cash on anything bought this year
          + (netCollege[age] || 0)          // college the 529 didn't cover
-         + (contrib529[age] || 0);         // …and the 529 you are still feeding. Retiring does not
+         + (contrib529[age] || 0)          // …and the 529 you are still feeding. Retiring does not
                                            // stop the sinking fund: if these were left out, any
                                            // contribution scheduled after retirement would be free
                                            // money, and a slow 529 would buy you an earlier date.
+         + extraOutflowAt(age);            // one-off life expenses + any debt service still running
   };
 
   // ---- one partner still earning after you retire (opt-in) ------------------
@@ -313,8 +346,8 @@ export function simulate(p) {
     const living = p.nonHousingLiving * infl;
     const housing = housingAt(age);
     const kidCost = kidCostAt(age);
-    // every lump (down payments, college, 529) can only come out of taxable
-    const lumps = downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0);
+    // every lump (down payments, college, 529, life expenses, debt service) comes out of taxable
+    const lumps = downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age);
     const surplus = takeHome - (living + housing + kidCost);
     return { taxable: surplus - lumps, taxAdvYou, taxAdvPartner, save: surplus + taxAdvYou + taxAdvPartner };
   };
@@ -542,6 +575,9 @@ export function simulate(p) {
     mortgageAtFire: T == null ? 0 : piAt(Math.floor(T)),   // P&I still running when you retire
     minSave: Math.round(minSave), minSaveAge, end, rows, END,
     accessYou, accessPartner, partnerOffset, hasPartner,
+    // one-off expense/windfall markers for the chart, and each debt's derived payoff age for its card
+    expenseMarks: (p.expenses || []).filter((e) => (+e.amount) || 0).map((e) => ({ age: Math.round(e.age), amount: +e.amount })),
+    debtPayoffs: debts.map((d) => (d.neverPays || d.annual <= 0 ? null : d.payoff)),
     // your age when a still-working partner stops earning — only meaningful when that's after you retire
     partnerStopsAtAge: p.partnerWorksAfterRetire && hasPartner && T != null && partnerStopAge > T ? partnerStopAge : null,
     // the age YOUR accounts actually become spendable given when you retire — with a Roth ladder this
@@ -591,14 +627,31 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
 };
 
 // compact numeric input for the repeatable home/kid cards. `pct` stores a fraction but shows a %.
-const Num = ({ label, value, onChange, step = 1, pct = false }) => (
+const Num = ({ label, value, onChange, step = 1, pct = false, min = 0 }) => (
   <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
     <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
     <NumberInput
       small
       step={step}
+      min={min}
       value={pct ? Number((value * 100).toFixed(4)) : value}
       onCommit={(v) => onChange(pct ? v / 100 : v)}
+    />
+  </label>
+);
+
+// a compact free-text input for card labels (wedding, medical, student loan, …); display only
+const TextField = ({ label, value, onChange, placeholder }) => (
+  <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+    <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
+    <input
+      value={value ?? ""}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        background: C.bg, border: `1px solid ${C.line}`, color: C.ink, padding: "6px 8px", borderRadius: 5,
+        fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, width: "100%", boxSizing: "border-box",
+      }}
     />
   </label>
 );
@@ -664,6 +717,8 @@ export const DEFAULTS = {
   }],
   kids: [{ birthAge: 30 }, { birthAge: 32 }],
   daycarePerKid: 26000, ongoingPerKid: 8000, collegePerKid: 200000,
+  expenses: [], debts: [],
+
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
   partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000,
   partnerStart: 26, partnerEnd: 60, partnerEnabled: true,
@@ -692,6 +747,7 @@ const SERIES = [
   { key: "partnerStops", label: "partner stops working", color: C.brass, dash: true, on: true },
   { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
   { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
+  { key: "expense", label: "major expense / windfall", color: C.coral, mark: "●", on: true },
 ];
 
 const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
@@ -743,7 +799,7 @@ export const snapshotFromSim = (sim, show, enforceAccess) => {
     required: col("required"), bridge: col("bridge"), neededRetirement: col("neededRetirement"), coast: col("coast"),
     homeAges: evtAges("home"), kidAges: evtAges("kid"),
     END: sim.END, accessYou: sim.accessYou, enforceAccess: !!enforceAccess, coastTarget: sim.coastTarget,
-    unlockAtFire: sim.unlockYouAtFire, partnerStopsAtAge: sim.partnerStopsAtAge,
+    unlockAtFire: sim.unlockYouAtFire, partnerStopsAtAge: sim.partnerStopsAtAge, expenseMarks: sim.expenseMarks,
     fireCross: sim.fireCross, fireCrossValue: sim.fireCrossValue,
     coastCross: sim.coastCross, coastCrossValue: sim.coastCrossValue,
     show,
@@ -837,7 +893,7 @@ export const allocationAdvice = (p) => {
 
 // ---- the trajectory chart, driven entirely by props so it renders from a live sim OR a snapshot ----
 function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess, unlockAtFire,
-  partnerStopsAtAge, coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
+  partnerStopsAtAge, expenseMarks, coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
   // ONE unlock line marking the real liquidity wall: the statutory 59.5 normally, or the earlier
   // retire+5 when a Roth ladder is on (unlockYouAtFire already encodes both; fall back to 59.5 when
   // there's no retirement instant to shorten it).
@@ -857,6 +913,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
     underwater: underwaterSpans.length > 0,
     home: homeRows.length > 0,
     kids: kidRows.length > 0,
+    expense: (expenseMarks && expenseMarks.length > 0),
   };
   return (
     <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: "18px 14px 8px" }}>
@@ -904,6 +961,10 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
           {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
           {show.home ? homeRows.map((h) => <ReferenceDot key={h.age} x={h.age} y={h.portfolio} r={5} fill={C.brass} stroke={C.bg} />) : null}
           {show.kids ? kidRows.map((k) => <ReferenceDot key={k.age} x={k.age} y={k.portfolio} r={4} fill={C.ink} stroke={C.bg} />) : null}
+          {show.expense && expenseMarks ? expenseMarks.map((m, i) => {
+            const row = rows.find((r) => r.age === m.age);
+            return row ? <ReferenceDot key={`x${i}`} x={m.age} y={row.portfolio} r={5} fill={m.amount < 0 ? C.liquid : C.coral} stroke={C.bg} strokeWidth={1.5} /> : null;
+          }) : null}
           {show.coast && coastCross ? <ReferenceDot x={coastCross} y={coastCrossValue} r={5} fill={C.coast} stroke={C.bg} strokeWidth={2} /> : null}
           {show.retire && fireCross ? <ReferenceDot x={fireCross} y={fireCrossValue} r={7} fill={C.brass} stroke={C.ink} strokeWidth={2} /> : null}
         </ComposedChart>
@@ -1051,7 +1112,7 @@ function SharedPlot({ snap, isMobile }) {
       <ChartPanel
         rows={rows} xStart={xStart} END={snap.END} ticks={ticks} underwaterSpans={underwaterSpans}
         accessYou={snap.accessYou} enforceAccess={snap.enforceAccess} unlockAtFire={snap.unlockAtFire}
-        partnerStopsAtAge={snap.partnerStopsAtAge} coastTarget={snap.coastTarget}
+        partnerStopsAtAge={snap.partnerStopsAtAge} expenseMarks={snap.expenseMarks} coastTarget={snap.coastTarget}
         homeRows={homeRows} kidRows={kidRows}
         coastCross={snap.coastCross} coastCrossValue={snap.coastCrossValue}
         fireCross={snap.fireCross} fireCrossValue={snap.fireCrossValue}
@@ -1119,6 +1180,20 @@ function Calculator({ shared, isMobile }) {
       return { ...s, kids: [...s.kids, { birthAge: last ? last.birthAge + 2 : s.currentAge + 2 }] };
     });
   const dropKid = (i) => setP((s) => ({ ...s, kids: s.kids.filter((_, j) => j !== i) }));
+
+  // --- one-off expenses -----------------------------------------------------
+  const setExpense = (i, k, v) =>
+    setP((s) => ({ ...s, expenses: s.expenses.map((e, j) => (j === i ? { ...e, [k]: v } : e)) }));
+  const addExpense = () =>
+    setP((s) => ({ ...s, expenses: [...(s.expenses || []), { label: "", age: Math.min(s.currentAge + 3, s.endAge), amount: 30000, until: null }] }));
+  const dropExpense = (i) => setP((s) => ({ ...s, expenses: s.expenses.filter((_, j) => j !== i) }));
+
+  // --- debts ----------------------------------------------------------------
+  const setDebt = (i, k, v) =>
+    setP((s) => ({ ...s, debts: s.debts.map((d, j) => (j === i ? { ...d, [k]: v } : d)) }));
+  const addDebt = () =>
+    setP((s) => ({ ...s, debts: [...(s.debts || []), { label: "", balance: 25000, apr: 6, payment: 400, startAge: s.currentAge }] }));
+  const dropDebt = (i) => setP((s) => ({ ...s, debts: s.debts.filter((_, j) => j !== i) }));
 
   const sim = useMemo(() => simulate(p), [p]);
   // the same world with the 59.5 gate switched off — the difference IS the cost of the rule
@@ -1434,6 +1509,79 @@ function Calculator({ shared, isMobile }) {
             )}
           </div>
 
+          {/* MAJOR EXPENSES — one-off lumps in today's $; +cost / −windfall; optional window */}
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
+                Major expenses {p.expenses.length > 0 && <span style={{ color: C.mute }}>· {p.expenses.length}</span>}
+              </div>
+              <AddButton onClick={addExpense} label="add expense" />
+            </div>
+            {p.expenses.length === 0 && (
+              <div style={{ fontSize: 11, color: C.mute }}>
+                Weddings, medical, a car, a windfall. <b>+</b> is a cost, <b>−</b> is money in (inheritance, gift, home sale).
+              </div>
+            )}
+            {p.expenses.map((e, i) => (
+              <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, background: C.bg, display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                  <div style={{ flex: 1 }}>
+                    <TextField label="what" value={e.label} placeholder="wedding, medical…" onChange={(v) => setExpense(i, "label", v)} />
+                  </div>
+                  <DropButton onClick={() => dropExpense(i)} />
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                  <Num label="at your age" value={e.age} step={1} onChange={(v) => setExpense(i, "age", v)} />
+                  <Num label="amount (today's $)" value={e.amount} step={1000} min={-1e12} onChange={(v) => setExpense(i, "amount", v)} />
+                  <Num label="until age (blank=one-off)" value={e.until ?? ""} step={1} onChange={(v) => setExpense(i, "until", v || null)} />
+                </div>
+                {e.until && e.until > e.age && (
+                  <div style={{ fontSize: 10, color: C.mute }}>
+                    {fmt(Math.abs(e.amount))}/yr {e.amount < 0 ? "in" : "out"} from age {Math.round(e.age)} to {Math.round(e.until)}.
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* DEBTS — fixed-nominal loans: balance + APR + the monthly payment you make → payoff age */}
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
+                Debts {p.debts.length > 0 && <span style={{ color: C.mute }}>· {p.debts.length}</span>}
+              </div>
+              <AddButton onClick={addDebt} label="add debt" />
+            </div>
+            {p.debts.length === 0 && (
+              <div style={{ fontSize: 11, color: C.mute }}>
+                Student, car, personal loans. Enter the balance, rate, and what you pay each month — the payoff age is derived.
+              </div>
+            )}
+            {p.debts.map((d, i) => {
+              const payoff = sim.debtPayoffs[i];
+              return (
+                <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, background: C.bg, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                    <div style={{ flex: 1 }}>
+                      <TextField label="what" value={d.label} placeholder="student loan, car…" onChange={(v) => setDebt(i, "label", v)} />
+                    </div>
+                    <DropButton onClick={() => dropDebt(i)} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    <Num label="balance now ($)" value={d.balance} step={1000} onChange={(v) => setDebt(i, "balance", v)} />
+                    <Num label="APR %" value={d.apr} step={0.25} onChange={(v) => setDebt(i, "apr", v)} />
+                    <Num label="payment / mo ($)" value={d.payment} step={50} onChange={(v) => setDebt(i, "payment", v)} />
+                  </div>
+                  {d.balance > 0 && d.payment > 0 && (
+                    payoff != null
+                      ? <div style={{ fontSize: 10, color: C.mute }}>Clears at <b style={{ color: C.brass }}>age {payoff.toFixed(1)}</b> · {fmt(d.payment * 12)}/yr while it runs.</div>
+                      : <Warn>Your <b>{fmt(d.payment)}/mo</b> doesn't cover the interest at {d.apr}% — this debt never clears. Raise the payment.</Warn>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>Access to retirement accounts</div>
             <Toggle on={p.enforceAccess} onClick={() => set("enforceAccess", !p.enforceAccess)}
@@ -1598,7 +1746,7 @@ function Calculator({ shared, isMobile }) {
           <ChartPanel
             rows={sim.rows} xStart={p.currentAge} END={sim.END} ticks={ticks} underwaterSpans={underwaterSpans}
             accessYou={sim.accessYou} enforceAccess={p.enforceAccess} unlockAtFire={sim.unlockYouAtFire}
-            partnerStopsAtAge={sim.partnerStopsAtAge} coastTarget={sim.coastTarget}
+            partnerStopsAtAge={sim.partnerStopsAtAge} expenseMarks={sim.expenseMarks} coastTarget={sim.coastTarget}
             homeRows={homeRows} kidRows={kidRows}
             coastCross={sim.coastCross} coastCrossValue={sim.coastCrossValue}
             fireCross={sim.fireCross} fireCrossValue={sim.fireCrossValue}

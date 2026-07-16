@@ -732,3 +732,60 @@ describe("a partner who keeps working after you retire (opt-in)", () => {
       .toBe(simulate({ ...DEFAULTS, partnerEnabled: false }).fireCross);
   });
 });
+
+describe("major one-off expenses and debts", () => {
+  it("empty expenses/debts arrays are a perfect no-op", () => {
+    const base = simulate({ ...DEFAULTS });
+    const same = simulate({ ...DEFAULTS, expenses: [], debts: [] });
+    expect(same.fireCross).toBe(base.fireCross);
+    expect(same.rows).toEqual(base.rows);
+  });
+
+  it("a one-off expense pushes the date out; a windfall pulls it in", () => {
+    const base = simulate({ ...DEFAULTS });
+    const cost = simulate({ ...DEFAULTS, expenses: [{ age: 32, amount: 60000 }] });
+    const gift = simulate({ ...DEFAULTS, expenses: [{ age: 40, amount: -300000 }] });
+    expect(cost.fireCross).toBeGreaterThan(base.fireCross);
+    expect(gift.fireCross).toBeLessThan(base.fireCross);
+    expect(gift.fireCrossValue).toBeLessThan(base.fireCrossValue);
+  });
+
+  it("a windowed expense costs more than the same amount once (and scales with the window)", () => {
+    const once = simulate({ ...DEFAULTS, expenses: [{ age: 35, amount: 10000 }] });
+    const win = simulate({ ...DEFAULTS, expenses: [{ age: 35, amount: 10000, until: 45 }] });
+    expect(win.fireCross).toBeGreaterThan(once.fireCross);
+  });
+
+  it("prices a debt and derives its payoff age by amortization", () => {
+    const s = simulate({ ...DEFAULTS, debts: [{ balance: 80000, apr: 6, payment: 900 }] });
+    expect(s.fireCross).toBeGreaterThan(simulate({ ...DEFAULTS }).fireCross);   // servicing it costs time
+    // 80k at 6% APR, $900/mo -> ~117 months -> ~9.8y from age 27
+    expect(s.debtPayoffs[0]).toBeGreaterThan(27 + 9);
+    expect(s.debtPayoffs[0]).toBeLessThan(27 + 11);
+  });
+
+  it("flags a debt whose payment doesn't cover the interest as never clearing", () => {
+    const s = simulate({ ...DEFAULTS, debts: [{ balance: 80000, apr: 12, payment: 100 }] });
+    expect(s.debtPayoffs[0]).toBeNull();
+  });
+
+  it("stays gate<->forward consistent with expenses + debts (terminal ~0, gate off)", () => {
+    const g = simulate({ ...DEFAULTS, enforceAccess: false,
+      expenses: [{ age: 35, amount: 50000 }, { age: 55, amount: -100000 }],
+      debts: [{ balance: 40000, apr: 5, payment: 800 }] });
+    expect(g.fireCrossValue).toBeCloseTo(g.fireReq, 0);
+    expect(Math.abs(g.end)).toBeLessThan(5);
+  });
+
+  it("surfaces one-off expense markers and is continuous in the amount", () => {
+    const s = simulate({ ...DEFAULTS, expenses: [{ age: 33, amount: 40000 }, { age: 50, amount: -20000 }] });
+    expect(s.expenseMarks).toEqual([{ age: 33, amount: 40000 }, { age: 50, amount: -20000 }]);
+    // nudging the amount moves the date smoothly (no snap)
+    let prev = null, max = 0;
+    for (let a = 20000; a <= 80000; a += 1000) {
+      const c = simulate({ ...DEFAULTS, expenses: [{ age: 35, amount: a }] }).fireCross;
+      if (prev != null) max = Math.max(max, Math.abs(c - prev)); prev = c;
+    }
+    expect(max).toBeLessThan(0.05);
+  });
+});
