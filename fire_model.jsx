@@ -688,8 +688,7 @@ const SERIES = [
   { key: "bridge", label: "needed in taxable (the bridge)", color: C.coral, dash: true },
   { key: "neededRetirement", label: "needed in retirement accounts", color: C.locked, dash: true, on: true },
   { key: "underwater", label: "taxable underwater (< $0)", color: C.coral, mark: "▨", on: true },
-  { key: "access", label: "the 59.5 line", color: C.mute, dash: true, on: true },
-  { key: "unlock", label: "ladder unlock (liquidity wall)", color: C.teal, dash: true, on: true },
+  { key: "access", label: "401k unlock (liquidity wall)", color: C.mute, dash: true, on: true },
   { key: "partnerStops", label: "partner stops working", color: C.brass, dash: true, on: true },
   { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
   { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
@@ -839,8 +838,11 @@ export const allocationAdvice = (p) => {
 // ---- the trajectory chart, driven entirely by props so it renders from a live sim OR a snapshot ----
 function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess, unlockAtFire,
   partnerStopsAtAge, coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
-  // the real liquidity wall for THIS retiree: with a Roth ladder it sits at retire+5, before 59.5
-  const showUnlock = !!enforceAccess && unlockAtFire != null && unlockAtFire < accessYou - 0.05;
+  // ONE unlock line marking the real liquidity wall: the statutory 59.5 normally, or the earlier
+  // retire+5 when a Roth ladder is on (unlockYouAtFire already encodes both; fall back to 59.5 when
+  // there's no retirement instant to shorten it).
+  const wallAt = unlockAtFire ?? accessYou;
+  const wallShifted = wallAt < accessYou - 0.05;   // a ladder pulled it in front of 59.5
   const showPartnerStops = partnerStopsAtAge != null;
   // a series earns a legend entry only when it actually appears on this chart — no point offering to
   // toggle "child born" with no kids, "the 59.5 line" with the gate off, or "retirement point" if you
@@ -851,7 +853,6 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
     bridge: !!enforceAccess,
     neededRetirement: !!enforceAccess,
     access: !!enforceAccess,
-    unlock: showUnlock,
     partnerStops: showPartnerStops,
     underwater: underwaterSpans.length > 0,
     home: homeRows.length > 0,
@@ -887,12 +888,8 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
             labelFormatter={(a) => "Age " + a}
           />
           {show.access && enforceAccess ? (
-            <ReferenceLine x={accessYou} stroke={C.mute} strokeDasharray="2 4"
-              label={{ value: "59.5", fill: C.mute, fontSize: 10, position: "top" }} />
-          ) : null}
-          {show.unlock && showUnlock ? (
-            <ReferenceLine x={unlockAtFire} stroke={C.teal} strokeDasharray="4 3"
-              label={{ value: `unlock ${unlockAtFire.toFixed(0)}`, fill: C.teal, fontSize: 10, position: "top" }} />
+            <ReferenceLine x={wallAt} stroke={C.mute} strokeDasharray="2 4"
+              label={{ value: wallShifted ? `unlock ${wallAt.toFixed(0)}` : `${accessYou}`, fill: C.mute, fontSize: 10, position: "top" }} />
           ) : null}
           {show.partnerStops && showPartnerStops ? (
             <ReferenceLine x={partnerStopsAtAge} stroke={C.brass} strokeDasharray="4 3"
