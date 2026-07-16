@@ -98,7 +98,9 @@ export function simulate(p) {
   // The timeline is indexed by YOUR age, but every partner INPUT is given in the partner's own
   // age — "earns until 65" means until *they* are 65. `partnerAgeAt` is the only bridge between
   // the two frames; nothing else should be doing the arithmetic by hand.
-  const hasPartner = p.partnerAge > 0;
+  // A partner counts when they exist (age > 0) AND are enabled. The enable flag is the checkbox; the
+  // legacy "age 0 = single" path still works, so an old link or a 0 age both mean no partner.
+  const hasPartner = p.partnerAge > 0 && p.partnerEnabled !== false;
   const partnerOffset = hasPartner ? p.currentAge - p.partnerAge : 0;  // >0 when partner is younger
   const partnerAgeAt = (age) => age - partnerOffset;                   // your age -> their age
   const yourAgeWhenPartnerIs = (pa) => pa + partnerOffset;             // …and back again
@@ -399,13 +401,18 @@ export function simulate(p) {
     if (kids.some((k) => k.birthAge === age)) events.push("kid");
     if (collegeGrossToday(age) > 0) events.push("college");
 
+    const reqReal = needAt(age) / infl;
+    const bridgeReal = bridgeAt(age, st.taxAdvYou, st.taxAdvPartner) / infl;
     rows.push({
       age,
       portfolio: Math.round(startReal),
       taxable: Math.round(st.taxable / infl),
       retirement: Math.round((st.taxAdvYou + st.taxAdvPartner) / infl),   // 401k/IRA/HSA buckets
-      required: Math.round(needAt(age) / infl),
-      bridge: Math.round(bridgeAt(age, st.taxAdvYou, st.taxAdvPartner) / infl),
+      required: Math.round(reqReal),
+      bridge: Math.round(bridgeReal),
+      // the slice of the number that may sit locked: everything past the taxable bridge (kept exactly
+      // consistent with the rounded required/bridge so the three lines always sum on-screen)
+      neededRetirement: Math.max(0, Math.round(reqReal) - Math.round(bridgeReal)),
       coast: coastReal == null ? null : Math.round(coastReal),
       save: Math.round(realSave),
       events,
@@ -437,6 +444,7 @@ export function simulate(p) {
             age: T, portfolio: Math.round(fireCrossValue), required: Math.round(fireReq),
             taxable: Math.round(fireTaxable), retirement: Math.round((sT.taxAdvYou + sT.taxAdvPartner) / inflT),
             bridge: Math.round(fireBridge),
+            neededRetirement: Math.max(0, Math.round(fireReq) - Math.round(fireBridge)),
             coast: T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
             save: 0, events: [],
           });
@@ -472,6 +480,9 @@ export function simulate(p) {
     mortgageAtFire: T == null ? 0 : piAt(Math.floor(T)),   // P&I still running when you retire
     minSave: Math.round(minSave), minSaveAge, end, rows, END,
     accessYou, accessPartner, partnerOffset, hasPartner,
+    // the age YOUR accounts actually become spendable given when you retire — with a Roth ladder this
+    // is retire+5 (capped at 59.5), i.e. the real liquidity wall, which can sit well before 59.5
+    unlockYouAtFire: T == null ? null : unlockAt(accessYou, T),
     fireTaxable, fireLocked, fireBridge, lockedShare, illiquidAge,
     coastTarget, coastCross, coastCrossValue, coastToday: coastAt(p.currentAge),
     // the partner's own age at the moments that matter, so the UI never has to do the offset math
@@ -591,7 +602,7 @@ export const DEFAULTS = {
   daycarePerKid: 26000, ongoingPerKid: 8000, collegePerKid: 200000,
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
   partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000,
-  partnerStart: 26, partnerEnd: 60,
+  partnerStart: 26, partnerEnd: 60, partnerEnabled: true,
   // EXCLUDES housing — every home now prices its own carry, mortgage and closing costs, so
   // baking a paid-off house into this number would double-count it. (Was 110k incl. ~36k carry.)
   retirementSpendToday: 100000, swr: 0.035, endAge: 100, coastAge: 48,
@@ -610,8 +621,10 @@ const SERIES = [
   { key: "taxable", label: "taxable (spendable before 59.5)", color: C.liquid },
   { key: "retirement", label: "retirement accounts (401k/IRA)", color: C.locked, on: true },
   { key: "bridge", label: "needed in taxable (the bridge)", color: C.coral, dash: true },
+  { key: "neededRetirement", label: "needed in retirement accounts", color: C.locked, dash: true, on: true },
   { key: "underwater", label: "taxable underwater (< $0)", color: C.coral, mark: "▨", on: true },
   { key: "access", label: "the 59.5 line", color: C.mute, dash: true, on: true },
+  { key: "unlock", label: "ladder unlock (liquidity wall)", color: C.teal, dash: true, on: true },
   { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
   { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
 ];
@@ -662,9 +675,10 @@ export const snapshotFromSim = (sim, show, enforceAccess) => {
   return {
     ages: rows.map((r) => r.age),
     portfolio: col("portfolio"), taxable: col("taxable"), retirement: col("retirement"),
-    required: col("required"), bridge: col("bridge"), coast: col("coast"),
+    required: col("required"), bridge: col("bridge"), neededRetirement: col("neededRetirement"), coast: col("coast"),
     homeAges: evtAges("home"), kidAges: evtAges("kid"),
     END: sim.END, accessYou: sim.accessYou, enforceAccess: !!enforceAccess, coastTarget: sim.coastTarget,
+    unlockAtFire: sim.unlockYouAtFire,
     fireCross: sim.fireCross, fireCrossValue: sim.fireCrossValue,
     coastCross: sim.coastCross, coastCrossValue: sim.coastCrossValue,
     show,
@@ -678,7 +692,8 @@ export const rehydrateRows = (snap) => {
   return snap.ages.map((age, i) => ({
     age,
     portfolio: snap.portfolio[i], taxable: snap.taxable[i], retirement: snap.retirement[i],
-    required: snap.required[i], bridge: snap.bridge[i], coast: snap.coast[i],
+    required: snap.required[i], bridge: snap.bridge[i],
+    neededRetirement: snap.neededRetirement ? snap.neededRetirement[i] : null, coast: snap.coast[i],
     events: [...(homeSet.has(age) ? ["home"] : []), ...(kidSet.has(age) ? ["kid"] : [])],
   }));
 };
@@ -710,7 +725,7 @@ export const sharePayload = (kind, { p, show, sim }) =>
 //   { dir:"toTaxAdv",  slack }                           — over-weighted to TAXABLE, room to spare
 export const allocationAdvice = (p) => {
   const sim = simulate(p);
-  const partnerEarns = p.partnerAge > 0;
+  const partnerEarns = p.partnerAge > 0 && p.partnerEnabled !== false;
   const totalTaxAdv = p.annualTaxAdv + (partnerEarns ? p.partnerTaxAdv : 0);
   // move a fraction `f` of every tax-advantaged contribution into take-home (i.e. into taxable)
   const shift = (f) => ({
@@ -756,8 +771,10 @@ export const allocationAdvice = (p) => {
 };
 
 // ---- the trajectory chart, driven entirely by props so it renders from a live sim OR a snapshot ----
-function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess,
+function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess, unlockAtFire,
   coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
+  // the real liquidity wall for THIS retiree: with a Roth ladder it sits at retire+5, before 59.5
+  const showUnlock = !!enforceAccess && unlockAtFire != null && unlockAtFire < accessYou - 0.05;
   // a series earns a legend entry only when it actually appears on this chart — no point offering to
   // toggle "child born" with no kids, "the 59.5 line" with the gate off, or "retirement point" if you
   // never retire. The always-present curves stay; the conditional marks/lines come and go with the data.
@@ -765,7 +782,9 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
     portfolio: true, required: true, taxable: true, retirement: true, coast: true,
     retire: fireCross != null,
     bridge: !!enforceAccess,
+    neededRetirement: !!enforceAccess,
     access: !!enforceAccess,
+    unlock: showUnlock,
     underwater: underwaterSpans.length > 0,
     home: homeRows.length > 0,
     kids: kidRows.length > 0,
@@ -794,6 +813,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
               portfolio: "Portfolio (total)", taxable: "Taxable (spendable now)",
               retirement: "Retirement accounts (401k/IRA)",
               required: "Needed in total", bridge: "Needed in taxable",
+              neededRetirement: "Needed in retirement accounts",
               coast: `Coast bar (stop saving, retire at ${coastTarget})`,
             }[name] || name]}
             labelFormatter={(a) => "Age " + a}
@@ -802,9 +822,14 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
             <ReferenceLine x={accessYou} stroke={C.mute} strokeDasharray="2 4"
               label={{ value: "59.5", fill: C.mute, fontSize: 10, position: "top" }} />
           ) : null}
+          {show.unlock && showUnlock ? (
+            <ReferenceLine x={unlockAtFire} stroke={C.teal} strokeDasharray="4 3"
+              label={{ value: `unlock ${unlockAtFire.toFixed(0)}`, fill: C.teal, fontSize: 10, position: "top" }} />
+          ) : null}
           {show.coast ? <Line type="monotone" dataKey="coast" stroke={C.coast} strokeWidth={1.5} strokeDasharray="6 3" dot={false} connectNulls={false} /> : null}
           {show.required ? <Line type="monotone" dataKey="required" stroke={C.brass} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
           {show.bridge && enforceAccess ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
+          {show.neededRetirement && enforceAccess ? <Line type="monotone" dataKey="neededRetirement" stroke={C.locked} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
           {show.retirement ? <Line type="monotone" dataKey="retirement" stroke={C.locked} strokeWidth={1.5} dot={false} /> : null}
           {show.taxable ? <Line type="monotone" dataKey="taxable" stroke={C.liquid} strokeWidth={1.5} dot={false} /> : null}
           {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
@@ -956,7 +981,7 @@ function SharedPlot({ snap, isMobile }) {
       </div>
       <ChartPanel
         rows={rows} xStart={xStart} END={snap.END} ticks={ticks} underwaterSpans={underwaterSpans}
-        accessYou={snap.accessYou} enforceAccess={snap.enforceAccess} coastTarget={snap.coastTarget}
+        accessYou={snap.accessYou} enforceAccess={snap.enforceAccess} unlockAtFire={snap.unlockAtFire} coastTarget={snap.coastTarget}
         homeRows={homeRows} kidRows={kidRows}
         coastCross={snap.coastCross} coastCrossValue={snap.coastCrossValue}
         fireCross={snap.fireCross} fireCrossValue={snap.fireCrossValue}
@@ -1072,7 +1097,7 @@ function Calculator({ shared, isMobile }) {
       { label: "Retirement spend −$10k/yr", over: { retirementSpendToday: Math.max(0, p.retirementSpendToday - 10000) } },
       { label: "Your take-home +$10k/yr", over: { annualTakeHome: p.annualTakeHome + 10000 } },
       { label: "Living costs −$5k/yr", over: { nonHousingLiving: Math.max(0, p.nonHousingLiving - 5000) } },
-      ...(p.partnerAge > 0
+      ...(p.partnerAge > 0 && p.partnerEnabled !== false
         ? [{ label: "Partner take-home +$10k/yr", over: { partnerIncome: p.partnerIncome + 10000 } }] : []),
       ...(p.homes.length
         ? [{ label: p.homes.length > 1 ? "Every home −$100k" : "Home price −$100k",
@@ -1176,10 +1201,22 @@ function Calculator({ shared, isMobile }) {
             ]],
           ].map(([group, fields]) => (
             <div key={group} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14 }}>
-              <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 10 }}>{group}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <span style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>{group}</span>
+                {group === "Partner" && (
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, color: C.mute, letterSpacing: ".03em" }}>
+                    <input type="checkbox" checked={p.partnerEnabled !== false}
+                      onChange={(e) => set("partnerEnabled", e.target.checked)}
+                      style={{ accentColor: C.teal, cursor: "pointer", width: 15, height: 15 }} />
+                    {p.partnerEnabled !== false ? "included" : "no partner"}
+                  </label>
+                )}
+              </div>
+              {!(group === "Partner" && p.partnerEnabled === false) && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {fields.map(([l, k, o]) => field(l, k, p[k], set, o))}
               </div>
+              )}
 
               {/* the locked slice cannot exceed the pot it is a slice of — this fires if the
                   portfolio is later lowered beneath a 401k figure that was already valid */}
@@ -1191,20 +1228,20 @@ function Calculator({ shared, isMobile }) {
                   lower the 401k figure.
                 </Warn>
               )}
-              {group === "Partner" && p.partnerAge > 0 && p.partnerPortfolioTaxAdv > p.partnerPortfolio && (
+              {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && p.partnerPortfolioTaxAdv > p.partnerPortfolio && (
                 <Warn>
                   Your partner's 401k/IRA (<b>{fmt(p.partnerPortfolioTaxAdv)}</b>) is more than their whole
                   portfolio (<b>{fmt(p.partnerPortfolio)}</b>). The model caps it at the portfolio — all locked,
                   none taxable.
                 </Warn>
               )}
-              {group === "Partner" && p.partnerAge > 0 && p.partnerStart < p.partnerAge && (
+              {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && p.partnerStart < p.partnerAge && (
                 <Warn>
                   Your partner can't start earning at <b>{p.partnerStart}</b> — they're already{" "}
                   <b>{p.partnerAge}</b>. The model starts their income now, at <b>{p.partnerAge}</b>.
                 </Warn>
               )}
-              {group === "Partner" && p.partnerAge > 0 && p.partnerEnd < p.partnerStart && (
+              {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && p.partnerEnd < p.partnerStart && (
                 <Warn>
                   Their earning window ends (<b>{p.partnerEnd}</b>) before it starts (<b>{p.partnerStart}</b>).
                   Left alone that would pay them <b>nothing at all</b>; the model instead holds the end at{" "}
@@ -1212,7 +1249,7 @@ function Calculator({ shared, isMobile }) {
                 </Warn>
               )}
 
-              {group.startsWith("Partner") && p.partnerAge > 0 && (
+              {group.startsWith("Partner") && p.partnerEnabled !== false && p.partnerAge > 0 && (
                 <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
                   <b style={{ color: C.ink }}>Every field above is in your partner's own age.</b>{" "}
                   {sim.partnerOffset === 0
@@ -1469,7 +1506,7 @@ function Calculator({ shared, isMobile }) {
 
           <ChartPanel
             rows={sim.rows} xStart={p.currentAge} END={sim.END} ticks={ticks} underwaterSpans={underwaterSpans}
-            accessYou={sim.accessYou} enforceAccess={p.enforceAccess} coastTarget={sim.coastTarget}
+            accessYou={sim.accessYou} enforceAccess={p.enforceAccess} unlockAtFire={sim.unlockYouAtFire} coastTarget={sim.coastTarget}
             homeRows={homeRows} kidRows={kidRows}
             coastCross={sim.coastCross} coastCrossValue={sim.coastCrossValue}
             fireCross={sim.fireCross} fireCrossValue={sim.fireCrossValue}

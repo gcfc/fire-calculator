@@ -635,3 +635,34 @@ describe("allocation advice — tax-advantaged vs. taxable split", () => {
     expect(a.slack).toBeGreaterThan(2 * DEFAULTS.retirementSpendToday);
   });
 });
+
+describe("partner enable/disable + new chart requirement lines", () => {
+  it("partnerEnabled:false matches dropping to a single filer, and re-enabling restores it", () => {
+    const off = simulate({ ...DEFAULTS, partnerEnabled: false });     // keep age 26, just disabled
+    const single = simulate({ ...DEFAULTS, partnerAge: 0 });          // the legacy age-0 path
+    expect(off.hasPartner).toBe(false);
+    expect(off.fireCross).toBeCloseTo(single.fireCross, 9);
+    expect(off.END).toBe(single.END);
+    // the flag is additive: enabled + a real age is the full partnered result
+    expect(simulate({ ...DEFAULTS, partnerEnabled: true }).fireCross).toBeCloseTo(simulate(DEFAULTS).fireCross, 9);
+  });
+
+  it("age 0 still means single even with the box checked", () => {
+    expect(simulate({ ...DEFAULTS, partnerAge: 0, partnerEnabled: true }).hasPartner).toBe(false);
+  });
+
+  it("splits the total requirement into the taxable bridge plus the retirement-accounts line", () => {
+    const s = simulate(DEFAULTS);
+    for (const r of s.rows) {
+      expect(r.neededRetirement).toBe(Math.max(0, r.required - r.bridge));
+    }
+  });
+
+  it("reports the real liquidity wall: retire+5 with a Roth ladder, statutory 59.5 without", () => {
+    const ladder = simulate({ ...DEFAULTS, rothLadder: true });
+    expect(ladder.fireCross).toBeLessThan(ladder.accessYou);          // retires before 59.5
+    expect(ladder.unlockYouAtFire).toBeCloseTo(Math.min(ladder.accessYou, ladder.fireCross + DEFAULTS.ladderYears), 6);
+    const hard = simulate({ ...DEFAULTS, rothLadder: false });
+    expect(hard.unlockYouAtFire).toBe(hard.accessYou);
+  });
+});
