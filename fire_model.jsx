@@ -607,7 +607,7 @@ export const DEFAULTS = {
   // baking a paid-off house into this number would double-count it. (Was 110k incl. ~36k carry.)
   retirementSpendToday: 100000, swr: 0.035, endAge: 100, coastAge: 48,
   collegeSpread: true, use529: false, annual529: 0,
-  enforceAccess: true, rothLadder: true, ladderYears: 5, accessAge: 59.5,
+  enforceAccess: true, rothLadder: false, ladderYears: 5, accessAge: 59.5,
 };
 
 // every mark on the chart, switchable. `on` is the default visibility: start with the

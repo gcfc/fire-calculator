@@ -21,11 +21,11 @@ const SINGLE = {
 };
 
 // sweep an input finely and hand back the per-step jumps in whatever you measure
-const sweep = (key, from, to, step, pick) => {
+const sweep = (key, from, to, step, pick, base = {}) => {
   const jumps = [];
   let prev = null;
   for (let v = from; v <= to; v += step) {
-    const cur = pick(run({ [key]: v }));
+    const cur = pick(run({ ...base, [key]: v }));
     if (prev !== null) jumps.push(Math.abs(cur - prev));
     prev = cur;
   }
@@ -36,22 +36,25 @@ describe("continuity — the terminal-value sawtooth must never come back", () =
   // THE BUG: retirement snapped to Math.ceil(fireCross), so nudging income up grew the surplus
   // smoothly and then collapsed it to ~0 the moment the ceiling tipped a whole year earlier.
   // Terminal value swung $3.92M -> $0.30M between two adjacent inputs.
+  // NB: these pin rothLadder:true so TOTAL wealth is the binding constraint (leftover -> 0). With the
+  // ladder off — the default — the 59.5 bridge binds and you legitimately over-save (see the LIQUIDITY
+  // test below), so "leaves zero" would not apply; the continuity guard is what matters either way.
   it("leaves exactly zero at the horizon when total wealth is what binds", () => {
     for (let th = 140000; th <= 175000; th += 500) {
-      expect(Math.abs(run({ annualTakeHome: th }).end)).toBeLessThan(1);
+      expect(Math.abs(run({ annualTakeHome: th, rothLadder: true }).end)).toBeLessThan(1);
     }
   });
 
   it("never jumps the terminal value across a fine sweep of take-home", () => {
-    expect(sweep("annualTakeHome", 140000, 175000, 250, (s) => s.end).max).toBeLessThan(1);
+    expect(sweep("annualTakeHome", 140000, 175000, 250, (s) => s.end, { rothLadder: true }).max).toBeLessThan(1);
   });
 
   it("moves the retirement age continuously in take-home", () => {
-    expect(sweep("annualTakeHome", 140000, 175000, 250, (s) => s.fireCross).max).toBeLessThan(0.02);
+    expect(sweep("annualTakeHome", 140000, 175000, 250, (s) => s.fireCross, { rothLadder: true }).max).toBeLessThan(0.02);
   });
 
   it("moves the retirement age continuously in partner income", () => {
-    expect(sweep("partnerIncome", 100000, 140000, 250, (s) => s.fireCross).max).toBeLessThan(0.02);
+    expect(sweep("partnerIncome", 100000, 140000, 250, (s) => s.fireCross, { rothLadder: true }).max).toBeLessThan(0.02);
   });
 
   it("moves the retirement age continuously in starting portfolio", () => {
@@ -91,9 +94,12 @@ describe("age frames — partner inputs are in the PARTNER's own age", () => {
   it("is invariant to shifting the whole household forward in time", () => {
     // same life, started 5 years later: years-to-retirement must be identical.
     // both sides pin the home explicitly — otherwise `a` would take its home from DEFAULTS and
-    // `b` from HOME(), and the two worlds would not be the same life at all
-    const a = run({ homes: [HOME()], partnerStart: 26, partnerEnd: 65 });
+    // `b` from HOME(), and the two worlds would not be the same life at all.
+    // rothLadder:true keeps the 59.5 unlock RELATIVE (retire+5); with the hard gate the wall is an
+    // absolute age, so starting 5 years later genuinely shortens the bridge and invariance won't hold.
+    const a = run({ rothLadder: true, homes: [HOME()], partnerStart: 26, partnerEnd: 65 });
     const b = run({
+      rothLadder: true,
       currentAge: 32, partnerAge: 31, partnerStart: 26, partnerEnd: 65,
       kids: [{ birthAge: 35 }, { birthAge: 37 }],
       homes: [HOME({ purchaseAge: 36 })],
@@ -241,8 +247,10 @@ describe("coast FIRE", () => {
 
 describe("horizon (end age) is configurable", () => {
   it("raises the number and delays retirement as the horizon lengthens", () => {
-    const short = run({ endAge: 85 });
-    const long = run({ endAge: 110 });
+    // total wealth must be the binding constraint for the horizon to move the number — pin the ladder
+    // on, else the 59.5 bridge (which is horizon-independent) sets the date and the number won't move
+    const short = run({ endAge: 85, rothLadder: true });
+    const long = run({ endAge: 110, rothLadder: true });
     expect(short.fireCrossValue).toBeLessThan(long.fireCrossValue);
     expect(short.fireCross).toBeLessThanOrEqual(long.fireCross);
     expect(short.coastToday).toBeLessThan(long.coastToday);
@@ -629,8 +637,10 @@ describe("allocation advice — tax-advantaged vs. taxable split", () => {
   });
 
   it("flags spare liquidity when you retire early with taxable to burn", () => {
-    // the default household retires well before 59.5 with far more liquid than the bridge needs
-    const a = allocationAdvice({ ...DEFAULTS });
+    // with a Roth ladder the household retires well before 59.5 with far more liquid than the (short,
+    // retire+5) bridge needs — the over-liquid case. (Ladder off, the same household is liquidity-bound
+    // and would instead be told to shift toward taxable — covered by the locked-heavy test above.)
+    const a = allocationAdvice({ ...DEFAULTS, rothLadder: true });
     expect(a?.dir).toBe("toTaxAdv");
     expect(a.slack).toBeGreaterThan(2 * DEFAULTS.retirementSpendToday);
   });
@@ -664,5 +674,11 @@ describe("partner enable/disable + new chart requirement lines", () => {
     expect(ladder.unlockYouAtFire).toBeCloseTo(Math.min(ladder.accessYou, ladder.fireCross + DEFAULTS.ladderYears), 6);
     const hard = simulate({ ...DEFAULTS, rothLadder: false });
     expect(hard.unlockYouAtFire).toBe(hard.accessYou);
+  });
+
+  it("defaults the Roth ladder OFF, so the unlock wall is the statutory 59.5 (no ladder line)", () => {
+    expect(DEFAULTS.rothLadder).toBe(false);
+    const s = simulate(DEFAULTS);
+    expect(s.unlockYouAtFire).toBe(s.accessYou);   // effective unlock == 59.5 => the ladder line stays hidden
   });
 });
