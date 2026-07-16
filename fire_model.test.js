@@ -682,3 +682,53 @@ describe("partner enable/disable + new chart requirement lines", () => {
     expect(s.unlockYouAtFire).toBe(s.accessYou);   // effective unlock == 59.5 => the ladder line stays hidden
   });
 });
+
+describe("a partner who keeps working after you retire (opt-in)", () => {
+  it("is a perfect no-op when off (default) across a spread of inputs", () => {
+    for (const over of [{}, { partnerEnd: 65 }, { partnerAge: 35 }, { annualTakeHome: 170000 }, { enforceAccess: false }]) {
+      const base = simulate({ ...DEFAULTS, ...over });
+      const same = simulate({ ...DEFAULTS, ...over, partnerWorksAfterRetire: false, interimLivingToday: 999 });
+      expect(same.fireCross).toBe(base.fireCross);
+      expect(same.end).toBe(base.end);
+      expect(same.rows).toEqual(base.rows);
+    }
+  });
+
+  it("retires you earlier and shrinks the number when the partner works past your date", () => {
+    const off = simulate({ ...DEFAULTS });                                  // retire together
+    const on = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true });    // partner works to their 60
+    expect(on.fireCross).toBeLessThan(off.fireCross - 1);
+    expect(on.fireCrossValue).toBeLessThan(off.fireCrossValue);
+    expect(on.partnerStopsAtAge).toBeGreaterThan(on.fireCross);             // they really do outlast your retirement
+  });
+
+  it("stays gate<->forward consistent: terminal lands ~0 when total wealth binds", () => {
+    // gate off => no bridge => total binds => the closed-form requirement must match the drawdown
+    const g = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, enforceAccess: false });
+    expect(g.fireCrossValue).toBeCloseTo(g.fireReq, 0);
+    expect(Math.abs(g.end)).toBeLessThan(5);
+  });
+
+  it("moves the retirement date continuously in a continuous input (no sawtooth)", () => {
+    expect(sweep("annualTakeHome", 140000, 175000, 250, (s) => s.fireCross, { partnerWorksAfterRetire: true }).max)
+      .toBeLessThan(0.02);
+  });
+
+  it("interim living defaults to working-years living and moves the date monotonically", () => {
+    const inherit = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true });
+    const explicit = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, interimLivingToday: DEFAULTS.nonHousingLiving });
+    expect(inherit.fireCross).toBe(explicit.fireCross);                     // null == nonHousingLiving
+    const lean = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, interimLivingToday: 20000 });
+    const rich = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, interimLivingToday: 80000 });
+    expect(lean.fireCross).toBeLessThan(rich.fireCross);                    // spend more in between -> retire later
+  });
+
+  it("does nothing when the partner already stops before you retire, or when disabled", () => {
+    const early = { partnerEnd: 30 };                                        // their 30 is well before your date
+    expect(simulate({ ...DEFAULTS, ...early, partnerWorksAfterRetire: true }).fireCross)
+      .toBe(simulate({ ...DEFAULTS, ...early }).fireCross);
+    // no partner at all -> the toggle is inert
+    expect(simulate({ ...DEFAULTS, partnerEnabled: false, partnerWorksAfterRetire: true }).fireCross)
+      .toBe(simulate({ ...DEFAULTS, partnerEnabled: false }).fireCross);
+  });
+});

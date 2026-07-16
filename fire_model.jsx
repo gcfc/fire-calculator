@@ -46,6 +46,7 @@ export function simulate(p) {
   const grow = (dt) => Math.pow(G, dt);                 // what $1 becomes after dt years
   const fv = (dt) => (grow(dt) - 1) / delta;            // future value of $1/yr flowing for dt years
   const pvFlow = (dt) => (1 - Math.pow(G, -dt)) / delta; // present value of the same
+  const inflAt = (age) => Math.pow(1 + p.inflation, age - p.currentAge);   // today's $ -> nominal at age
 
   // --- homes: any number of them, each with its own loan ---------------------
   // Every home is an independent stream of cash: a lump at closing, level P&I until its own
@@ -191,6 +192,29 @@ export function simulate(p) {
                                            // contribution scheduled after retirement would be free
                                            // money, and a slow 529 would buy you an earlier date.
   };
+
+  // ---- one partner still earning after you retire (opt-in) ------------------
+  // Their earn-window [earnFrom, earnTo] is fixed in the partner's OWN age, so it is independent of
+  // when YOU retire and nets cleanly into both the requirement and the forward drawdown. Off by
+  // default → partnerEarnsInRetirement is always false and every wrapper below is exactly the plain
+  // retireExpense() it stands in for, so nothing changes.
+  const partnerStopAge = hasPartner ? yourAgeWhenPartnerIs(earnTo) : null;   // your age when they stop
+  const partnerEarnsInRetirement = (age) =>
+    p.partnerWorksAfterRetire && hasPartner &&
+    partnerAgeAt(age) >= earnFrom && partnerAgeAt(age) <= earnTo;
+  const interimLiving = p.interimLivingToday ?? p.nonHousingLiving;   // editable; defaults to working-years living
+  // the household bill while they still work: the interim non-housing figure in place of the full
+  // retirement budget; housing / college / 529 are untouched (reuse retireExpense and swap the term)
+  const interimExpense = (age) => retireExpense(age) - (p.retirementSpendToday - interimLiving) * inflAt(age);
+  const partnerTakeHomeAt = (age) => partnerEarnsInRetirement(age) ? p.partnerIncome * inflAt(age) : 0;   // liquid
+  const partnerTaxAdvAt = (age) => partnerEarnsInRetirement(age) ? p.partnerTaxAdv * inflAt(age) : 0;     // locked
+  // net bill a retired household must fund in year `age` — total (all partner income counts as wealth)
+  // and liquid (only take-home is spendable pre-59.5; their 401k contribution is locked)
+  const retireNet = (age) => partnerEarnsInRetirement(age)
+    ? interimExpense(age) - partnerTakeHomeAt(age) - partnerTaxAdvAt(age) : retireExpense(age);
+  const retireNetLiquid = (age) => partnerEarnsInRetirement(age)
+    ? interimExpense(age) - partnerTakeHomeAt(age) : retireExpense(age);
+
   // ---- the retirement requirement -------------------------------------------
   // Salary, spending and saving accrue continuously (see the conventions at the top), which is what
   // lets retirement land on a real-valued instant. Retiring on the integer ceiling of the crossing
@@ -202,13 +226,13 @@ export function simulate(p) {
   // with the balance still compounding while it is being drawn down.
   const Need = {}; Need[END + 1] = 0;
   for (let age = END; age >= p.currentAge; age--) {
-    Need[age] = (Need[age + 1] + retireExpense(age) * fv(1)) / G;
+    Need[age] = (Need[age + 1] + retireNet(age) * fv(1)) / G;   // net of any partner income still coming in
   }
   // …and the same requirement evaluated at ANY instant, not just birthdays
   const needAt = (t) => {
     if (t >= END + 1) return 0;
     const A = Math.floor(t), rest = A + 1 - t;
-    return (Need[A + 1] + retireExpense(A) * fv(rest)) / grow(rest);
+    return (Need[A + 1] + retireNet(A) * fv(rest)) / grow(rest);
   };
 
   // --- the liquidity (age-59.5) machinery ----------------------------------
@@ -216,13 +240,28 @@ export function simulate(p) {
   // A 401k/IRA/HSA dollar cannot pay a bill before 59.5 without a 10% penalty, so a retirement
   // before then must be bridged out of the TAXABLE bucket alone.
 
-  // present value, at instant `t`, of every dollar you must spend between `t` and `u`
+  // present value, at instant `t`, of the SPENDABLE bill between `t` and `u` (net of a working
+  // partner's take-home, which is liquid; their 401k contribution is handled separately, below)
   const pvSpend = (t, u) => {
     let acc = 0, disc = 1, s = t;
     const stop = Math.min(u, END + 1);
     while (s < stop) {
       const yr = Math.floor(s), s1 = Math.min(stop, yr + 1), dt = s1 - s;
-      acc += disc * retireExpense(yr) * pvFlow(dt);
+      acc += disc * retireNetLiquid(yr) * pvFlow(dt);
+      disc *= Math.pow(G, -dt);
+      s = s1;
+    }
+    return acc;
+  };
+
+  // present value, at instant `t`, of a working partner's 401k contributions between `t` and `u` —
+  // money that lands in their LOCKED bucket and is waiting there when it unlocks (zero when off)
+  const pvPartnerContribs = (t, u) => {
+    let acc = 0, disc = 1, s = t;
+    const stop = Math.min(u, END + 1);
+    while (s < stop) {
+      const yr = Math.floor(s), s1 = Math.min(stop, yr + 1), dt = s1 - s;
+      acc += disc * partnerTaxAdvAt(yr) * pvFlow(dt);
       disc *= Math.pow(G, -dt);
       s = s1;
     }
@@ -239,9 +278,12 @@ export function simulate(p) {
   // a checkpoint: taxable (plus whatever unlocked earlier) must cover all spending up to its opening.
   const bridgeAt = (T, balYou, balPartner) => {
     if (!p.enforceAccess) return 0;
+    const uPartner = unlockAt(accessPartner, T);
+    // a partner still working past T keeps funding their 401k, so more is locked-and-waiting by the
+    // time it unlocks — credit the PV of those contributions to the partner's checkpoint (0 when off)
     const buckets = [
       { u: unlockAt(accessYou, T), bal: balYou },
-      { u: unlockAt(accessPartner, T), bal: balPartner },
+      { u: uPartner, bal: balPartner + pvPartnerContribs(T, uPartner) },
     ].filter((b) => b.bal > 0).sort((x, y) => x.u - y.u);
     let need = 0, unlocked = 0;
     for (const b of buckets) {
@@ -302,6 +344,26 @@ export function simulate(p) {
     return { st: { taxable, taxAdvYou: ty, taxAdvPartner: tp }, short };
   };
 
+  // one retired sub-year. When the partner is still earning their take-home offsets the bill (a
+  // surplus lands in taxable) and their 401k contribution grows the locked bucket; otherwise this is
+  // exactly spend(). Same taxable-first, then-unlocked draw order, so the two stay consistent.
+  const retireStep = (st, t0, t1, T) => {
+    const age = Math.floor(t0);
+    if (!partnerEarnsInRetirement(age)) return spend(st, t0, t1, T);
+    const dt = t1 - t0, g = grow(dt);
+    let taxable = st.taxable * g, ty = st.taxAdvYou * g, tp = st.taxAdvPartner * g;
+    tp += partnerTaxAdvAt(age) * fv(dt);                                  // locked contribution keeps building
+    let owed = (interimExpense(age) - partnerTakeHomeAt(age)) * fv(dt);   // net of take-home
+    if (owed < 0) { taxable += -owed; owed = 0; }                         // partner out-earned the bill -> save it
+    const draw = (bal) => { const x = Math.min(bal, owed); owed -= x; return bal - x; };
+    taxable = draw(taxable);
+    if (t0 >= unlockAt(accessYou, T) - 1e-9) ty = draw(ty);
+    if (t0 >= unlockAt(accessPartner, T) - 1e-9) tp = draw(tp);
+    let short = false;
+    if (owed > 1) { taxable -= owed; short = true; }
+    return { st: { taxable, taxAdvYou: ty, taxAdvPartner: tp }, short };
+  };
+
   // spend from t0 to t1, splitting at any unlock instant that falls inside
   const spendSpan = (st, t0, t1, T) => {
     const cuts = [t0, t1];
@@ -311,7 +373,7 @@ export function simulate(p) {
     cuts.sort((a, b) => a - b);
     let s = st, short = false;
     for (let i = 0; i < cuts.length - 1; i++) {
-      const r = spend(s, cuts[i], cuts[i + 1], T);
+      const r = retireStep(s, cuts[i], cuts[i + 1], T);   // spend(), plus a working partner's income
       s = r.st; short = short || r.short;
     }
     return { st: s, short };
@@ -480,6 +542,8 @@ export function simulate(p) {
     mortgageAtFire: T == null ? 0 : piAt(Math.floor(T)),   // P&I still running when you retire
     minSave: Math.round(minSave), minSaveAge, end, rows, END,
     accessYou, accessPartner, partnerOffset, hasPartner,
+    // your age when a still-working partner stops earning — only meaningful when that's after you retire
+    partnerStopsAtAge: p.partnerWorksAfterRetire && hasPartner && T != null && partnerStopAge > T ? partnerStopAge : null,
     // the age YOUR accounts actually become spendable given when you retire — with a Roth ladder this
     // is retire+5 (capped at 59.5), i.e. the real liquidity wall, which can sit well before 59.5
     unlockYouAtFire: T == null ? null : unlockAt(accessYou, T),
@@ -603,6 +667,7 @@ export const DEFAULTS = {
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
   partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000,
   partnerStart: 26, partnerEnd: 60, partnerEnabled: true,
+  partnerWorksAfterRetire: false, interimLivingToday: null,
   // EXCLUDES housing — every home now prices its own carry, mortgage and closing costs, so
   // baking a paid-off house into this number would double-count it. (Was 110k incl. ~36k carry.)
   retirementSpendToday: 100000, swr: 0.035, endAge: 100, coastAge: 48,
@@ -625,6 +690,7 @@ const SERIES = [
   { key: "underwater", label: "taxable underwater (< $0)", color: C.coral, mark: "▨", on: true },
   { key: "access", label: "the 59.5 line", color: C.mute, dash: true, on: true },
   { key: "unlock", label: "ladder unlock (liquidity wall)", color: C.teal, dash: true, on: true },
+  { key: "partnerStops", label: "partner stops working", color: C.brass, dash: true, on: true },
   { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
   { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
 ];
@@ -678,7 +744,7 @@ export const snapshotFromSim = (sim, show, enforceAccess) => {
     required: col("required"), bridge: col("bridge"), neededRetirement: col("neededRetirement"), coast: col("coast"),
     homeAges: evtAges("home"), kidAges: evtAges("kid"),
     END: sim.END, accessYou: sim.accessYou, enforceAccess: !!enforceAccess, coastTarget: sim.coastTarget,
-    unlockAtFire: sim.unlockYouAtFire,
+    unlockAtFire: sim.unlockYouAtFire, partnerStopsAtAge: sim.partnerStopsAtAge,
     fireCross: sim.fireCross, fireCrossValue: sim.fireCrossValue,
     coastCross: sim.coastCross, coastCrossValue: sim.coastCrossValue,
     show,
@@ -772,9 +838,10 @@ export const allocationAdvice = (p) => {
 
 // ---- the trajectory chart, driven entirely by props so it renders from a live sim OR a snapshot ----
 function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess, unlockAtFire,
-  coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
+  partnerStopsAtAge, coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
   // the real liquidity wall for THIS retiree: with a Roth ladder it sits at retire+5, before 59.5
   const showUnlock = !!enforceAccess && unlockAtFire != null && unlockAtFire < accessYou - 0.05;
+  const showPartnerStops = partnerStopsAtAge != null;
   // a series earns a legend entry only when it actually appears on this chart — no point offering to
   // toggle "child born" with no kids, "the 59.5 line" with the gate off, or "retirement point" if you
   // never retire. The always-present curves stay; the conditional marks/lines come and go with the data.
@@ -785,6 +852,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
     neededRetirement: !!enforceAccess,
     access: !!enforceAccess,
     unlock: showUnlock,
+    partnerStops: showPartnerStops,
     underwater: underwaterSpans.length > 0,
     home: homeRows.length > 0,
     kids: kidRows.length > 0,
@@ -825,6 +893,10 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
           {show.unlock && showUnlock ? (
             <ReferenceLine x={unlockAtFire} stroke={C.teal} strokeDasharray="4 3"
               label={{ value: `unlock ${unlockAtFire.toFixed(0)}`, fill: C.teal, fontSize: 10, position: "top" }} />
+          ) : null}
+          {show.partnerStops && showPartnerStops ? (
+            <ReferenceLine x={partnerStopsAtAge} stroke={C.brass} strokeDasharray="4 3"
+              label={{ value: `partner stops ${partnerStopsAtAge.toFixed(0)}`, fill: C.brass, fontSize: 10, position: "insideTopRight" }} />
           ) : null}
           {show.coast ? <Line type="monotone" dataKey="coast" stroke={C.coast} strokeWidth={1.5} strokeDasharray="6 3" dot={false} connectNulls={false} /> : null}
           {show.required ? <Line type="monotone" dataKey="required" stroke={C.brass} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
@@ -981,7 +1053,8 @@ function SharedPlot({ snap, isMobile }) {
       </div>
       <ChartPanel
         rows={rows} xStart={xStart} END={snap.END} ticks={ticks} underwaterSpans={underwaterSpans}
-        accessYou={snap.accessYou} enforceAccess={snap.enforceAccess} unlockAtFire={snap.unlockAtFire} coastTarget={snap.coastTarget}
+        accessYou={snap.accessYou} enforceAccess={snap.enforceAccess} unlockAtFire={snap.unlockAtFire}
+        partnerStopsAtAge={snap.partnerStopsAtAge} coastTarget={snap.coastTarget}
         homeRows={homeRows} kidRows={kidRows}
         coastCross={snap.coastCross} coastCrossValue={snap.coastCrossValue}
         fireCross={snap.fireCross} fireCrossValue={snap.fireCrossValue}
@@ -1218,6 +1291,24 @@ function Calculator({ shared, isMobile }) {
               </div>
               )}
 
+              {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && (
+                <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={!!p.partnerWorksAfterRetire}
+                      onChange={(e) => set("partnerWorksAfterRetire", e.target.checked)}
+                      style={{ accentColor: C.teal, cursor: "pointer", width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
+                    <span style={{ fontSize: 11, color: C.ink, lineHeight: 1.4 }}>
+                      Partner keeps working after you retire
+                      <span style={{ display: "block", fontSize: 10, color: C.mute, marginTop: 2 }}>
+                        Their income (to their age {p.partnerEnd}) funds the household, so you can retire sooner.
+                      </span>
+                    </span>
+                  </label>
+                  {p.partnerWorksAfterRetire &&
+                    field("Non-housing living / yr while they work", "interimLivingToday", p.interimLivingToday ?? p.nonHousingLiving, set, { step: 1000 })}
+                </div>
+              )}
+
               {/* the locked slice cannot exceed the pot it is a slice of — this fires if the
                   portfolio is later lowered beneath a 401k figure that was already valid */}
               {group === "You" && p.startPortfolioTaxAdv > p.startPortfolio && (
@@ -1258,10 +1349,13 @@ function Calculator({ shared, isMobile }) {
                   <br />
                   Their 401k opens at their {p.accessAge} — when you are{" "}
                   <span style={{ color: C.brass }}>{sim.accessPartner.toFixed(1)}</span>.
-                  {sim.partnerAgeAtFire != null && (
+                  {sim.partnerStopsAtAge != null ? (
+                    <> You retire first; they keep earning until they're <b>{p.partnerEnd}</b> — your age{" "}
+                      <span style={{ color: C.brass }}>{sim.partnerStopsAtAge.toFixed(1)}</span>.</>
+                  ) : sim.partnerAgeAtFire != null ? (
                     <> You retire together when they are{" "}
                       <span style={{ color: C.brass }}>{sim.partnerAgeAtFire.toFixed(1)}</span>.</>
-                  )}
+                  ) : null}
                   {sim.partnerOffset > 0 && (
                     <> The money must last until they reach {p.endAge} — your age{" "}
                       <span style={{ color: C.brass }}>{sim.END}</span>.</>
@@ -1506,7 +1600,8 @@ function Calculator({ shared, isMobile }) {
 
           <ChartPanel
             rows={sim.rows} xStart={p.currentAge} END={sim.END} ticks={ticks} underwaterSpans={underwaterSpans}
-            accessYou={sim.accessYou} enforceAccess={p.enforceAccess} unlockAtFire={sim.unlockYouAtFire} coastTarget={sim.coastTarget}
+            accessYou={sim.accessYou} enforceAccess={p.enforceAccess} unlockAtFire={sim.unlockYouAtFire}
+            partnerStopsAtAge={sim.partnerStopsAtAge} coastTarget={sim.coastTarget}
             homeRows={homeRows} kidRows={kidRows}
             coastCross={sim.coastCross} coastCrossValue={sim.coastCrossValue}
             fireCross={sim.fireCross} fireCrossValue={sim.fireCrossValue}
