@@ -789,3 +789,64 @@ describe("major one-off expenses and debts", () => {
     expect(max).toBeLessThan(0.05);
   });
 });
+
+// The model runs forward from currentAge with the portfolio you have TODAY, so a one-time cost that
+// already happened is assumed baked into that number. Past events must therefore only ever contribute
+// their still-remaining FUTURE cash flows — never their original one-time cost — and never crash.
+describe("events dated before the current age (in the past)", () => {
+  const C = DEFAULTS.currentAge;
+  const noNaN = (s) => {
+    for (const r of s.rows) for (const v of Object.values(r)) if (typeof v === "number" && Number.isNaN(v)) return false;
+    return !Number.isNaN(s.end);
+  };
+
+  it("a purely-past one-off expense is a no-op (already in your current portfolio)", () => {
+    const base = simulate({ ...DEFAULTS });
+    const past = simulate({ ...DEFAULTS, expenses: [{ age: C - 3, amount: 100000 }] });
+    expect(past.fireCross).toBe(base.fireCross);
+    expect(past.rows).toEqual(base.rows);
+  });
+
+  it("a windowed expense straddling today counts only its remaining (future) years", () => {
+    const base = simulate({ ...DEFAULTS });
+    // past-only window: fully ignored, exactly equal to the baseline
+    const gone = simulate({ ...DEFAULTS, expenses: [{ age: C - 6, amount: 20000, until: C - 1 }] });
+    expect(gone.fireCross).toBe(base.fireCross);
+    // straddling window == the same window clamped to start today (past years drop, future years bill)
+    const straddle = simulate({ ...DEFAULTS, expenses: [{ age: C - 3, amount: 20000, until: C + 3 }] });
+    const fromNow = simulate({ ...DEFAULTS, expenses: [{ age: C, amount: 20000, until: C + 3 }] });
+    expect(straddle.fireCross).toBeCloseTo(fromNow.fireCross, 6);
+  });
+
+  // THE BUG: `balance` is "balance now", but a past startAge amortized it from origination, so the
+  // payoff landed years too early — and far enough back it fell before today and was billed as $0.
+  it("a debt started in the past still amortizes its balance-now from today", () => {
+    const now = simulate({ ...DEFAULTS, debts: [{ balance: 30000, apr: 6, payment: 400, startAge: C }] });
+    for (const back of [3, 6, 10, 25]) {
+      const past = simulate({ ...DEFAULTS, debts: [{ balance: 30000, apr: 6, payment: 400, startAge: C - back }] });
+      expect(past.debtPayoffs[0]).toBeCloseTo(now.debtPayoffs[0], 6);   // same remaining horizon
+      expect(past.fireCross).toBeCloseTo(now.fireCross, 6);             // and the same cost in time
+    }
+    // a FUTURE start is still honored (deferred), not clamped
+    const later = simulate({ ...DEFAULTS, debts: [{ balance: 30000, apr: 6, payment: 400, startAge: C + 4 }] });
+    expect(later.debtPayoffs[0]).toBeGreaterThan(now.debtPayoffs[0] + 3.9);
+  });
+
+  it("a home bought in the past keeps its remaining mortgage but is not re-charged the down payment", () => {
+    // buying the identical home in the past must be cheaper (5 fewer mortgage years, down already paid)
+    const nowHome = simulate({ ...DEFAULTS, homes: [{ price: 1500000, purchaseAge: C, downPct: 0.2, rate: 0.065, term: 30, closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }] });
+    const pastHome = simulate({ ...DEFAULTS, homes: [{ price: 1500000, purchaseAge: C - 5, downPct: 0.2, rate: 0.065, term: 30, closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }] });
+    expect(pastHome.homes[0].payoff).toBe(C - 5 + 30);   // mortgage clears on its original schedule
+    expect(noNaN(pastHome)).toBe(true);
+    expect(pastHome.fireCross).toBeLessThan(nowHome.fireCross);
+  });
+
+  it("never produces NaN with every kind of event dated in the past at once", () => {
+    const s = simulate({ ...DEFAULTS,
+      homes: [{ price: 1200000, purchaseAge: C - 5, downPct: 0.2, rate: 0.06, term: 30, closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }],
+      kids: [{ birthAge: C - 4 }],
+      expenses: [{ age: C - 3, amount: 50000, until: C + 2 }],
+      debts: [{ balance: 30000, apr: 6, payment: 400, startAge: C - 3 }] });
+    expect(noNaN(s)).toBe(true);
+  });
+});

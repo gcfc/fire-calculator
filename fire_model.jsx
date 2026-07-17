@@ -203,7 +203,10 @@ export function simulate(p) {
   }
   const debts = (p.debts || []).map((d) => {
     const bal = Math.max(0, +d.balance || 0), pay = Math.max(0, +d.payment || 0), r = (+d.apr || 0) / 100 / 12;
-    const start = Math.round(d.startAge ?? p.currentAge), annual = pay * 12;
+    // `balance` is the balance TODAY, so a loan that began in the past is amortised from now, not from
+    // its origination — otherwise the entered balance would be treated as an origination balance sitting
+    // in the past and the payoff would land years too early (or before today, silently charging nothing).
+    const start = Math.max(Math.round(d.startAge ?? p.currentAge), p.currentAge), annual = pay * 12;
     if (bal <= 0 || pay <= 0) return { start, payoff: start, annual: 0, neverPays: false };
     const neverPays = pay <= bal * r + 1e-9;   // the payment does not even cover the interest
     const months = neverPays ? Infinity : (r > 0 ? Math.log(pay / (pay - bal * r)) / Math.log(1 + r) : bal / pay);
@@ -1495,6 +1498,10 @@ function Calculator({ shared, isMobile }) {
                       P&I <b style={{ color: C.ink }}>{fmt(m.mPI)}</b>/yr ·
                       carry <b style={{ color: C.ink }}>{fmt(m.carryAtBuy)}</b>/yr ·
                       clear at <b style={{ color: C.brass }}>age {m.payoff}</b>
+                      {h.purchaseAge < p.currentAge && (
+                        <> · <span style={{ color: C.brass }}>bought before today</span> — the {fmt(m.down)} closing cash
+                        is assumed already paid; only the remaining carry and mortgage are modeled.</>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1554,11 +1561,24 @@ function Calculator({ shared, isMobile }) {
                   <Num label="amount (today's $)" value={e.amount} step={1000} min={-1e12} onChange={(v) => setExpense(i, "amount", v)} />
                   <Num label="until age (blank=one-off)" value={e.until ?? ""} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "until", v || null)} />
                 </div>
-                {e.until && e.until > e.age && (
-                  <div style={{ fontSize: 10, color: C.mute }}>
-                    {fmt(Math.abs(e.amount))}/yr {e.amount < 0 ? "in" : "out"} from age {Math.round(e.age)} to {Math.round(e.until)}.
-                  </div>
-                )}
+                {(() => {
+                  const a0 = Math.round(e.age), a1 = e.until ? Math.round(e.until) : a0;
+                  const win = e.until && a1 > a0;
+                  const pastStart = a0 < p.currentAge;
+                  // fully before today: already reflected in your current portfolio, so it changes nothing
+                  if (a1 < p.currentAge) return (
+                    <div style={{ fontSize: 10, color: C.mute }}>
+                      Before today — assumed already reflected in your current portfolio, so it won't change the projection.
+                    </div>
+                  );
+                  if (win) return (
+                    <div style={{ fontSize: 10, color: C.mute }}>
+                      {fmt(Math.abs(e.amount))}/yr {e.amount < 0 ? "in" : "out"} from age {a0} to {a1}.
+                      {pastStart && <> Only age {p.currentAge}+ is counted — earlier years are already in your current portfolio.</>}
+                    </div>
+                  );
+                  return null;
+                })()}
               </div>
             ))}
           </div>
