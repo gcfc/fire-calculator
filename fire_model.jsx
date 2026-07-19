@@ -1249,6 +1249,18 @@ function Calculator({ shared, isMobile }) {
   const kidsCount = p.kids.length;
   const cap529 = kidsCount * 19000;
 
+  // The mirror image of "never retire": you're already there. The crossing is clamped at today because
+  // the household is over-funded on day one, so the solver can't move it any earlier to bleed off the
+  // slack — the pot just compounds instead of drawing down to $0 at the horizon. Worth an explicit
+  // banner, because "retire at 26.0 / 0.0 years from now" over a pot that then balloons to millions
+  // reads like a glitch otherwise.
+  const retireToday = sim.fireCross != null && sim.fireCross <= p.currentAge + 1e-6;
+  // Need<0 today means the discounted value of your FUTURE INCOME already exceeds your future spending —
+  // i.e. income, not the pot, is what carries you. Almost always this is a partner still earning.
+  const incomeCovers = (sim.rows[0]?.required ?? 0) < 0;
+  const partnerCarrying = retireToday && incomeCovers && p.partnerWorksAfterRetire && sim.hasPartner;
+  const interimLiving = p.interimLivingToday ?? p.nonHousingLiving;   // household living while a partner still works
+
   // tax-advantaged vs. taxable allocation advice — grounded by re-running the model (see the exported
   // allocationAdvice() for the full reasoning), so it's not a rule of thumb.
   const allocAdvice = useMemo(() => allocationAdvice(p), [p]);
@@ -1721,6 +1733,46 @@ function Calculator({ shared, isMobile }) {
                   {underwaterSpans.length > 0 && (
                     <> Your spendable (taxable) cash goes <b style={{ color: C.coral }}>underwater at age {underwaterSpans[0][0]}</b> —
                       shaded on the chart below.</>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {retireToday && (
+            <div style={{ background: `${C.teal}1A`, border: `2px solid ${C.teal}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, alignItems: "flex-start" }}>
+              <span style={{ fontSize: 22, lineHeight: 1.1 }} aria-hidden>✅</span>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: C.teal, marginBottom: 4, letterSpacing: ".01em" }}>
+                  You could stop working today
+                </div>
+                <div style={{ fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
+                  {partnerCarrying ? (
+                    <>Your own income isn't what's funding this — <b>your partner's is</b>. They keep earning until
+                      you're <b>{sim.partnerStopsAtAge ?? "later"}</b>, and while they do the household is modelled as
+                      living on the interim budget of <b>{fmt(interimLiving)}/yr</b> (non-housing) rather than the full{" "}
+                      <b>{fmt(p.retirementSpendToday)}/yr</b> retirement budget. Their take-home more than covers that bill,
+                      so the household is a <b>net saver even after you quit</b> — the pot is never drawn down, it{" "}
+                      <b>grows to {fmtM(sim.end)}</b> by age {sim.END}. That's also why the brass{" "}
+                      <em>“needed in total”</em> line dips <b>below zero</b>: the model is saying your future income alone
+                      already outweighs your future spending.</>
+                  ) : incomeCovers ? (
+                    <>Your future income already outweighs your future spending, so the requirement (the brass line)
+                      starts <b>below zero</b> and your pot is never drawn down — it <b>grows to {fmtM(sim.end)}</b> by
+                      age {sim.END} instead of landing on $0.</>
+                  ) : (
+                    <>Your savings already clear the requirement on day one, so the model retires you now. Because it
+                      can't retire you any <em>earlier</em> than today to spend the surplus down, the pot keeps
+                      compounding — it <b>ends at {fmtM(sim.end)}</b> rather than $0.</>
+                  )}
+                  {partnerCarrying && (
+                    <span style={{ display: "block", marginTop: 6, color: C.mute, fontSize: 12 }}>
+                      So the “retire at {p.currentAge}” answer leans entirely on two assumptions: the partner working{" "}
+                      {sim.partnerStopsAtAge ? `${(sim.partnerStopsAtAge - p.currentAge).toFixed(0)} more years` : "for years"},
+                      and the household living on {fmt(interimLiving)}/yr until they stop. Raise <b>“living while a partner
+                      still works”</b> toward your full retirement budget, or switch off <b>“partner keeps working after
+                      you retire”</b>, and the date moves out realistically.
+                    </span>
                   )}
                 </div>
               </div>

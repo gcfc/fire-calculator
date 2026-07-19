@@ -731,6 +731,35 @@ describe("a partner who keeps working after you retire (opt-in)", () => {
     expect(simulate({ ...DEFAULTS, partnerEnabled: false, partnerWorksAfterRetire: true }).fireCross)
       .toBe(simulate({ ...DEFAULTS, partnerEnabled: false }).fireCross);
   });
+
+  it("when a working partner over-covers the interim bill, you retire today and the pot GROWS (not a bug)", () => {
+    // A household whose working partner out-earns the (interim) living budget is a net saver even after
+    // you quit, so Need starts below zero, the crossing is clamped at currentAge, and the pot is never
+    // drawn down — it compounds to a large terminal surplus. This is the shared-link scenario from the
+    // "curve exploding" report: correct behavior, not a defect. Pin it so a refactor can't silently
+    // turn the intentional surplus into a $0-terminal "fix".
+    const p = {
+      ...DEFAULTS,
+      currentAge: 26, startPortfolio: 35000, startPortfolioTaxAdv: 3500,
+      annualTakeHome: 60000, annualTaxAdv: 7000, nonHousingLiving: 18000, rentAnnual: 18000,
+      homes: [{ price: 200000, purchaseAge: 30, downPct: 0.3, rate: 0.065, term: 15, closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }],
+      kids: [{ birthAge: 35 }, { birthAge: 37 }],
+      expenses: [{ label: "Mom's Retire", age: 42, amount: 30000, until: null }],
+      partnerAge: 24, partnerIncome: 50000, partnerTaxAdv: 7000, partnerPortfolio: 25000, partnerPortfolioTaxAdv: 5000,
+      partnerStart: 24, partnerEnd: 65, partnerWorksAfterRetire: true, retirementSpendToday: 60000, coastAge: 40,
+    };
+    const s = simulate(p);
+    expect(s.fireCross).toBe(p.currentAge);          // "retire today" — clamped at the earliest possible instant
+    expect(s.rows[0].required).toBeLessThan(0);      // Need < 0: future income already outweighs future spending
+    expect(s.end).toBeGreaterThan(1_000_000);        // terminal is a real surplus, NOT drawn to zero
+    expect(Number.isNaN(s.end)).toBe(false);
+
+    // and it really is the partner carrying it: living at the FULL retirement budget in the interim
+    // (so the partner no longer over-covers) restores the ordinary interior crossing and ~$0 terminal.
+    const full = simulate({ ...p, interimLivingToday: p.retirementSpendToday });
+    expect(full.fireCross).toBeGreaterThan(p.currentAge + 1);
+    expect(full.rows[0].required).toBeGreaterThan(0);
+  });
 });
 
 describe("major one-off expenses and debts", () => {
