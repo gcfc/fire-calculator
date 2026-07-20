@@ -612,6 +612,10 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
   return (
     <input
       type="number"
+      // iOS only shows the numeric keypad for type=number when an inputMode is set — without this it
+      // falls back to the full alphanumeric keyboard (Android already shows the keypad from type alone).
+      // "decimal" covers every field here (ages, rates, dollars) and keeps the decimal point available.
+      inputMode="decimal"
       step={step}
       min={min}
       max={Number.isFinite(max) ? max : undefined}   // let the spinner + native validity know the ceiling too
@@ -625,7 +629,10 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
         if (!Number.isNaN(n)) onCommit(clamp(n));
       }}
       onBlur={() => {
-        if (draft === "") onCommit(min);                // left empty: settle on the floor
+        // left empty: settle on 0 when the field allows it, otherwise the floor. Fields that permit
+        // negatives (e.g. an expense that can be a windfall) have min far below 0, and settling a blank
+        // box on that huge negative floor instead of 0 was surfacing as a nonsense default.
+        if (draft === "") onCommit(Math.max(0, min));
         setDraft(null);
       }}
       style={{
@@ -643,7 +650,11 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
 const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef }) => {
   const yr = yearRef != null ? yearAt(value, yearRef) : null;
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+    // In the card grids these sit side by side; labels of different lengths wrap to different heights,
+    // which (with the grid stretching each cell to the same height) would leave the input boxes at
+    // different vertical offsets. justify-content:space-between pins the input to the bottom of the
+    // cell so the row of boxes always lines up, whether or not the age/year hint is present.
+    <label style={{ display: "flex", flexDirection: "column", gap: 3, height: "100%", justifyContent: "space-between" }}>
       <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>
         {label}{yr != null && <span style={{ opacity: 0.65 }}> · ≈{yr}</span>}
       </span>
