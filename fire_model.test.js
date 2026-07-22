@@ -879,3 +879,80 @@ describe("events dated before the current age (in the past)", () => {
     expect(noNaN(s)).toBe(true);
   });
 });
+
+describe("guaranteed retirement income — pensions / Social Security / annuities", () => {
+  const C = DEFAULTS.currentAge;
+  const pension = (over = {}) => ({ label: "pension", amount: 40000, startAge: 65, whose: "you", cola: true, until: null, ...over });
+
+  it("is a perfect no-op when empty or zero-amount", () => {
+    const base = simulate({ ...DEFAULTS });
+    expect(simulate({ ...DEFAULTS, incomes: [] })).toEqual(base);
+    const zero = simulate({ ...DEFAULTS, incomes: [pension({ amount: 0 })] });
+    expect(zero.fireCross).toBe(base.fireCross);
+    expect(zero.end).toBe(base.end);
+    expect(zero.incomePV).toBe(0);
+  });
+
+  it("lowers the requirement and, when total wealth binds, retires you earlier for a smaller number", () => {
+    // gate off => total wealth binds => a pension is pure requirement relief
+    const off = simulate({ ...DEFAULTS, enforceAccess: false });
+    const on = simulate({ ...DEFAULTS, enforceAccess: false, incomes: [pension()] });
+    expect(on.rows[0].required).toBeLessThan(off.rows[0].required);   // Need at every age drops
+    expect(on.fireCross).toBeLessThan(off.fireCross);                 // …so you retire sooner
+    expect(on.fireCrossValue).toBeLessThan(off.fireCrossValue);       // …with a smaller pot
+    expect(on.incomePV).toBeGreaterThan(0);
+  });
+
+  it("keeps the terminal balance ~0 when total wealth binds (the requirement stays self-consistent)", () => {
+    const g = simulate({ ...DEFAULTS, enforceAccess: false, incomes: [pension({ amount: 60000, startAge: 62 })] });
+    expect(g.fireCrossValue).toBeCloseTo(g.fireReq, 0);
+    expect(Math.abs(g.end)).toBeLessThan(5);
+  });
+
+  it("a fixed-nominal pension is worth strictly less than the same COLA'd one", () => {
+    const cola = simulate({ ...DEFAULTS, incomes: [pension({ cola: true })] });
+    const nom = simulate({ ...DEFAULTS, incomes: [pension({ cola: false })] });
+    expect(nom.incomePV).toBeGreaterThan(0);
+    expect(nom.incomePV).toBeLessThan(cola.incomePV);                 // erodes with inflation -> worth less
+  });
+
+  it("an income that starts before 59.5 shrinks the pre-59.5 bridge; one after it does not", () => {
+    const none = simulate({ ...DEFAULTS });
+    const early = simulate({ ...DEFAULTS, incomes: [pension({ startAge: 55 })] });   // before the wall
+    const late = simulate({ ...DEFAULTS, incomes: [pension({ startAge: 65 })] });    // after the wall
+    expect(early.fireBridge).toBeLessThan(none.fireBridge);
+    expect(late.fireBridge).toBeCloseTo(none.fireBridge, 0);
+  });
+
+  it("a partner's income runs on the PARTNER's clock and is ignored without a partner", () => {
+    const off = DEFAULTS.currentAge - DEFAULTS.partnerAge;            // your age = partner age + offset
+    const s = simulate({ ...DEFAULTS, incomes: [pension({ whose: "partner", startAge: 67 })] });
+    expect(s.incomeStartMarks).toEqual([67 + off]);                  // 67 in their frame -> your frame
+    // no partner -> a partner income contributes nothing
+    const noP = simulate({ ...DEFAULTS, partnerEnabled: false });
+    const noPInc = simulate({ ...DEFAULTS, partnerEnabled: false, incomes: [pension({ whose: "partner" })] });
+    expect(noPInc.fireCross).toBe(noP.fireCross);
+    expect(noPInc.incomePV).toBe(0);
+  });
+
+  it("is age-frame invariant: shift the whole household forward and years-to-retirement is unchanged", () => {
+    const a = simulate({ ...DEFAULTS, enforceAccess: false, incomes: [pension({ startAge: 65 })] });
+    const shift = 5;
+    const b = simulate({
+      ...DEFAULTS, enforceAccess: false, currentAge: C + shift, partnerAge: DEFAULTS.partnerAge + shift,
+      homes: DEFAULTS.homes.map((h) => ({ ...h, purchaseAge: h.purchaseAge + shift })),
+      kids: DEFAULTS.kids.map((k) => ({ birthAge: k.birthAge + shift })),
+      partnerStart: DEFAULTS.partnerStart + shift, partnerEnd: DEFAULTS.partnerEnd + shift,
+      endAge: DEFAULTS.endAge + shift, coastAge: DEFAULTS.coastAge + shift,
+      incomes: [pension({ startAge: 65 + shift })],
+    });
+    expect(b.fireCross - (C + shift)).toBeCloseTo(a.fireCross - C, 2);
+  });
+
+  it("a stream that ends early (non-lifetime) is worth less than the same one for life", () => {
+    const life = simulate({ ...DEFAULTS, incomes: [pension({ until: null })] });
+    const short = simulate({ ...DEFAULTS, incomes: [pension({ until: 75 })] });
+    expect(short.incomePV).toBeGreaterThan(0);
+    expect(short.incomePV).toBeLessThan(life.incomePV);
+  });
+});

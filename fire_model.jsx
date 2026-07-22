@@ -222,6 +222,43 @@ export function simulate(p) {
   // total extra outflow in year `age` (nominal): one-off lumps + debt service. Windfalls go negative.
   const extraOutflowAt = (age) => (extraLump[age] || 0) + debtPaymentAt(age);
 
+  // ---- guaranteed retirement income (pension / Social Security / annuity) ----
+  // A pension is not a POT you draw down — it's a STREAM that offsets the bill every year it runs, so
+  // it belongs on the same side of the ledger as a working partner's take-home: it lowers the
+  // requirement and, because it's spendable cash, shrinks the pre-59.5 bridge. Each stream carries an
+  // amount in today's $, a start age, whose clock it's on, and whether it has a COLA:
+  //   • COLA on  → keeps constant REAL value, so nominal = amount·inflation(age) (like every other flow)
+  //   • COLA off → fixed NOMINAL from the claim year on, so its real value erodes with inflation. This is
+  //     the norm for state/corporate defined-benefit pensions and is the one thing a "negative recurring
+  //     expense" could never express.
+  // A stream is lifetime by default (runs to the horizon); an optional `until` age (in the owner's own
+  // frame) ends it early. Partner streams are ignored when there is no partner, exactly like partner assets.
+  const incomes = (p.incomes || []).filter((inc) => (+inc.amount) || 0);
+  const incomeAt = (age) => {
+    let sum = 0;
+    for (const inc of incomes) {
+      const onPartner = inc.whose === "partner";
+      if (onPartner && !hasPartner) continue;
+      const ageInFrame = onPartner ? partnerAgeAt(age) : age;                 // the recipient's own age
+      if (ageInFrame < inc.startAge) continue;                                // not claimed yet
+      if (inc.until != null && inc.until !== "" && ageInFrame > inc.until) continue;   // ended (non-lifetime)
+      const startYourAge = onPartner ? yourAgeWhenPartnerIs(inc.startAge) : inc.startAge;
+      // COLA'd tracks inflation forever; fixed-nominal freezes at the claim-year price level
+      const factor = inc.cola === false ? inflAt(startYourAge) : inflAt(age);
+      sum += (+inc.amount) * factor;
+    }
+    return sum;
+  };
+  // "This income is worth ≈$X of portfolio": the present value today of the whole stream, discounted on
+  // the same terms as everything else (same backward recursion as Need[]). In today's $ since currentAge
+  // is the base year. It's the honest way to compare a guaranteed pension against a pile of savings.
+  let incomePV = 0;
+  for (let age = END; age >= p.currentAge; age--) incomePV = (incomePV + incomeAt(age) * fv(1)) / G;
+  // ages (your-frame) at which a stream switches on — for a marker on the chart
+  const incomeStartMarks = incomes.map((inc) =>
+    inc.whose === "partner" ? (hasPartner ? yourAgeWhenPartnerIs(inc.startAge) : null) : inc.startAge
+  ).filter((a) => a != null);
+
   // Nominal spending in year `age` once retired. retirementSpendToday now EXCLUDES housing —
   // with several homes coming and going there is no single "housing cost" to bake into it, so
   // housing is priced from the homes themselves every year instead of being assumed away.
@@ -235,7 +272,12 @@ export function simulate(p) {
                                            // stop the sinking fund: if these were left out, any
                                            // contribution scheduled after retirement would be free
                                            // money, and a slow 529 would buy you an earlier date.
-         + extraOutflowAt(age);            // one-off life expenses + any debt service still running
+         + extraOutflowAt(age)             // one-off life expenses + any debt service still running
+         - incomeAt(age);                  // pension / Social Security / annuity — liquid, offsets the bill.
+                                           // Subtracting it HERE threads it through every retirement
+                                           // consumer at once (the Need curve, the bridge, and the forward
+                                           // drawdown all read retireExpense), and touches nothing in the
+                                           // working-year accumulation, which never calls it.
   };
 
   // ---- one partner still earning after you retire (opt-in) ------------------
@@ -590,6 +632,9 @@ export function simulate(p) {
     // one-off expense/windfall markers for the chart, and each debt's derived payoff age for its card
     expenseMarks: (p.expenses || []).filter((e) => (+e.amount) || 0).map((e) => ({ age: Math.round(e.age), amount: +e.amount })),
     debtPayoffs: debts.map((d) => (d.neverPays || d.annual <= 0 ? null : d.payoff)),
+    // guaranteed-income stream: its present value today (the "lump-sum equivalent") and where it starts
+    incomePV, incomeStartMarks,
+    incomeAtFire: T == null ? 0 : incomeAt(Math.floor(T)) / Math.pow(1 + p.inflation, Math.floor(T) - p.currentAge),
     // your age when a still-working partner stops earning — only meaningful when that's after you retire
     partnerStopsAtAge: p.partnerWorksAfterRetire && hasPartner && T != null && partnerStopAge > T ? partnerStopAge : null,
     // the age YOUR accounts actually become spendable given when you retire — with a Roth ladder this
@@ -750,7 +795,7 @@ export const DEFAULTS = {
   }],
   kids: [{ birthAge: 30 }, { birthAge: 32 }],
   daycarePerKid: 26000, ongoingPerKid: 8000, collegePerKid: 200000,
-  expenses: [], debts: [],
+  expenses: [], debts: [], incomes: [],
 
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
   partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000,
@@ -1228,6 +1273,13 @@ function Calculator({ shared, isMobile }) {
     setP((s) => ({ ...s, debts: [...(s.debts || []), { label: "", balance: 25000, apr: 6, payment: 400, startAge: s.currentAge }] }));
   const dropDebt = (i) => setP((s) => ({ ...s, debts: s.debts.filter((_, j) => j !== i) }));
 
+  // --- guaranteed retirement income (pension / Social Security / annuity) ---
+  const setIncome = (i, k, v) =>
+    setP((s) => ({ ...s, incomes: (s.incomes || []).map((inc, j) => (j === i ? { ...inc, [k]: v } : inc)) }));
+  const addIncome = () =>
+    setP((s) => ({ ...s, incomes: [...(s.incomes || []), { label: "", amount: 30000, startAge: 65, whose: "you", cola: true, until: null }] }));
+  const dropIncome = (i) => setP((s) => ({ ...s, incomes: (s.incomes || []).filter((_, j) => j !== i) }));
+
   const sim = useMemo(() => simulate(p), [p]);
   // the same world with the 59.5 gate switched off — the difference IS the cost of the rule
   const simFree = useMemo(() => simulate({ ...p, enforceAccess: false }), [p]);
@@ -1606,6 +1658,67 @@ function Calculator({ shared, isMobile }) {
             ))}
           </div>
 
+          {/* RETIREMENT INCOME — pensions / Social Security / annuities: streams, not pots. They lower the
+              requirement and shrink the pre-59.5 bridge (spendable cash), rather than adding to the pot. */}
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
+                Retirement income {p.incomes?.length > 0 && <span style={{ color: C.mute }}>· {p.incomes.length}</span>}
+              </div>
+              <AddButton onClick={addIncome} label="add income" />
+            </div>
+            {(p.incomes?.length ?? 0) === 0 && (
+              <div style={{ fontSize: 11, color: C.mute }}>
+                Pension, Social Security, an annuity — guaranteed income you'll draw <em>in</em> retirement. It lowers the
+                number you need and, being spendable cash, shrinks the 59.5 bridge. A pot (a lump-sum payout, a rollover)
+                is not this — add that to your portfolio instead.
+              </div>
+            )}
+            {(p.incomes || []).map((inc, i) => {
+              const onPartner = inc.whose === "partner";
+              const refAge = onPartner ? p.partnerAge : p.currentAge;
+              return (
+                <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, background: C.bg, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                    <div style={{ flex: 1 }}>
+                      <TextField label="what" value={inc.label} placeholder="pension, Social Security…" onChange={(v) => setIncome(i, "label", v)} />
+                    </div>
+                    <DropButton onClick={() => dropIncome(i)} />
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                    <Num label="annual (today's $)" value={inc.amount} step={1000} onChange={(v) => setIncome(i, "amount", v)} />
+                    <Num label={onPartner ? "starts at their age" : "starts at your age"} value={inc.startAge} step={1} yearRef={refAge} onChange={(v) => setIncome(i, "startAge", v)} />
+                    <Num label="until age (blank=life)" value={inc.until ?? ""} step={1} yearRef={refAge} onChange={(v) => setIncome(i, "until", v || null)} />
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center" }}>
+                    <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11, color: C.ink, cursor: "pointer" }}>
+                      <input type="checkbox" checked={inc.cola !== false} onChange={(e) => setIncome(i, "cola", e.target.checked)} />
+                      adjusts with inflation (COLA)
+                    </label>
+                    {sim.hasPartner && (
+                      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11, color: C.ink, cursor: "pointer" }}>
+                        <input type="checkbox" checked={onPartner} onChange={(e) => setIncome(i, "whose", e.target.checked ? "partner" : "you")} />
+                        partner's
+                      </label>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 10, color: C.mute }}>
+                    {(+inc.amount || 0) === 0
+                      ? "Enter an annual amount."
+                      : <>{fmt(Math.abs(+inc.amount))}/yr {inc.cola === false ? "fixed in nominal $ (real value erodes)" : "in today's $ (keeps pace with inflation)"},
+                          from {onPartner ? "their" : "your"} age {Math.round(inc.startAge)}{inc.until ? ` to ${Math.round(inc.until)}` : " for life"}.</>}
+                  </div>
+                </div>
+              );
+            })}
+            {sim.incomePV > 0 && (
+              <div style={{ fontSize: 11, color: C.mute, borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
+                Together this guaranteed income is worth about <b style={{ color: C.teal }}>{fmtM(sim.incomePV)}</b> of portfolio
+                today — that's how much of "the number" it replaces.
+              </div>
+            )}
+          </div>
+
           {/* DEBTS — fixed-nominal loans: balance + APR + the monthly payment you make → payoff age */}
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
@@ -1717,6 +1830,9 @@ function Calculator({ shared, isMobile }) {
               value={sim.minSave === Infinity ? "—" : fmt(sim.minSave)}
               accent={sim.minSave < 0 ? C.coral : C.ink}
             />
+            {sim.incomePV > 0 && (
+              <Stat label="Guaranteed income · worth" value={fmtM(sim.incomePV)} accent={C.teal} />
+            )}
           </div>
 
           {neverRetire && (
