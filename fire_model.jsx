@@ -42,9 +42,34 @@ const CURRENT_YEAR = new Date().getFullYear();
 const yearAt = (age, refAge) =>
   Number.isFinite(age) && age > 0 && Number.isFinite(refAge) ? CURRENT_YEAR + Math.round(age - refAge) : null;
 
+// ---- entry-unit conversions ------------------------------------------------
+// People rarely know a figure in the exact shape the model stores (an annual, net, dollar amount).
+// These pure helpers convert between how a value is SHOWN in a field and the ANNUAL value we store, so
+// a field can offer /yr⇄/mo, $-of-income⇄%, or gross⇄net without the model ever knowing. Exported so
+// the conversions can be unit-tested directly. `toAnnual` and `toShown` are exact inverses.
+export const MONEY_UNITS = ["yr", "mo"];
+export const toAnnual = (shown, unit) => (unit === "mo" ? shown * 12 : shown);      // /mo → /yr
+export const toShown = (annual, unit) => (unit === "mo" ? annual / 12 : annual);    // /yr → /mo
+// a contribution can be entered as "% of income" instead of dollars; base is the income it's a % of
+export const dollarsFromPct = (pct, incomeAnnual) => (incomeAnnual * pct) / 100;
+export const pctFromDollars = (dollars, incomeAnnual) => (incomeAnnual > 0 ? (dollars / incomeAnnual) * 100 : 0);
+// gross salary → spendable take-home at a flat effective rate (clamped to a sane 0–100%)
+export const netFromGross = (gross, effRatePct) => gross * (1 - Math.max(0, Math.min(100, effRatePct)) / 100);
+export const grossFromNet = (net, effRatePct) => {
+  const r = Math.max(0, Math.min(100, effRatePct)) / 100;
+  return r >= 1 ? net : net / (1 - r);
+};
+
 // exported so the model can be exercised headlessly, without mounting the UI
 export function simulate(p) {
   const ret = p.nominalReturn;
+
+  // Income can be entered as take-home (default) or as GROSS salary; if gross, net it down by a flat
+  // effective rate. This is purely an entry convenience — it touches only spendable income, exactly as
+  // typing a smaller take-home would — not a tax model (401k/HSA contributions stay pre-tax, untouched).
+  const netRate = p.incomeMode === "gross" ? Math.max(0, Math.min(100, +p.effTaxRate || 0)) / 100 : 0;
+  const takeHomeNet = p.annualTakeHome * (1 - netRate);
+  const partnerIncomeNet = p.partnerIncome * (1 - netRate);
 
   // ---- continuous-time conventions ------------------------------------------
   // Defined up front because EVERY sub-model has to use them. The 529 sinking fund once used
@@ -60,7 +85,25 @@ export function simulate(p) {
   // --- homes: any number of them, each with its own loan ---------------------
   // Every home is an independent stream of cash: a lump at closing, level P&I until its own
   // payoff, and carrying costs for as long as you own it. Nothing here assumes there is only one.
-  const homes = (p.homes || []).filter((h) => h.price > 0).map((h) => {
+  // A home comes in two shapes. "Planning to buy" gives clean parameters (price/down/rate/term) and we
+  // DERIVE the payment, payoff and closing cash. "Already own it" is for people who only know the real
+  // artifacts — the monthly P&I and how many years are left — so we take those directly and skip the
+  // reverse-engineering. Carry (property tax + insurance/upkeep) is likewise either a % of price or, for
+  // an owner reading it straight off the bills, a dollar figure.
+  const homes = (p.homes || []).filter((h) => (h.owned ? true : h.price > 0)).map((h) => {
+    const carryMode = h.owned || h.carryMode === "dollar" ? "dollar" : "pct";
+    const propTaxAnnual = Math.max(0, +h.propTaxAnnual || 0);
+    const insMaintAnnual = Math.max(0, +h.insMaintAnnual || 0);
+    if (h.owned) {
+      // you know the payment and the years remaining, not price/rate/term. Owned as of today, so there
+      // is no closing cash and P&I simply runs for the years that are left.
+      const mPI = Math.max(0, +h.monthlyPI || 0) * 12;
+      const yearsLeft = Math.max(0, +h.yearsLeft || 0);
+      return {
+        ...h, owned: true, carryMode, propTaxAnnual, insMaintAnnual, loan: 0, mPI,
+        purchaseAge: p.currentAge, payoff: p.currentAge + yearsLeft, down: 0,
+      };
+    }
     const loan = h.price * (1 - h.downPct);
     const i = h.rate / 12, n = Math.max(1, h.term) * 12;
     // level-payment amortisation; a 0% loan is just principal spread over the term
@@ -68,15 +111,19 @@ export function simulate(p) {
       : i > 0 ? (loan * i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1) * 12
               : loan / Math.max(1, h.term);
     return {
-      ...h, loan, mPI,
+      ...h, owned: false, carryMode, propTaxAnnual, insMaintAnnual, loan, mPI,
       payoff: h.purchaseAge + h.term,                  // the year P&I stops
       down: (h.downPct + h.closingPct) * h.price,      // cash you must have at closing
     };
   });
-  // property tax drifts ~2%/yr with assessments; insurance + upkeep track inflation
+  // property tax drifts ~2%/yr with assessments; insurance + upkeep track inflation. Dollar-mode figures
+  // are today's $ and drift from the year you enter them (purchase year, or today for a home you own).
   const carryOf = (h, age) => {
     if (age < h.purchaseAge) return 0;
     const yrs = age - h.purchaseAge;
+    if (h.carryMode === "dollar")
+      return h.propTaxAnnual * Math.pow(1.02, yrs)
+           + h.insMaintAnnual * Math.pow(1 + p.inflation, yrs);
     return h.price * h.propTaxRate * Math.pow(1.02, yrs)
          + h.price * h.insMaintRate * Math.pow(1 + p.inflation, yrs);
   };
@@ -99,8 +146,11 @@ export function simulate(p) {
   const lastPayoff = homes.length ? Math.max(...homes.map((h) => h.payoff)) : null;
 
   // the naive 4%-rule number, for contrast — spending plus whatever housing costs in steady state
+  const steadyCarry = (h) => h.carryMode === "dollar"
+    ? h.propTaxAnnual + h.insMaintAnnual
+    : h.price * (h.propTaxRate + h.insMaintRate);
   const steadyHousing = homes.length
-    ? homes.reduce((s, h) => s + h.price * (h.propTaxRate + h.insMaintRate), 0)
+    ? homes.reduce((s, h) => s + steadyCarry(h), 0)
     : p.rentAnnual;
   const naiveNumber = (p.retirementSpendToday + steadyHousing) / p.swr;
 
@@ -128,7 +178,12 @@ export function simulate(p) {
   const accessPartner = yourAgeWhenPartnerIs(p.accessAge);
 
   // --- kids: any number of them, each born whenever ---------------------------
-  const kids = (p.kids || []).filter((k) => k.birthAge > 0);
+  // A kid is dated by `birthAge` — YOUR age the year they were born. Parents of existing kids think in
+  // "my kid is 4 now", so accept `ageNow` too and convert (birthAge = your age − their age). birthAge
+  // stays the one canonical field everything downstream reads.
+  const kids = (p.kids || [])
+    .map((k) => ({ ...k, birthAge: (k.ageNow != null && k.ageNow !== "") ? p.currentAge - (+k.ageNow) : (+k.birthAge) }))
+    .filter((k) => k.birthAge > 0);
   const kidsCount = kids.length;
   const cap529 = kidsCount * 19000;                       // gift-tax-free annual max, single donor, today's $
   const lastCollegeAge = kidsCount
@@ -293,7 +348,7 @@ export function simulate(p) {
   // the household bill while they still work: the interim non-housing figure in place of the full
   // retirement budget; housing / college / 529 are untouched (reuse retireExpense and swap the term)
   const interimExpense = (age) => retireExpense(age) - (p.retirementSpendToday - interimLiving) * inflAt(age);
-  const partnerTakeHomeAt = (age) => partnerEarnsInRetirement(age) ? p.partnerIncome * inflAt(age) : 0;   // liquid
+  const partnerTakeHomeAt = (age) => partnerEarnsInRetirement(age) ? partnerIncomeNet * inflAt(age) : 0;   // liquid
   const partnerTaxAdvAt = (age) => partnerEarnsInRetirement(age) ? p.partnerTaxAdv * inflAt(age) : 0;     // locked
   // net bill a retired household must fund in year `age` — total (all partner income counts as wealth)
   // and liquid (only take-home is spendable pre-59.5; their 401k contribution is locked)
@@ -394,7 +449,7 @@ export function simulate(p) {
     // the working window is stated in the partner's own age, so translate before comparing
     const pAge = partnerAgeAt(age);
     const partnerOn = hasPartner && pAge >= earnFrom && pAge <= earnTo;
-    const takeHome = p.annualTakeHome * infl + (partnerOn ? p.partnerIncome * infl : 0);
+    const takeHome = takeHomeNet * infl + (partnerOn ? partnerIncomeNet * infl : 0);
     const taxAdvYou = p.annualTaxAdv * infl;
     const taxAdvPartner = partnerOn ? p.partnerTaxAdv * infl : 0;
     const living = p.nonHousingLiving * infl;
@@ -622,8 +677,8 @@ export function simulate(p) {
     fireCrossValue, fireReq,
     // per-home derived numbers, so the UI can show what each one actually costs
     homes: homes.map((h) => ({
-      price: h.price, purchaseAge: h.purchaseAge, payoff: h.payoff,
-      mPI: h.mPI, down: h.down, carryAtBuy: carryOf(h, h.purchaseAge),
+      price: h.price ?? 0, purchaseAge: h.purchaseAge, payoff: h.payoff,
+      mPI: h.mPI, down: h.down, carryAtBuy: carryOf(h, h.purchaseAge), owned: !!h.owned,
     })),
     lastPayoff,
     mortgageAtFire: T == null ? 0 : piAt(Math.floor(T)),   // P&I still running when you retire
@@ -774,6 +829,48 @@ const field = (label, key, val, set, opts = {}) => {
   );
 };
 
+// a small pill that cycles a field's entry unit (/yr → /mo → …). Purely cosmetic — the value stored is
+// always annual dollars; the pill only changes how it's shown and typed.
+const UnitPill = ({ label, onClick }) => (
+  <button type="button" onClick={onClick} title="change units"
+    style={{
+      background: "transparent", border: `1px solid ${C.line}`, color: C.teal, borderRadius: 999,
+      padding: "0 7px", cursor: "pointer", fontSize: 10, letterSpacing: ".02em", textTransform: "none",
+      fontFamily: "'Space Grotesk', sans-serif", flexShrink: 0, lineHeight: 1.7,
+    }}>
+    {label} ⇄
+  </button>
+);
+
+// A money field that stores an ANNUAL dollar amount but lets you enter it the way you actually know it:
+// /yr, /mo, or (for a 401k-style contribution) as a % of some income base. All conversions go through
+// the exported pure helpers, so what you see and what is stored are exact inverses.
+const MONEY_LABEL = { yr: "/yr", mo: "/mo", pct: "% of income" };
+function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr", "mo"], base = 0 }) {
+  const [mode, setMode] = useState(modes[0]);
+  const cycle = () => setMode(modes[(modes.indexOf(mode) + 1) % modes.length]);
+  const usablePct = mode === "pct" && base > 0;
+  const shown = mode === "mo" ? toShown(value, "mo") : usablePct ? pctFromDollars(value, base) : value;
+  const commit = (v) => onChange(mode === "mo" ? toAnnual(v, "mo") : usablePct ? Math.round(dollarsFromPct(v, base)) : v);
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span>{label}</span>
+        {modes.length > 1 && <UnitPill label={MONEY_LABEL[mode]} onClick={cycle} />}
+      </span>
+      <NumberInput
+        value={Number.isFinite(shown) ? Math.round(shown * 100) / 100 : 0}
+        step={mode === "mo" ? Math.max(1, Math.round(step / 12)) : usablePct ? 1 : step}
+        min={min}
+        onCommit={commit}
+      />
+      {usablePct && (
+        <span style={{ fontSize: 10, color: C.mute }}>≈ {fmt(Math.round(value))}/yr of {fmt(Math.round(base))} income</span>
+      )}
+    </label>
+  );
+}
+
 // inline caution, for when the inputs contradict each other
 const Warn = ({ children }) => (
   <div style={{
@@ -804,6 +901,8 @@ export const DEFAULTS = {
   // EXCLUDES housing — every home now prices its own carry, mortgage and closing costs, so
   // baking a paid-off house into this number would double-count it. (Was 110k incl. ~36k carry.)
   retirementSpendToday: 100000, swr: 0.035, endAge: 100, coastAge: 48,
+  // income can be entered as take-home (default) or gross salary netted by a flat effective rate
+  incomeMode: "net", effTaxRate: 25,
   collegeSpread: true, use529: false, annual529: 0,
   enforceAccess: true, rothLadder: false, ladderYears: 5, accessAge: 59.5,
 };
@@ -1250,8 +1349,11 @@ function Calculator({ shared, isMobile }) {
       }] };
     });
   const dropHome = (i) => setP((s) => ({ ...s, homes: s.homes.filter((_, j) => j !== i) }));
-  const setKid = (i, v) =>
-    setP((s) => ({ ...s, kids: s.kids.map((k, j) => (j === i ? { birthAge: v } : k)) }));
+  // merge a patch into one home — used by the buy/own and %/$ mode toggles, which flip several keys at once
+  const patchHome = (i, patch) =>
+    setP((s) => ({ ...s, homes: s.homes.map((h, j) => (j === i ? { ...h, ...patch } : h)) }));
+  const setKid = (i, patch) =>
+    setP((s) => ({ ...s, kids: s.kids.map((k, j) => (j === i ? { ...k, ...patch } : k)) }));
   const addKid = () =>
     setP((s) => {
       const last = s.kids[s.kids.length - 1];
@@ -1341,9 +1443,9 @@ function Calculator({ shared, isMobile }) {
       { label: "Living costs −$5k/yr", over: { nonHousingLiving: Math.max(0, p.nonHousingLiving - 5000) } },
       ...(p.partnerAge > 0 && p.partnerEnabled !== false
         ? [{ label: "Partner take-home +$10k/yr", over: { partnerIncome: p.partnerIncome + 10000 } }] : []),
-      ...(p.homes.length
+      ...(p.homes.some((h) => !h.owned && h.price > 0)
         ? [{ label: p.homes.length > 1 ? "Every home −$100k" : "Home price −$100k",
-             over: { homes: p.homes.map((h) => ({ ...h, price: Math.max(0, h.price - 100000) })) } }] : []),
+             over: { homes: p.homes.map((h) => (h.owned ? h : { ...h, price: Math.max(0, h.price - 100000) })) } }] : []),
       ...(p.homes.length
         ? [{ label: "Mortgage rate −1pt",
              over: { homes: p.homes.map((h) => ({ ...h, rate: Math.max(0, h.rate - 0.01) })) } }] : []),
@@ -1389,6 +1491,8 @@ function Calculator({ shared, isMobile }) {
     </button>
   );
 
+  const gross = p.incomeMode === "gross";   // income fields entered as gross salary, netted by effTaxRate
+
   return (
     <div style={{ background: C.bg, color: C.ink, fontFamily: "'Space Grotesk', system-ui, sans-serif", padding: isMobile ? 12 : 24, borderRadius: 12 }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');`}</style>
@@ -1422,22 +1526,22 @@ function Calculator({ shared, isMobile }) {
               ["Current age", "currentAge", { yearRef: p.currentAge }],
               ["Current portfolio ← your real #", "startPortfolio", { step: 10000 }],
               ["…of which in 401k / IRA / HSA", "startPortfolioTaxAdv", { step: 10000, max: p.startPortfolio }],
-              ["Take-home / yr (after contrib.)", "annualTakeHome", { step: 1000 }],
-              ["Tax-advantaged / yr (401k+HSA+IRA)", "annualTaxAdv", { step: 500 }],
-              ["Non-housing living / yr", "nonHousingLiving", { step: 1000 }],
-              ["Current rent / yr", "rentAnnual", { step: 1000 }],
+              [gross ? "Gross salary" : "Take-home (after contrib.)", "annualTakeHome", { step: 1000, money: true }],
+              ["Tax-advantaged (401k+HSA+IRA)", "annualTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.annualTakeHome }],
+              ["Non-housing living", "nonHousingLiving", { step: 1000, money: true }],
+              ["Current rent", "rentAnnual", { step: 1000, money: true }],
             ]],
             ["Partner", [
               ["Partner's age now (0 = single)", "partnerAge", { yearRef: p.partnerAge }],
               ["Partner portfolio", "partnerPortfolio", { step: 10000 }],
               ["…of which in 401k / IRA / HSA", "partnerPortfolioTaxAdv", { step: 10000, max: p.partnerPortfolio }],
-              ["Partner take-home / yr", "partnerIncome", { step: 5000 }],
-              ["Partner tax-advantaged / yr", "partnerTaxAdv", { step: 500 }],
+              [gross ? "Partner gross salary" : "Partner take-home", "partnerIncome", { step: 5000, money: true }],
+              ["Partner tax-advantaged", "partnerTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.partnerIncome }],
               ["Partner earns from their age", "partnerStart", { min: p.partnerAge, yearRef: p.partnerAge }],
               ["…until their age", "partnerEnd", { min: p.partnerStart, yearRef: p.partnerAge }],
             ]],
             ["Retirement", [
-              ["Retirement spend / yr — excl. housing", "retirementSpendToday", { step: 5000 }],
+              ["Retirement spend — excl. housing", "retirementSpendToday", { step: 5000, money: true }],
               ["Money must last to age", "endAge", { yearRef: p.currentAge }],
               ["Coast FIRE: retire at age", "coastAge", { yearRef: p.currentAge }],
             ]],
@@ -1456,8 +1560,27 @@ function Calculator({ shared, isMobile }) {
               </div>
               {!(group === "Partner" && p.partnerEnabled === false) && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {fields.map(([l, k, o]) => field(l, k, p[k], set, o))}
+                {fields.map(([l, k, o]) => (o.money
+                  ? <MoneyField key={k} label={l} value={p[k]} onChange={(v) => set(k, v)} step={o.step} modes={o.modes} base={o.base} />
+                  : field(l, k, p[k], set, o)))}
               </div>
+              )}
+
+              {group === "You" && (
+                <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+                    <input type="checkbox" checked={gross}
+                      onChange={(e) => set("incomeMode", e.target.checked ? "gross" : "net")}
+                      style={{ accentColor: C.teal, cursor: "pointer", width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
+                    <span style={{ fontSize: 11, color: C.ink, lineHeight: 1.4 }}>
+                      I entered gross salary, not take-home
+                      <span style={{ display: "block", fontSize: 10, color: C.mute, marginTop: 2 }}>
+                        Nets your and your partner's salary down by a flat effective rate — a convenience, not a tax model.
+                      </span>
+                    </span>
+                  </label>
+                  {gross && field("Effective tax rate %", "effTaxRate", p.effTaxRate, set, { step: 1, max: 100 })}
+                </div>
               )}
 
               {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && (
@@ -1474,7 +1597,8 @@ function Calculator({ shared, isMobile }) {
                     </span>
                   </label>
                   {p.partnerWorksAfterRetire &&
-                    field("Non-housing living / yr while they work", "interimLivingToday", p.interimLivingToday ?? p.nonHousingLiving, set, { step: 1000 })}
+                    <MoneyField label="Non-housing living while they work" value={p.interimLivingToday ?? p.nonHousingLiving}
+                      onChange={(v) => set("interimLivingToday", v)} step={1000} />}
                 </div>
               )}
 
@@ -1549,31 +1673,79 @@ function Calculator({ shared, isMobile }) {
             )}
             {p.homes.map((h, i) => {
               const m = sim.homes[i];
+              const owned = !!h.owned;
+              const dollarCarry = owned || h.carryMode === "dollar";
+              // flip to "already own it", prefilling the payment/years/carry from the buy params so nothing jumps
+              const toOwned = () => patchHome(i, {
+                owned: true,
+                monthlyPI: Math.round((m?.mPI ?? 0) / 12),
+                yearsLeft: Math.max(0, Math.round((m?.payoff ?? p.currentAge) - p.currentAge)),
+                propTaxAnnual: Math.round((h.price || 0) * (h.propTaxRate || 0)),
+                insMaintAnnual: Math.round((h.price || 0) * (h.insMaintRate || 0)),
+              });
+              // flip carry between % of price and $/yr, prefilling the other representation
+              const toDollarCarry = () => patchHome(i, { carryMode: "dollar",
+                propTaxAnnual: Math.round((h.price || 0) * (h.propTaxRate || 0)),
+                insMaintAnnual: Math.round((h.price || 0) * (h.insMaintRate || 0)) });
+              const toPctCarry = () => patchHome(i, { carryMode: "pct",
+                propTaxRate: h.price > 0 ? +((h.propTaxAnnual || 0) / h.price).toFixed(4) : (h.propTaxRate || 0),
+                insMaintRate: h.price > 0 ? +((h.insMaintAnnual || 0) / h.price).toFixed(4) : (h.insMaintRate || 0) });
               return (
                 <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, background: C.bg }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8 }}>
                     <span style={{ fontSize: 11, color: C.brass, letterSpacing: ".06em", textTransform: "uppercase" }}>
                       Home {i + 1}
                     </span>
-                    <DropButton onClick={() => dropHome(i)} />
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <UnitPill label={owned ? "I already own it" : "planning to buy"}
+                        onClick={() => (owned ? patchHome(i, { owned: false }) : toOwned())} />
+                      <DropButton onClick={() => dropHome(i)} />
+                    </div>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <Num label="Price" value={h.price} step={25000} onChange={(v) => setHome(i, "price", v)} />
-                    <Num label="Buy at your age" value={h.purchaseAge} yearRef={p.currentAge} onChange={(v) => setHome(i, "purchaseAge", v)} />
-                    <Num label="Down %" value={h.downPct} pct step={1} onChange={(v) => setHome(i, "downPct", v)} />
-                    <Num label="Rate %" value={h.rate} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
-                    <Num label="Term (yrs)" value={h.term} onChange={(v) => setHome(i, "term", v)} />
-                    <Num label="Closing %" value={h.closingPct} pct step={0.5} onChange={(v) => setHome(i, "closingPct", v)} />
-                    <Num label="Prop tax %" value={h.propTaxRate} pct step={0.1} onChange={(v) => setHome(i, "propTaxRate", v)} />
-                    <Num label="Ins + maint %" value={h.insMaintRate} pct step={0.1} onChange={(v) => setHome(i, "insMaintRate", v)} />
-                  </div>
+
+                  {owned ? (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <Num label="Payment / mo (P&I)" value={h.monthlyPI ?? 0} step={100} onChange={(v) => setHome(i, "monthlyPI", v)} />
+                      <Num label="Years left" value={h.yearsLeft ?? 0} step={1} onChange={(v) => setHome(i, "yearsLeft", v)} />
+                      <Num label="Property tax / yr ($)" value={h.propTaxAnnual ?? 0} step={500} onChange={(v) => setHome(i, "propTaxAnnual", v)} />
+                      <Num label="Ins + maint / yr ($)" value={h.insMaintAnnual ?? 0} step={500} onChange={(v) => setHome(i, "insMaintAnnual", v)} />
+                    </div>
+                  ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <Num label="Price" value={h.price} step={25000} onChange={(v) => setHome(i, "price", v)} />
+                      <Num label="Buy at your age" value={h.purchaseAge} yearRef={p.currentAge} onChange={(v) => setHome(i, "purchaseAge", v)} />
+                      <Num label="Down %" value={h.downPct} pct step={1} onChange={(v) => setHome(i, "downPct", v)} />
+                      <Num label="Rate %" value={h.rate} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
+                      <Num label="Term (yrs)" value={h.term} onChange={(v) => setHome(i, "term", v)} />
+                      <Num label="Closing %" value={h.closingPct} pct step={0.5} onChange={(v) => setHome(i, "closingPct", v)} />
+                      {dollarCarry ? (
+                        <>
+                          <Num label="Prop tax / yr ($)" value={h.propTaxAnnual ?? 0} step={500} onChange={(v) => setHome(i, "propTaxAnnual", v)} />
+                          <Num label="Ins + maint / yr ($)" value={h.insMaintAnnual ?? 0} step={500} onChange={(v) => setHome(i, "insMaintAnnual", v)} />
+                        </>
+                      ) : (
+                        <>
+                          <Num label="Prop tax %" value={h.propTaxRate} pct step={0.1} onChange={(v) => setHome(i, "propTaxRate", v)} />
+                          <Num label="Ins + maint %" value={h.insMaintRate} pct step={0.1} onChange={(v) => setHome(i, "insMaintRate", v)} />
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {!owned && (
+                    <div style={{ marginTop: 8 }}>
+                      <UnitPill label={dollarCarry ? "tax & upkeep: $/yr" : "tax & upkeep: % of price"}
+                        onClick={() => (dollarCarry ? toPctCarry() : toDollarCarry())} />
+                    </div>
+                  )}
+
                   {m && (
                     <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
-                      cash at closing <b style={{ color: C.ink }}>{fmt(m.down)}</b> ·
+                      {!owned && <>cash at closing <b style={{ color: C.ink }}>{fmt(m.down)}</b> · </>}
                       P&I <b style={{ color: C.ink }}>{fmt(m.mPI)}</b>/yr ·
                       carry <b style={{ color: C.ink }}>{fmt(m.carryAtBuy)}</b>/yr ·
                       clear at <b style={{ color: C.brass }}>age {m.payoff}</b>
-                      {h.purchaseAge < p.currentAge && (
+                      {!owned && h.purchaseAge < p.currentAge && (
                         <> · <span style={{ color: C.brass }}>bought before today</span> — the {fmt(m.down)} closing cash
                         is assumed already paid; only the remaining carry and mortgage are modeled.</>
                       )}
@@ -1593,14 +1765,25 @@ function Calculator({ shared, isMobile }) {
               <AddButton onClick={addKid} label="add kid" />
             </div>
             {kidsCount === 0 && <div style={{ fontSize: 11, color: C.mute }}>No kids — no daycare, no college.</div>}
-            {p.kids.map((k, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                <div style={{ flex: 1 }}>
-                  <Num label={`Kid ${i + 1} — your age at birth`} value={k.birthAge} yearRef={p.currentAge} onChange={(v) => setKid(i, v)} />
+            {p.kids.map((k, i) => {
+              const ageNowMode = k.ageNow != null && k.ageNow !== "";
+              const toAgeNow = () => setKid(i, { ageNow: Math.max(0, p.currentAge - (+k.birthAge || p.currentAge)), birthAge: undefined });
+              const toBirthAge = () => setKid(i, { birthAge: p.currentAge - (+k.ageNow || 0), ageNow: undefined });
+              return (
+                <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                    <div style={{ flex: 1 }}>
+                      {ageNowMode
+                        ? <Num label={`Kid ${i + 1} — age now`} value={k.ageNow} step={1} onChange={(v) => setKid(i, { ageNow: v })} />
+                        : <Num label={`Kid ${i + 1} — your age at birth`} value={k.birthAge} yearRef={p.currentAge} onChange={(v) => setKid(i, { birthAge: v })} />}
+                    </div>
+                    <DropButton onClick={() => dropKid(i)} />
+                  </div>
+                  <UnitPill label={ageNowMode ? "entering age now" : "entering birth age"}
+                    onClick={() => (ageNowMode ? toBirthAge() : toAgeNow())} />
                 </div>
-                <DropButton onClick={() => dropKid(i)} />
-              </div>
-            ))}
+              );
+            })}
             {kidsCount > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 2 }}>
                 {field("Daycare / kid / yr (ages 0–5)", "daycarePerKid", p.daycarePerKid, set, { step: 1000 })}
@@ -1685,8 +1868,8 @@ function Calculator({ shared, isMobile }) {
                     </div>
                     <DropButton onClick={() => dropIncome(i)} />
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                    <Num label="annual (today's $)" value={inc.amount} step={1000} onChange={(v) => setIncome(i, "amount", v)} />
+                  <MoneyField label="amount (today's $)" value={+inc.amount || 0} step={1000} onChange={(v) => setIncome(i, "amount", v)} />
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <Num label={onPartner ? "starts at their age" : "starts at your age"} value={inc.startAge} step={1} yearRef={refAge} onChange={(v) => setIncome(i, "startAge", v)} />
                     <Num label="until age (blank=life)" value={inc.until ?? ""} step={1} yearRef={refAge} onChange={(v) => setIncome(i, "until", v || null)} />
                   </div>

@@ -3,6 +3,7 @@ import {
   simulate, DEFAULTS,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice,
+  toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
 } from "./fire_model.jsx";
 
 // Every test below pins a bug that was actually found, or an invariant the model must not break.
@@ -954,5 +955,105 @@ describe("guaranteed retirement income — pensions / Social Security / annuitie
     const short = simulate({ ...DEFAULTS, incomes: [pension({ until: 75 })] });
     expect(short.incomePV).toBeGreaterThan(0);
     expect(short.incomePV).toBeLessThan(life.incomePV);
+  });
+});
+
+describe("entry conveniences — enter what you actually know", () => {
+  const C = DEFAULTS.currentAge;
+
+  // ---- homes: "I already own it" (payment + years left) and $ carry --------
+  it("an owned home takes the payment and years-left directly, with no closing cash", () => {
+    const s = simulate({ ...DEFAULTS, homes: [{ owned: true, monthlyPI: 2000, yearsLeft: 18, propTaxAnnual: 9000, insMaintAnnual: 3000 }] });
+    const h = s.homes[0];
+    expect(h.owned).toBe(true);
+    expect(h.mPI).toBe(24000);              // 2000/mo × 12
+    expect(h.payoff).toBe(C + 18);          // owned today, 18 years of P&I left
+    expect(h.down).toBe(0);                 // already bought — no down payment charged
+    expect(h.carryAtBuy).toBe(12000);       // 9000 + 3000 this year
+    // the home is really billed (P&I + carry drains a year of saving vs a housing-free world), and
+    // owning one means rent is not charged on top
+    const noHousing = simulate({ ...DEFAULTS, homes: [], rentAnnual: 0 });
+    expect(s.rows[1].portfolio).toBeLessThan(noHousing.rows[1].portfolio);
+  });
+
+  it("a paid-off owned home (0 years left) charges only carry, no P&I", () => {
+    const s = simulate({ ...DEFAULTS, homes: [{ owned: true, monthlyPI: 2000, yearsLeft: 0, propTaxAnnual: 9000, insMaintAnnual: 3000 }] });
+    expect(s.homes[0].mPI).toBe(24000);     // the payment is still recorded…
+    expect(s.homes[0].payoff).toBe(C);      // …but P&I stops immediately, so it never bills
+    expect(s.mortgageAtFire).toBe(0);
+  });
+
+  it("dollar carry is identical to the equivalent % of price", () => {
+    const price = 1500000, propTaxRate = 0.011, insMaintRate = 0.013;
+    const common = { price, purchaseAge: 31, downPct: 0.2, rate: 0.065, term: 30, closingPct: 0.02 };
+    const pct = simulate({ ...DEFAULTS, homes: [{ ...common, propTaxRate, insMaintRate }] });
+    const dollar = simulate({ ...DEFAULTS, homes: [{ ...common, carryMode: "dollar", propTaxAnnual: price * propTaxRate, insMaintAnnual: price * insMaintRate }] });
+    expect(dollar.naiveNumber).toBeCloseTo(pct.naiveNumber, 6);
+    expect(dollar.rows).toEqual(pct.rows);
+    expect(dollar.fireCross).toBe(pct.fireCross);
+  });
+
+  // ---- kids: "my kid is 4 now" --------------------------------------------
+  it("a kid entered by age-now is identical to the same kid by birth-age", () => {
+    const byAge = simulate({ ...DEFAULTS, kids: [{ ageNow: 4 }] });
+    const byBirth = simulate({ ...DEFAULTS, kids: [{ birthAge: C - 4 }] });
+    expect(byAge.rows).toEqual(byBirth.rows);
+    expect(byAge.fireCross).toBe(byBirth.fireCross);
+  });
+
+  it("age-now and birth-age can be mixed across kids", () => {
+    const mixed = simulate({ ...DEFAULTS, kids: [{ ageNow: 2 }, { birthAge: C + 3 }] });
+    const both = simulate({ ...DEFAULTS, kids: [{ birthAge: C - 2 }, { birthAge: C + 3 }] });
+    expect(mixed.rows).toEqual(both.rows);
+  });
+
+  // ---- income: gross salary netted to take-home ---------------------------
+  it("gross income at an effective rate equals the same figure entered as take-home", () => {
+    const net = simulate({ ...DEFAULTS });
+    const gross = simulate({
+      ...DEFAULTS, incomeMode: "gross", effTaxRate: 25,
+      annualTakeHome: DEFAULTS.annualTakeHome / 0.75, partnerIncome: DEFAULTS.partnerIncome / 0.75,
+    });
+    expect(gross.rows).toEqual(net.rows);
+    expect(gross.fireCross).toBe(net.fireCross);
+    expect(gross.end).toBeCloseTo(net.end, 6);
+  });
+
+  it("incomeMode defaults to net, so effTaxRate is inert unless gross is chosen", () => {
+    expect(simulate({ ...DEFAULTS, effTaxRate: 40 }).fireCross).toBe(simulate({ ...DEFAULTS }).fireCross);
+  });
+
+  it("gross netting touches only take-home, not pre-tax 401k contributions", () => {
+    // raising the effective rate must lower spendable income (retire later) but leave the tax-adv flow alone
+    const base = simulate({ ...DEFAULTS, incomeMode: "gross", effTaxRate: 20 });
+    const higher = simulate({ ...DEFAULTS, incomeMode: "gross", effTaxRate: 35 });
+    expect(higher.fireCross).toBeGreaterThan(base.fireCross);
+  });
+
+  // ---- the pure unit-conversion helpers -----------------------------------
+  it("monthly⇄annual is an exact round-trip", () => {
+    for (const a of [0, 1000, 144000, 999999]) {
+      expect(toAnnual(toShown(a, "mo"), "mo")).toBeCloseTo(a, 9);
+      expect(toAnnual(a, "yr")).toBe(a);
+      expect(toShown(a, "yr")).toBe(a);
+    }
+    expect(toAnnual(1000, "mo")).toBe(12000);
+    expect(toShown(12000, "mo")).toBe(1000);
+  });
+
+  it("%-of-income ⇄ dollars round-trips and is safe at zero income", () => {
+    expect(dollarsFromPct(10, 90000)).toBe(9000);
+    expect(pctFromDollars(9000, 90000)).toBe(10);
+    expect(pctFromDollars(dollarsFromPct(7, 120000), 120000)).toBeCloseTo(7, 9);
+    expect(pctFromDollars(5000, 0)).toBe(0);          // no divide-by-zero
+  });
+
+  it("gross⇄net round-trips and clamps the rate to 0–100%", () => {
+    expect(netFromGross(100000, 25)).toBe(75000);
+    expect(grossFromNet(75000, 25)).toBe(100000);
+    expect(grossFromNet(netFromGross(120000, 30), 30)).toBeCloseTo(120000, 6);
+    expect(netFromGross(100000, -10)).toBe(100000);   // clamped up to 0
+    expect(netFromGross(100000, 150)).toBe(0);        // clamped down to 100
+    expect(grossFromNet(50000, 150)).toBe(50000);     // rate≥100 can't invert -> passthrough
   });
 });
