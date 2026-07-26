@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   simulate, DEFAULTS,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
-  allocationAdvice, retiresOnLoan,
+  allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
 } from "./fire_model.jsx";
 
@@ -521,11 +521,6 @@ describe("reported figures line up with each other", () => {
 });
 
 describe("share links — encode/decode round-trips and hydration", () => {
-  const defaultShow = () => ({
-    portfolio: true, required: true, retire: true, coast: true, taxable: false,
-    retirement: false, bridge: false, underwater: true, access: true, home: true, kids: true,
-  });
-
   it("round-trips a full-details payload and stores only the diff from DEFAULTS", () => {
     const p = { ...DEFAULTS, annualTakeHome: 175000, partnerAge: 0,
       homes: [], kids: [{ birthAge: 33 }] };
@@ -1064,7 +1059,6 @@ describe("a retirement that only works on a loan is not a FIRE number", () => {
   const LOAN_CASE = {
     ...DEFAULTS, partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0,
   };
-  const defaultShow = () => ({ retirement: false, neededRetirement: false });
 
   it("retiresOnLoan flags a crossing reached only by going underwater, and clears when the path is solvent", () => {
     const loan = simulate(LOAN_CASE);

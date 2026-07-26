@@ -47,7 +47,6 @@ const yearAt = (age, refAge) =>
 // These pure helpers convert between how a value is SHOWN in a field and the ANNUAL value we store, so
 // a field can offer /yr⇄/mo, $-of-income⇄%, or gross⇄net without the model ever knowing. Exported so
 // the conversions can be unit-tested directly. `toAnnual` and `toShown` are exact inverses.
-export const MONEY_UNITS = ["yr", "mo"];
 export const toAnnual = (shown, unit) => (unit === "mo" ? shown * 12 : shown);      // /mo → /yr
 export const toShown = (annual, unit) => (unit === "mo" ? annual / 12 : annual);    // /yr → /mo
 // a contribution can be entered as "% of income" instead of dollars; base is the income it's a % of
@@ -960,7 +959,9 @@ const SERIES = [
   { key: "expense", label: "major expense", color: C.coral, mark: "●", on: true },
 ];
 
-const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
+// exported so tests read the real defaults rather than a hand-copy that silently goes stale whenever
+// a series' default visibility changes (which is exactly how the share-link test broke)
+export const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
 
 // ---- share links -----------------------------------------------------------
 // The site is static (no backend), so all shared state rides in the URL hash. Two shapes:
@@ -1435,16 +1436,8 @@ function Calculator({ shared, isMobile }) {
 
   // contiguous age windows where the taxable (spendable) account is underwater — bills are being
   // met with debt / an early-withdrawal penalty, not real cash. Drives the shaded band on the chart.
-  const underwaterSpans = useMemo(() => {
-    const spans = [];
-    let start = null;
-    for (const r of sim.rows) {
-      if (r.taxable < 0 && start == null) start = r.age;
-      else if (r.taxable >= 0 && start != null) { spans.push([start, r.age]); start = null; }
-    }
-    if (start != null) spans.push([start, sim.END]);
-    return spans;
-  }, [sim]);
+  // Same helper the shared-plot view uses, so both read "underwater" identically.
+  const underwaterSpans = useMemo(() => underwaterOf(sim.rows, sim.END), [sim]);
   const neverRetire = sim.fireCross == null;
   // WHY you're stuck — three genuinely different failures, and the fix differs for each:
   //  • bridge     — enough in total AND enough liquid; only the 59.5 wall blocks you (gate-off retires)
