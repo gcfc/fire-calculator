@@ -523,7 +523,7 @@ describe("reported figures line up with each other", () => {
 describe("share links — encode/decode round-trips and hydration", () => {
   const defaultShow = () => ({
     portfolio: true, required: true, retire: true, coast: true, taxable: false,
-    retirement: true, bridge: false, underwater: true, access: true, home: true, kids: true,
+    retirement: false, bridge: false, underwater: true, access: true, home: true, kids: true,
   });
 
   it("round-trips a full-details payload and stores only the diff from DEFAULTS", () => {
@@ -1092,5 +1092,44 @@ describe("a retirement that only works on a loan is not a FIRE number", () => {
     // UI/snapshot concern, so simulate() must keep reporting it
     const loan = simulate(LOAN_CASE);
     expect(typeof loan.fireCross).toBe("number");
+  });
+});
+
+describe("coast FIRE is opt-in", () => {
+  it("is on by default and produces a full coast curve", () => {
+    const s = simulate({ ...DEFAULTS });
+    expect(s.useCoast).toBe(true);
+    expect(s.coastTarget).toBe(DEFAULTS.coastAge);
+    expect(s.coastToday).toBeGreaterThan(0);
+    expect(s.rows.some((r) => r.coast != null)).toBe(true);
+  });
+
+  it("switched off, every coast output is null and no row carries a coast point", () => {
+    const s = simulate({ ...DEFAULTS, useCoast: false });
+    expect(s.useCoast).toBe(false);
+    expect(s.coastTarget).toBeNull();
+    expect(s.coastToday).toBeNull();
+    expect(s.coastCross).toBeNull();
+    expect(s.coastCrossValue).toBeNull();
+    expect(s.rows.every((r) => r.coast == null)).toBe(true);   // nothing for the chart to draw
+  });
+
+  it("does not disturb the retirement answer — coast is a read-out, not an input to the model", () => {
+    const on = simulate({ ...DEFAULTS });
+    const off = simulate({ ...DEFAULTS, useCoast: false });
+    expect(off.fireCross).toBe(on.fireCross);
+    expect(off.fireCrossValue).toBe(on.fireCrossValue);
+    expect(off.end).toBe(on.end);
+    // …and the coast target itself is inert when off: changing it changes nothing
+    const offOtherAge = simulate({ ...DEFAULTS, useCoast: false, coastAge: 60 });
+    expect(offOtherAge.rows).toEqual(off.rows);
+  });
+
+  it("a shared plot of a coast-off model carries no coast series", () => {
+    const s = simulate({ ...DEFAULTS, useCoast: false });
+    const snap = snapshotFromSim(s, { portfolio: true }, true);
+    expect(snap.coastTarget).toBeNull();
+    expect(snap.coast.every((v) => v == null)).toBe(true);
+    expect(snap.coastCross).toBeNull();
   });
 });

@@ -440,8 +440,11 @@ export function simulate(p) {
   // at coastAge. So the coast bar is the retirement requirement at the coast target, discounted
   // back with no further contributions. It meets the Need curve exactly at coastAge.
   // NB: this assumes your income still covers everything on the way — including the college lumps.
-  const coastTarget = Math.min(Math.max(p.coastAge, p.currentAge + 1), END);
-  const coastAt = (t) => needAt(coastTarget) / grow(coastTarget - t);
+  // Coast is opt-in: when it's off nothing here is computed and every coast output is null, so the
+  // chart, legend and stats have nothing to draw rather than being merely hidden.
+  const useCoast = p.useCoast !== false;
+  const coastTarget = useCoast ? Math.min(Math.max(p.coastAge, p.currentAge + 1), END) : null;
+  const coastAt = (t) => (useCoast ? needAt(coastTarget) / grow(coastTarget - t) : null);
 
   // --- annual flow RATES (nominal $/yr) during a working year ---------------
   const flows = (age) => {
@@ -579,7 +582,7 @@ export function simulate(p) {
     const total = st.taxable + st.taxAdvYou + st.taxAdvPartner;
     const startReal = total / infl;
     const working = T === null;
-    const coastReal = age <= coastTarget ? coastAt(age) / infl : null;
+    const coastReal = useCoast && age <= coastTarget ? coastAt(age) / infl : null;
 
     // hitting the coast bar means you could stop saving today and still retire on time
     const coastGap = coastReal == null ? null : startReal - coastReal;
@@ -649,7 +652,7 @@ export function simulate(p) {
             taxable: Math.round(fireTaxable), retirement: Math.round((sT.taxAdvYou + sT.taxAdvPartner) / inflT),
             bridge: Math.round(fireBridge),
             neededRetirement: Math.max(0, Math.round(fireReq) - Math.round(fireBridge)),
-            coast: T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
+            coast: useCoast && T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
             save: 0, events: [],
           });
         }
@@ -696,7 +699,7 @@ export function simulate(p) {
     // is retire+5 (capped at 59.5), i.e. the real liquidity wall, which can sit well before 59.5
     unlockYouAtFire: T == null ? null : unlockAt(accessYou, T),
     fireTaxable, fireLocked, fireBridge, lockedShare, illiquidAge,
-    coastTarget, coastCross, coastCrossValue, coastToday: coastAt(p.currentAge),
+    useCoast, coastTarget, coastCross, coastCrossValue, coastToday: useCoast ? coastAt(p.currentAge) : null,
     // the partner's own age at the moments that matter, so the UI never has to do the offset math
     partnerAgeAtFire: hasPartner && T != null ? partnerAgeAt(T) : null,
     partnerAgeAtEnd: hasPartner ? partnerAgeAt(END) : null,
@@ -783,6 +786,36 @@ const TextField = ({ label, value, onChange, placeholder }) => (
       }}
     />
   </label>
+);
+
+// A titled section that folds away. Used to tuck the settings most people never touch (the 59.5 rule,
+// college funding, return/inflation assumptions) behind one "Advanced settings" disclosure, so the
+// input column leads with the figures that actually get edited.
+const Collapsible = ({ title, subtitle, open, onToggle, children }) => (
+  <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8 }}>
+    <button
+      type="button" onClick={onToggle} aria-expanded={open}
+      style={{
+        background: "transparent", border: "none", width: "100%", cursor: "pointer",
+        padding: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8,
+        fontFamily: "'Space Grotesk', sans-serif", textAlign: "left",
+      }}>
+      <span>
+        <span style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>{title}</span>
+        {subtitle && !open && <span style={{ display: "block", fontSize: 10, color: C.mute, marginTop: 3 }}>{subtitle}</span>}
+      </span>
+      <span style={{ color: C.mute, fontSize: 11, flexShrink: 0 }}>{open ? "▲" : "▼"}</span>
+    </button>
+    {open && <div style={{ padding: "0 14px 14px", display: "flex", flexDirection: "column", gap: 14 }}>{children}</div>}
+  </div>
+);
+
+// one sub-panel inside Advanced settings — same look as a top-level card, minus the outer chrome
+const SubSection = ({ title, children }) => (
+  <div style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+    <div style={{ fontSize: 11, color: C.brass, letterSpacing: ".06em", textTransform: "uppercase" }}>{title}</div>
+    {children}
+  </div>
 );
 
 const AddButton = ({ onClick, label }) => (
@@ -900,7 +933,7 @@ export const DEFAULTS = {
   partnerWorksAfterRetire: false, interimLivingToday: null,
   // EXCLUDES housing — every home now prices its own carry, mortgage and closing costs, so
   // baking a paid-off house into this number would double-count it. (Was 110k incl. ~36k carry.)
-  retirementSpendToday: 100000, swr: 0.035, endAge: 100, coastAge: 48,
+  retirementSpendToday: 100000, swr: 0.035, endAge: 100, coastAge: 48, useCoast: true,
   // income can be entered as take-home (default) or gross salary netted by a flat effective rate
   incomeMode: "net", effTaxRate: 25,
   collegeSpread: true, use529: false, annual529: 0,
@@ -1089,7 +1122,8 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
   // toggle "child born" with no kids, "the 59.5 line" with the gate off, or "retirement point" if you
   // never retire. The always-present curves stay; the conditional marks/lines come and go with the data.
   const applies = {
-    portfolio: true, required: true, taxable: true, retirement: true, coast: true,
+    portfolio: true, required: true, taxable: true, retirement: true,
+    coast: coastTarget != null,          // coast FIRE is opt-in; off ⇒ no curve, no legend chip
     retire: fireCross != null,
     bridge: !!enforceAccess,
     neededRetirement: !!enforceAccess,
@@ -1125,7 +1159,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
               retirement: "Retirement accounts (401k/IRA)",
               required: "Needed in total", bridge: "Needed in taxable",
               neededRetirement: "Needed in retirement accounts",
-              coast: `Coast bar (stop saving, retire at ${coastTarget})`,
+              coast: coastTarget != null ? `Coast bar (stop saving, retire at ${coastTarget})` : "Coast bar",
             }[name] || name]}
             labelFormatter={(a) => "Age " + a}
           />
@@ -1137,7 +1171,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
             <ReferenceLine x={partnerStopsAtAge} stroke={C.brass} strokeDasharray="4 3"
               label={{ value: `partner stops ${partnerStopsAtAge.toFixed(0)}`, fill: C.brass, fontSize: 10, position: "insideTopRight" }} />
           ) : null}
-          {show.coast ? <Line type="monotone" dataKey="coast" stroke={C.coast} strokeWidth={1.5} strokeDasharray="6 3" dot={false} connectNulls={false} /> : null}
+          {show.coast && applies.coast ? <Line type="monotone" dataKey="coast" stroke={C.coast} strokeWidth={1.5} strokeDasharray="6 3" dot={false} connectNulls={false} /> : null}
           {show.required ? <Line type="monotone" dataKey="required" stroke={C.brass} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
           {show.bridge && enforceAccess ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
           {show.neededRetirement && enforceAccess ? <Line type="monotone" dataKey="neededRetirement" stroke={C.locked} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
@@ -1150,7 +1184,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
             const row = rows.find((r) => r.age === m.age);
             return row ? <ReferenceDot key={`x${i}`} x={m.age} y={row.portfolio} r={5} fill={m.amount < 0 ? C.liquid : C.coral} stroke={C.bg} strokeWidth={1.5} /> : null;
           }) : null}
-          {show.coast && coastCross ? <ReferenceDot x={coastCross} y={coastCrossValue} r={5} fill={C.coast} stroke={C.bg} strokeWidth={2} /> : null}
+          {show.coast && applies.coast && coastCross ? <ReferenceDot x={coastCross} y={coastCrossValue} r={5} fill={C.coast} stroke={C.bg} strokeWidth={2} /> : null}
           {show.retire && fireCross ? <ReferenceDot x={fireCross} y={fireCrossValue} r={7} fill={C.brass} stroke={C.ink} strokeWidth={2} /> : null}
         </ComposedChart>
       </ResponsiveContainer>
@@ -1335,6 +1369,7 @@ function Calculator({ shared, isMobile }) {
   // a "full details" link pre-fills the whole calculator; anything not in the link falls back to defaults
   const [p, setP] = useState(() => (shared && shared.mode === "full" ? { ...DEFAULTS, ...shared.p } : DEFAULTS));
   const [show, setShow] = useState(() => ({ ...defaultShow(), ...(shared && shared.mode === "full" ? shared.show : null) }));
+  const [advancedOpen, setAdvancedOpen] = useState(false);   // the rarely-touched settings start folded
   const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
   const setPct = (k, v) => setP((s) => ({ ...s, [k]: v / 100 }));
 
@@ -1555,7 +1590,8 @@ function Calculator({ shared, isMobile }) {
             ["Retirement", [
               ["Retirement spending, excluding housing", "retirementSpendToday", { step: 5000, money: true }],
               ["Life Expectancy", "endAge", { yearRef: p.currentAge }],
-              ["Coast FIRE: retire at age", "coastAge", { yearRef: p.currentAge }],
+              // the coast target only exists when coast FIRE is switched on below
+              ...(p.useCoast !== false ? [["Coast FIRE: retire at age", "coastAge", { yearRef: p.currentAge }]] : []),
             ]],
           ].map(([group, fields]) => (
             <div key={group} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14 }}>
@@ -1567,6 +1603,14 @@ function Calculator({ shared, isMobile }) {
                       onChange={(e) => set("partnerEnabled", e.target.checked)}
                       style={{ accentColor: C.teal, cursor: "pointer", width: 15, height: 15 }} />
                     {p.partnerEnabled !== false ? "included" : "no partner"}
+                  </label>
+                )}
+                {group === "Retirement" && (
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, color: C.mute, letterSpacing: ".03em" }}>
+                    <input type="checkbox" checked={p.useCoast !== false}
+                      onChange={(e) => set("useCoast", e.target.checked)}
+                      style={{ accentColor: C.coast, cursor: "pointer", width: 15, height: 15 }} />
+                    coast FIRE
                   </label>
                 )}
               </div>
@@ -1952,58 +1996,61 @@ function Calculator({ shared, isMobile }) {
             })}
           </div>
 
-          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>Access to retirement accounts</div>
-            <Toggle on={p.enforceAccess} onClick={() => set("enforceAccess", !p.enforceAccess)}
-              label="Retirement accounts locked until 59.5"
-              sub={p.enforceAccess ? "on — 401k/IRA can't pay bills before 59.5" : "off — every dollar spendable at any age (optimistic)"} />
-            <Toggle on={p.rothLadder} onClick={() => set("rothLadder", !p.rothLadder)}
-              label="Roth conversion ladder"
-              sub={p.rothLadder ? "on — converted funds free after 5 years, so taxable cash account bridges only 5 years of expense (not to 59.5)" : "off — retirement accounts locked until 59.5"} />
-          </div>
+          <Collapsible
+            title="Advanced settings"
+            subtitle="59.5 rule · college funding · return, inflation and withdrawal assumptions"
+            open={advancedOpen} onToggle={() => setAdvancedOpen((v) => !v)}
+          >
+            <SubSection title="Access to retirement accounts">
+              <Toggle on={p.enforceAccess} onClick={() => set("enforceAccess", !p.enforceAccess)}
+                label="Retirement accounts locked until 59.5"
+                sub={p.enforceAccess ? "on — 401k/IRA can't pay bills before 59.5" : "off — every dollar spendable at any age (optimistic)"} />
+              <Toggle on={p.rothLadder} onClick={() => set("rothLadder", !p.rothLadder)}
+                label="Roth conversion ladder"
+                sub={p.rothLadder ? "on — converted funds free after 5 years, so taxable cash account bridges only 5 years of expense (not to 59.5)" : "off — retirement accounts locked until 59.5"} />
+            </SubSection>
 
-          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-            <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>College funding</div>
-            <Toggle on={p.collegeSpread} onClick={() => set("collegeSpread", !p.collegeSpread)}
-              label="Spread tuition over 4 years"
-              sub={p.collegeSpread ? "on — quarter each at ages 18–21" : "off — single lump at 18"} />
-            <Toggle on={p.use529} onClick={() => set("use529", !p.use529)}
-              label="Pre-fund with a 529"
-              sub={p.use529 ? "on — college paid from 529 account first" : "off — college paid from main portfolio"} />
-            {p.use529 && (
-              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
-                  529 set-aside / yr (today's $) · cap ${cap529.toLocaleString()}
-                </span>
-                <NumberInput
-                  value={p.annual529} step={1000} max={cap529}
-                  onCommit={(v) => set("annual529", v)}
-                />
-                <span style={{ fontSize: 10, color: C.mute }}>
-                  gift-tax-free max ${cap529.toLocaleString()} ({kidsCount}× $19k single donor); married/superfunding allows more
-                </span>
-              </label>
-            )}
-          </div>
+            <SubSection title="College funding">
+              <Toggle on={p.collegeSpread} onClick={() => set("collegeSpread", !p.collegeSpread)}
+                label="Spread tuition over 4 years"
+                sub={p.collegeSpread ? "on — quarter each at ages 18–21" : "off — single lump at 18"} />
+              <Toggle on={p.use529} onClick={() => set("use529", !p.use529)}
+                label="Pre-fund with a 529"
+                sub={p.use529 ? "on — college paid from 529 account first" : "off — college paid from main portfolio"} />
+              {p.use529 && (
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
+                    529 set-aside / yr (today's $) · cap ${cap529.toLocaleString()}
+                  </span>
+                  <NumberInput
+                    value={p.annual529} step={1000} max={cap529}
+                    onCommit={(v) => set("annual529", v)}
+                  />
+                  <span style={{ fontSize: 10, color: C.mute }}>
+                    gift-tax-free max ${cap529.toLocaleString()} ({kidsCount}× $19k single donor); married/superfunding allows more
+                  </span>
+                </label>
+              )}
+            </SubSection>
 
-          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>Assumptions</div>
-            {[
-              ["Annual portfolio return %", "nominalReturn"],
-              ["Inflation %", "inflation"],
-              ["Safe withdrawal rate %", "swr"],
-            ].map(([l, k]) => (
-              <label key={k} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
-                  {l} · <span style={{ color: C.brass }}>{(p[k] * 100).toFixed(1)}</span>
-                </span>
-                <input type="range" min={k === "swr" ? 2.5 : k === "inflation" ? 1 : 3}
-                  max={k === "swr" ? 5 : k === "inflation" ? 6 : 10} step={0.1}
-                  value={p[k] * 100} onChange={(e) => setPct(k, Number(e.target.value))}
-                  style={{ accentColor: C.brass }} />
-              </label>
-            ))}
-          </div>
+            <SubSection title="Assumptions">
+              {[
+                ["Annual portfolio return %", "nominalReturn"],
+                ["Inflation %", "inflation"],
+                ["Safe withdrawal rate %", "swr"],
+              ].map(([l, k]) => (
+                <label key={k} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
+                    {l} · <span style={{ color: C.brass }}>{(p[k] * 100).toFixed(1)}</span>
+                  </span>
+                  <input type="range" min={k === "swr" ? 2.5 : k === "inflation" ? 1 : 3}
+                    max={k === "swr" ? 5 : k === "inflation" ? 6 : 10} step={0.1}
+                    value={p[k] * 100} onChange={(e) => setPct(k, Number(e.target.value))}
+                    style={{ accentColor: C.brass }} />
+                </label>
+              ))}
+            </SubSection>
+          </Collapsible>
         </div>
 
         {/* OUTPUT */}
@@ -2012,9 +2059,13 @@ function Calculator({ shared, isMobile }) {
             <Stat label={`FIRE number · lasts to ${sim.END}`} value={retireOnLoan || !sim.fireCrossValue ? "—" : fmtM(sim.fireCrossValue)} accent={neverRetire || retireOnLoan ? C.coral : C.brass} />
             <Stat label="FIRE age" value={retireOnLoan ? "on a loan" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink}
               sub={retireOnLoan || !sim.fireCross ? null : `${(sim.fireCross - p.currentAge).toFixed(1)} years from now`} />
-            <Stat label={`Coast FIRE number today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
-            <Stat label="Coast FIRE age" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast}
-              sub={sim.coastCross ? `${(sim.coastCross - p.currentAge).toFixed(1)} years from now` : null} />
+            {sim.useCoast && (
+              <Stat label={`Coast FIRE number today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
+            )}
+            {sim.useCoast && (
+              <Stat label="Coast FIRE age" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast}
+                sub={sim.coastCross ? `${(sim.coastCross - p.currentAge).toFixed(1)} years from now` : null} />
+            )}
             <Stat label="Liquid (taxable) at that point" value={sim.fireTaxable != null ? fmtM(sim.fireTaxable) : "—"} accent={C.liquid} />
             <Stat label="Locked until 59.5" value={sim.lockedShare ? (sim.lockedShare * 100).toFixed(0) + "%" : "—"} accent={sim.lockedShare > 0.6 ? C.coral : C.ink} />
             <Stat
