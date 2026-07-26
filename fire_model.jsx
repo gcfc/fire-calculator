@@ -965,8 +965,16 @@ const diffFrom = (obj, ref) => {
   return out;
 };
 
+// A FIRE date the model reaches only by letting the taxable (cash) account go negative is bought with
+// an implicit loan (or a 10% early-withdrawal penalty on locked money) — not a fundable plan. `illiquidAge`
+// is the model's own flag for "cash went underwater / a bill couldn't be reached". When it's set alongside
+// a retirement instant, the date isn't real, so we don't present it as a FIRE number.
+export const retiresOnLoan = (sim) => sim.fireCross != null && sim.illiquidAge != null;
+
 // the compact, columnar snapshot of everything the chart draws — carries NO inputs
 export const snapshotFromSim = (sim, show, enforceAccess) => {
+  // a loan-funded retirement instant is not shown, so a shared plot never marks a point that isn't real
+  const onLoan = retiresOnLoan(sim);
   const rows = sim.rows;
   const col = (k) => rows.map((r) => (r[k] == null ? null : r[k]));
   const evtAges = (evt) => rows.filter((r) => r.events && r.events.includes(evt)).map((r) => r.age);
@@ -977,7 +985,7 @@ export const snapshotFromSim = (sim, show, enforceAccess) => {
     homeAges: evtAges("home"), kidAges: evtAges("kid"),
     END: sim.END, accessYou: sim.accessYou, enforceAccess: !!enforceAccess, coastTarget: sim.coastTarget,
     unlockAtFire: sim.unlockYouAtFire, partnerStopsAtAge: sim.partnerStopsAtAge, expenseMarks: sim.expenseMarks,
-    fireCross: sim.fireCross, fireCrossValue: sim.fireCrossValue,
+    fireCross: onLoan ? null : sim.fireCross, fireCrossValue: onLoan ? null : sim.fireCrossValue,
     coastCross: sim.coastCross, coastCrossValue: sim.coastCrossValue,
     show,
   };
@@ -1411,6 +1419,9 @@ function Calculator({ shared, isMobile }) {
   const totalEverEnough = sim.rows.some((r) => r.portfolio >= r.required);
   const blockedByBridge = neverRetire && simFree.fireCross != null;
   const blockedByDebt = neverRetire && !blockedByBridge && totalEverEnough && underwaterSpans.length > 0;
+  // the model DID find a date, but only by running the cash account negative somewhere along the way —
+  // an implicit loan. We don't present that as a FIRE number; we explain it and still offer the fix.
+  const retireOnLoan = retiresOnLoan(sim);
   const kidsCount = p.kids.length;
   const cap529 = kidsCount * 19000;
 
@@ -1997,9 +2008,9 @@ function Calculator({ shared, isMobile }) {
         {/* OUTPUT */}
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
-            <Stat label={`FIRE number · lasts to ${sim.END}`} value={sim.fireCrossValue ? fmtM(sim.fireCrossValue) : "—"} accent={neverRetire ? C.coral : C.brass} />
-            <Stat label="Retire at age" value={sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink} />
-            <Stat label="Years from now" value={sim.fireCross ? (sim.fireCross - p.currentAge).toFixed(1) : "—"} />
+            <Stat label={`FIRE number · lasts to ${sim.END}`} value={retireOnLoan || !sim.fireCrossValue ? "—" : fmtM(sim.fireCrossValue)} accent={neverRetire || retireOnLoan ? C.coral : C.brass} />
+            <Stat label="Retire at age" value={retireOnLoan ? "on a loan" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink} />
+            <Stat label="Years from now" value={retireOnLoan || !sim.fireCross ? "—" : (sim.fireCross - p.currentAge).toFixed(1)} />
             <Stat label={`Coast bar today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
             <Stat label="Coast reached at" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast} />
             <Stat label="Liquid (taxable) at that point" value={sim.fireTaxable != null ? fmtM(sim.fireTaxable) : "—"} accent={C.liquid} />
@@ -2049,7 +2060,31 @@ function Calculator({ shared, isMobile }) {
             </div>
           )}
 
-          {retireToday && (
+          {retireOnLoan && (
+            <div style={{ background: `${C.coral}1A`, border: `2px solid ${C.coral}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, alignItems: "flex-start" }}>
+              <span style={{ fontSize: 22, lineHeight: 1.1 }} aria-hidden>🚫</span>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: C.coral, marginBottom: 4, letterSpacing: ".01em" }}>
+                  This retirement can't be funded without borrowing
+                </div>
+                <div style={{ fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
+                  The only way the model balances the books here is by letting your <b>spendable (taxable) cash go
+                  negative from age {sim.illiquidAge}</b> — an implicit loan, or a 10% early-withdrawal penalty on money
+                  locked until 59.5. That isn't a real, fundable plan, so <b>we don't show a FIRE number for it</b>.
+                  {allocAdvice?.dir === "toTaxable" ? (
+                    <> The fix below — moving saving from your 401k/IRA into a taxable account — is exactly what closes
+                      the cash gap.</>
+                  ) : (
+                    <> Close the gap by moving saving from your 401k/IRA into a plain taxable account, trimming the lump
+                      that lands underwater (home, college), or adding income.</>
+                  )}{" "}
+                  The underwater years are shaded on the chart below.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {retireToday && !retireOnLoan && (
             <div style={{ background: `${C.teal}1A`, border: `2px solid ${C.teal}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, alignItems: "flex-start" }}>
               <span style={{ fontSize: 22, lineHeight: 1.1 }} aria-hidden>✅</span>
               <div>
@@ -2090,7 +2125,7 @@ function Calculator({ shared, isMobile }) {
           )}
 
           {/* only worth a banner when the rule actually costs something; otherwise it's wallpaper */}
-          {delay != null && delay > 0.05 && (
+          {delay != null && delay > 0.05 && !retireOnLoan && (
             <div style={{ background: C.panel2, border: `1px solid ${C.coral}55`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
               <b>The 59.5 rule costs you {delay.toFixed(1)} years.</b> Ignoring it, you'd have enough in total at{" "}
               <b>{simFree.fireCross.toFixed(1)}</b> — but only {fmtM(sim.fireTaxable)} of the pot would be taxable
@@ -2127,14 +2162,14 @@ function Calculator({ shared, isMobile }) {
             </div>
           )}
 
-          {sim.illiquidAge && (
+          {sim.illiquidAge && !retireOnLoan && (
             <div style={{ background: C.panel2, border: `1px solid ${C.coral}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
               ⚠ Taxable cash goes negative at age <b>{sim.illiquidAge}</b> — a lump (house, college) lands with the
               money stuck in retirement accounts. In reality that's a loan or a 10% early-withdrawal penalty.
             </div>
           )}
 
-          {sim.fireCross && sim.mortgageAtFire > 0 && (
+          {sim.fireCross && sim.mortgageAtFire > 0 && !retireOnLoan && (
             <div style={{ background: C.panel2, border: `1px solid ${C.brass}55`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
               You'd retire still owing <b>{fmt(sim.mortgageAtFire)}/yr</b> of principal and interest across{" "}
               {sim.homes.filter((h) => sim.fireCross < h.payoff && sim.fireCross >= h.purchaseAge).length} live
@@ -2150,7 +2185,7 @@ function Calculator({ shared, isMobile }) {
             partnerStopsAtAge={sim.partnerStopsAtAge} expenseMarks={sim.expenseMarks} coastTarget={sim.coastTarget}
             homeRows={homeRows} kidRows={kidRows}
             coastCross={sim.coastCross} coastCrossValue={sim.coastCrossValue}
-            fireCross={sim.fireCross} fireCrossValue={sim.fireCrossValue}
+            fireCross={retireOnLoan ? null : sim.fireCross} fireCrossValue={retireOnLoan ? null : sim.fireCrossValue}
             show={show} setShow={setShow}
           />
 

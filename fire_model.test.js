@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   simulate, DEFAULTS,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
-  allocationAdvice,
+  allocationAdvice, retiresOnLoan,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
 } from "./fire_model.jsx";
 
@@ -1055,5 +1055,42 @@ describe("entry conveniences — enter what you actually know", () => {
     expect(netFromGross(100000, -10)).toBe(100000);   // clamped up to 0
     expect(netFromGross(100000, 150)).toBe(0);        // clamped down to 100
     expect(grossFromNet(50000, 150)).toBe(50000);     // rate≥100 can't invert -> passthrough
+  });
+});
+
+describe("a retirement that only works on a loan is not a FIRE number", () => {
+  // A single earner buying a home they can't cash-fund runs the taxable (cash) account negative for
+  // years — the model still finds a crossing, but it's bought with implicit borrowing, not real money.
+  const LOAN_CASE = {
+    ...DEFAULTS, partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0,
+  };
+  const defaultShow = () => ({ retirement: false, neededRetirement: false });
+
+  it("retiresOnLoan flags a crossing reached only by going underwater, and clears when the path is solvent", () => {
+    const loan = simulate(LOAN_CASE);
+    expect(loan.fireCross).not.toBeNull();       // a crossing DOES exist…
+    expect(loan.illiquidAge).not.toBeNull();     // …but the cash account went underwater to get there
+    expect(retiresOnLoan(loan)).toBe(true);
+
+    const clean = simulate({ ...DEFAULTS });     // the default two-earner path never goes underwater
+    expect(clean.illiquidAge).toBeNull();
+    expect(retiresOnLoan(clean)).toBe(false);
+  });
+
+  it("a shared plot of a loan-funded path carries no retirement point", () => {
+    const loan = simulate(LOAN_CASE);
+    const snap = snapshotFromSim(loan, defaultShow(), true);
+    expect(snap.fireCross).toBeNull();           // the dot the chart would draw is suppressed
+    expect(snap.fireCrossValue).toBeNull();
+    // a solvent path still carries its point
+    const clean = snapshotFromSim(simulate({ ...DEFAULTS }), defaultShow(), true);
+    expect(clean.fireCross).toBe(simulate({ ...DEFAULTS }).fireCross);
+  });
+
+  it("the model itself still exposes the raw crossing (only the presentation is suppressed)", () => {
+    // downstream code (levers, allocation advice) still needs the underlying number; suppression is a
+    // UI/snapshot concern, so simulate() must keep reporting it
+    const loan = simulate(LOAN_CASE);
+    expect(typeof loan.fireCross).toBe("number");
   });
 });
