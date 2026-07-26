@@ -911,20 +911,20 @@ export const DEFAULTS = {
 // headline story (portfolio vs. the total it must clear, and where they meet) and let the
 // liquidity detail be opted into.
 const SERIES = [
-  { key: "portfolio", label: "portfolio, total", color: C.teal, on: true },
-  { key: "required", label: "needed in total", color: C.brass, dash: true, on: true },
-  { key: "retire", label: "retirement point", color: C.brass, mark: "◆", on: true },
-  { key: "coast", label: "coast FIRE bar", color: C.coast, dash: true, on: true },
-  { key: "taxable", label: "taxable (spendable before 59.5)", color: C.liquid },
-  { key: "retirement", label: "retirement accounts (401k/IRA)", color: C.locked, on: true },
-  { key: "bridge", label: "needed in taxable (the bridge)", color: C.coral, dash: true },
-  { key: "neededRetirement", label: "needed in retirement accounts", color: C.locked, dash: true, on: true },
+  { key: "portfolio", label: "total portfolio", color: C.teal, on: true },
+  { key: "required", label: "FIRE curve", color: C.brass, dash: true, on: true },
+  { key: "retire", label: "FIRE age", color: C.brass, mark: "◆", on: true },
+  { key: "coast", label: "coast FIRE curve", color: C.coast, dash: true, on: true },
+  { key: "taxable", label: "taxable cash account", color: C.liquid },
+  { key: "retirement", label: "retirement accounts (401k/IRA)", color: C.locked },
+  { key: "bridge", label: "minimum in taxable before retirement", color: C.coral, dash: true },
+  { key: "neededRetirement", label: "minimum in retirement accounts", color: C.locked, dash: true },
   { key: "underwater", label: "taxable underwater (< $0)", color: C.coral, mark: "▨", on: true },
-  { key: "access", label: "401k unlock (liquidity wall)", color: C.mute, dash: true, on: true },
+  { key: "access", label: "retirement unlocked", color: C.mute, dash: true, on: true },
   { key: "partnerStops", label: "partner stops working", color: C.brass, dash: true, on: true },
   { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
   { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
-  { key: "expense", label: "major expense / windfall", color: C.coral, mark: "●", on: true },
+  { key: "expense", label: "major expense", color: C.coral, mark: "●", on: true },
 ];
 
 const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
@@ -1535,26 +1535,26 @@ function Calculator({ shared, isMobile }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           {[
             ["You", [
-              ["Current age", "currentAge", { yearRef: p.currentAge }],
-              ["Current portfolio ← your real #", "startPortfolio", { step: 10000 }],
-              ["…of which in 401k / IRA / HSA", "startPortfolioTaxAdv", { step: 10000, max: p.startPortfolio }],
-              [gross ? "Gross salary" : "Take-home (after contrib.)", "annualTakeHome", { step: 1000, money: true }],
-              ["Tax-advantaged (401k+HSA+IRA)", "annualTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.annualTakeHome }],
-              ["Non-housing living", "nonHousingLiving", { step: 1000, money: true }],
+              ["Age", "currentAge", { yearRef: p.currentAge }],
+              ["Total portfolio", "startPortfolio", { step: 10000 }],
+              ["Portion of Total Portfolio in Tax-advantaged Accounts (401k / IRA / HSA)", "startPortfolioTaxAdv", { step: 10000, max: p.startPortfolio }],
+              [gross ? "Gross salary" : "Take-home Pay (after contributions)", "annualTakeHome", { step: 1000, money: true }],
+              ["Tax-advantaged contribution", "annualTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.annualTakeHome }],
+              ["Non-housing expense", "nonHousingLiving", { step: 1000, money: true }],
               ["Current rent", "rentAnnual", { step: 1000, money: true }],
             ]],
             ["Partner", [
-              ["Partner's age now (0 = single)", "partnerAge", { yearRef: p.partnerAge }],
-              ["Partner portfolio", "partnerPortfolio", { step: 10000 }],
-              ["…of which in 401k / IRA / HSA", "partnerPortfolioTaxAdv", { step: 10000, max: p.partnerPortfolio }],
-              [gross ? "Partner gross salary" : "Partner take-home", "partnerIncome", { step: 5000, money: true }],
-              ["Partner tax-advantaged", "partnerTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.partnerIncome }],
+              ["Age (0 = single)", "partnerAge", { yearRef: p.partnerAge }],
+              ["Total portfolio", "partnerPortfolio", { step: 10000 }],
+              ["Portion of Total Portfolio in Tax-advantaged Accounts (401k / IRA / HSA)", "partnerPortfolioTaxAdv", { step: 10000, max: p.partnerPortfolio }],
+              [gross ? "Partner gross salary" : "Take-home Pay (after contributions)", "partnerIncome", { step: 5000, money: true }],
+              ["Tax-advantaged contribution", "partnerTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.partnerIncome }],
               ["Partner earns from their age", "partnerStart", { min: p.partnerAge, yearRef: p.partnerAge }],
               ["…until their age", "partnerEnd", { min: p.partnerStart, yearRef: p.partnerAge }],
             ]],
             ["Retirement", [
-              ["Retirement spend — excl. housing", "retirementSpendToday", { step: 5000, money: true }],
-              ["Money must last to age", "endAge", { yearRef: p.currentAge }],
+              ["Retirement spending, excluding housing", "retirementSpendToday", { step: 5000, money: true }],
+              ["Life Expectancy", "endAge", { yearRef: p.currentAge }],
               ["Coast FIRE: retire at age", "coastAge", { yearRef: p.currentAge }],
             ]],
           ].map(([group, fields]) => (
@@ -1609,7 +1609,7 @@ function Calculator({ shared, isMobile }) {
                     </span>
                   </label>
                   {p.partnerWorksAfterRetire &&
-                    <MoneyField label="Non-housing living while they work" value={p.interimLivingToday ?? p.nonHousingLiving}
+                    <MoneyField label="Non-housing expense while they work" value={p.interimLivingToday ?? p.nonHousingLiving}
                       onChange={(v) => set("interimLivingToday", v)} step={1000} />}
                 </div>
               )}
@@ -1955,11 +1955,11 @@ function Calculator({ shared, isMobile }) {
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>Access to retirement accounts</div>
             <Toggle on={p.enforceAccess} onClick={() => set("enforceAccess", !p.enforceAccess)}
-              label="Enforce the 59.5 rule"
+              label="Retirement accounts locked until 59.5"
               sub={p.enforceAccess ? "on — 401k/IRA can't pay bills before 59.5" : "off — every dollar spendable at any age (optimistic)"} />
             <Toggle on={p.rothLadder} onClick={() => set("rothLadder", !p.rothLadder)}
               label="Roth conversion ladder"
-              sub={p.rothLadder ? "on — converted funds free after 5 years, so you bridge 5y not to 59.5" : "off — hard gate at 59.5"} />
+              sub={p.rothLadder ? "on — converted funds free after 5 years, so taxable cash account bridges only 5 years of expense (not to 59.5)" : "off — retirement accounts locked until 59.5"} />
           </div>
 
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1969,7 +1969,7 @@ function Calculator({ shared, isMobile }) {
               sub={p.collegeSpread ? "on — quarter each at ages 18–21" : "off — single lump at 18"} />
             <Toggle on={p.use529} onClick={() => set("use529", !p.use529)}
               label="Pre-fund with a 529"
-              sub={p.use529 ? "on — college paid from 529 first" : "off — paid from main portfolio"} />
+              sub={p.use529 ? "on — college paid from 529 account first" : "off — college paid from main portfolio"} />
             {p.use529 && (
               <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
@@ -1989,7 +1989,7 @@ function Calculator({ shared, isMobile }) {
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
             <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>Assumptions</div>
             {[
-              ["Real portfolio return (nominal %)", "nominalReturn"],
+              ["Annual portfolio return %", "nominalReturn"],
               ["Inflation %", "inflation"],
               ["Safe withdrawal rate %", "swr"],
             ].map(([l, k]) => (
@@ -2010,10 +2010,10 @@ function Calculator({ shared, isMobile }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
             <Stat label={`FIRE number · lasts to ${sim.END}`} value={retireOnLoan || !sim.fireCrossValue ? "—" : fmtM(sim.fireCrossValue)} accent={neverRetire || retireOnLoan ? C.coral : C.brass} />
-            <Stat label="Retire at age" value={retireOnLoan ? "on a loan" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink}
+            <Stat label="FIRE age" value={retireOnLoan ? "on a loan" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink}
               sub={retireOnLoan || !sim.fireCross ? null : `${(sim.fireCross - p.currentAge).toFixed(1)} years from now`} />
-            <Stat label={`Coast bar today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
-            <Stat label="Coast reached at" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast}
+            <Stat label={`Coast FIRE number today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
+            <Stat label="Coast FIRE age" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast}
               sub={sim.coastCross ? `${(sim.coastCross - p.currentAge).toFixed(1)} years from now` : null} />
             <Stat label="Liquid (taxable) at that point" value={sim.fireTaxable != null ? fmtM(sim.fireTaxable) : "—"} accent={C.liquid} />
             <Stat label="Locked until 59.5" value={sim.lockedShare ? (sim.lockedShare * 100).toFixed(0) + "%" : "—"} accent={sim.lockedShare > 0.6 ? C.coral : C.ink} />
