@@ -1480,10 +1480,11 @@ function Calculator({ shared, isMobile }) {
   const assumptionRules = topLever?.assumption && Math.abs(topLever.delta) > bestBehaviour;
   const ticks = []; for (let a = 30; a <= sim.END; a += 10) ticks.push(a);
 
-  const Stat = ({ label, value, accent }) => (
+  const Stat = ({ label, value, accent, sub }) => (
     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
       <span style={{ fontSize: 11, color: C.mute, letterSpacing: ".05em", textTransform: "uppercase" }}>{label}</span>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, color: accent || C.ink }}>{value}</span>
+      {sub && <span style={{ fontSize: 11, color: C.mute }}>{sub}</span>}
     </div>
   );
 
@@ -2009,10 +2010,11 @@ function Calculator({ shared, isMobile }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
             <Stat label={`FIRE number · lasts to ${sim.END}`} value={retireOnLoan || !sim.fireCrossValue ? "—" : fmtM(sim.fireCrossValue)} accent={neverRetire || retireOnLoan ? C.coral : C.brass} />
-            <Stat label="Retire at age" value={retireOnLoan ? "on a loan" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink} />
-            <Stat label="Years from now" value={retireOnLoan || !sim.fireCross ? "—" : (sim.fireCross - p.currentAge).toFixed(1)} />
+            <Stat label="Retire at age" value={retireOnLoan ? "on a loan" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink}
+              sub={retireOnLoan || !sim.fireCross ? null : `${(sim.fireCross - p.currentAge).toFixed(1)} years from now`} />
             <Stat label={`Coast bar today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
-            <Stat label="Coast reached at" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast} />
+            <Stat label="Coast reached at" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast}
+              sub={sim.coastCross ? `${(sim.coastCross - p.currentAge).toFixed(1)} years from now` : null} />
             <Stat label="Liquid (taxable) at that point" value={sim.fireTaxable != null ? fmtM(sim.fireTaxable) : "—"} accent={C.liquid} />
             <Stat label="Locked until 59.5" value={sim.lockedShare ? (sim.lockedShare * 100).toFixed(0) + "%" : "—"} accent={sim.lockedShare > 0.6 ? C.coral : C.ink} />
             <Stat
