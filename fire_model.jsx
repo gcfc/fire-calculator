@@ -460,7 +460,27 @@ export function simulate(p) {
     // every lump (down payments, college, 529, life expenses, debt service) comes out of taxable
     const lumps = downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age);
     const surplus = takeHome - (living + housing + kidCost);
-    return { taxable: surplus - lumps, taxAdvYou, taxAdvPartner, save: surplus + taxAdvYou + taxAdvPartner };
+    // the components ride along so the UI can show WHY a year drains cash, not just that it did
+    return { taxable: surplus - lumps, taxAdvYou, taxAdvPartner, save: surplus + taxAdvYou + taxAdvPartner,
+             takeHome, living, housing, kidCost, lumps, surplus };
+  };
+
+  // The same year's cash flow, in today's dollars, as a plain object — the arithmetic behind "your
+  // taxable account went underwater at age N". Everything is divided back by inflation so the figures
+  // are comparable to the inputs the user actually typed.
+  const cashFlowAt = (age) => {
+    const infl = inflAt(age);
+    const f = flows(age);
+    const r = (x) => Math.round(x / infl);
+    return {
+      age,
+      takeHome: r(f.takeHome), living: r(f.living), housing: r(f.housing), kids: r(f.kidCost),
+      lumps: r(f.lumps), taxAdv: r(f.taxAdvYou + f.taxAdvPartner),
+      // what actually lands in (or drains out of) the spendable account this year
+      toTaxable: r(f.taxable),
+      // P&I vs. the rest of housing, because "the mortgage" is usually the line that breaks the budget
+      mortgage: r(piAt(age)),
+    };
   };
 
   // work for dt years: balances compound while the year's flows stream in
@@ -698,7 +718,21 @@ export function simulate(p) {
     // is retire+5 (capped at 59.5), i.e. the real liquidity wall, which can sit well before 59.5
     unlockYouAtFire: T == null ? null : unlockAt(accessYou, T),
     fireTaxable, fireLocked, fireBridge, lockedShare, illiquidAge,
+    // the arithmetic behind an underwater cash account: the flows in the year it broke, plus the year
+    // before (usually the year the trouble actually started), both in today's dollars
+    underwaterCause: illiquidAge == null ? null : {
+      ...cashFlowAt(illiquidAge),
+      prev: illiquidAge > p.currentAge ? cashFlowAt(illiquidAge - 1) : null,
+      // the cash balance going into the year that broke, so the shortfall can be put in context
+      taxableAtStart: (rows.find((r) => r.age === illiquidAge) || {}).taxable ?? null,
+    },
     useCoast, coastTarget, coastCross, coastCrossValue, coastToday: useCoast ? coastAt(p.currentAge) : null,
+    // when coast is ON but never reached: what you'd need vs. what you'd have at the coast target
+    coastShortfall: !useCoast || coastCross != null ? null : (() => {
+      const row = rows.find((r) => r.age === coastTarget) || rows[rows.length - 1];
+      const bar = coastAt(row.age) / inflAt(row.age);
+      return { age: row.age, have: Math.round(row.portfolio), need: Math.round(bar), gap: Math.round(bar - row.portfolio) };
+    })(),
     // the partner's own age at the moments that matter, so the UI never has to do the offset math
     partnerAgeAtFire: hasPartner && T != null ? partnerAgeAt(T) : null,
     partnerAgeAtEnd: hasPartner ? partnerAgeAt(END) : null,
@@ -816,6 +850,72 @@ const SubSection = ({ title, children }) => (
     {children}
   </div>
 );
+
+// The arithmetic behind a cash account that ran dry, laid out as a ledger. Knowing the year isn't much
+// use on its own — what you need is the line that broke the budget, which is why every component is
+// shown and the dominant one is called out underneath.
+const CashLedger = ({ cause, accessAge }) => {
+  if (!cause) return null;
+  const { age, takeHome, living, housing, kids, lumps, taxAdv, toTaxable, mortgage, taxableAtStart } = cause;
+  const rows = [
+    ["Take-home pay", takeHome, true],
+    ["Non-housing living", -living, false],
+    ["Housing", -housing, false, mortgage > 0 ? `of which mortgage P&I ${fmt(mortgage)}` : null],
+    ...(kids ? [["Kids", -kids, false, null]] : []),
+    ...(lumps ? [["One-off costs this year", -lumps, false, null]] : []),
+  ];
+  // what actually broke it: the single biggest outflow, and whether it alone outruns income
+  const outflows = [["housing", housing], ["living", living], ["kids", kids], ["one-off costs", lumps]]
+    .filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const [biggestName, biggestVal] = outflows[0] || ["spending", 0];
+  return (
+    <div style={{ background: C.panel2, border: `1px solid ${C.coral}`, borderRadius: 8, padding: "12px 14px" }}>
+      <div style={{ fontSize: 11, color: C.coral, letterSpacing: ".06em", textTransform: "uppercase", marginBottom: 8 }}>
+        Why the cash runs out at age {age}
+      </div>
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, lineHeight: 1.8 }}>
+        {rows.map(([label, v, positive, note]) => (
+          <div key={label} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <span style={{ color: C.mute }}>
+              {label}{note && <span style={{ fontSize: 10 }}> · {note}</span>}
+            </span>
+            <span style={{ color: positive ? C.teal : C.ink, whiteSpace: "nowrap" }}>
+              {v >= 0 ? "+" : "−"}{fmt(Math.abs(v))}
+            </span>
+          </div>
+        ))}
+        <div style={{ borderTop: `1px solid ${C.line}`, margin: "6px 0", paddingTop: 6, display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <span style={{ color: C.ink }}>Left for the cash account</span>
+          <span style={{ color: toTaxable < 0 ? C.coral : C.teal, whiteSpace: "nowrap" }}>
+            {toTaxable >= 0 ? "+" : "−"}{fmt(Math.abs(toTaxable))}/yr
+          </span>
+        </div>
+        {taxAdv > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <span style={{ color: C.mute }}>…while still routing to 401k/IRA <span style={{ fontSize: 10 }}>· locked until {accessAge}</span></span>
+            <span style={{ color: C.locked, whiteSpace: "nowrap" }}>{fmt(taxAdv)}/yr</span>
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: C.ink, lineHeight: 1.6, marginTop: 10 }}>
+        {taxableAtStart != null && toTaxable < 0 && (
+          <>You start age {age} with <b>{fmt(taxableAtStart)}</b> of spendable cash and drain{" "}
+            <b style={{ color: C.coral }}>{fmt(Math.abs(toTaxable))}</b> that year, so it goes negative. </>
+        )}
+        {housing > takeHome ? (
+          <><b style={{ color: C.coral }}>Housing alone ({fmt(housing)}) costs more than your entire take-home ({fmt(takeHome)}).</b>{" "}
+            No allocation change fixes that — the house is the problem.</>
+        ) : toTaxable < 0 ? (
+          <>The largest outflow is <b>{biggestName} ({fmt(biggestVal)})</b>. Spending exceeds income here, so the gap has to
+            close on the spending or income side{taxAdv > 0 ? <>, or by routing less of your pay into locked accounts</> : null}.</>
+        ) : (
+          <>Income covers the year's spending, so the shortfall comes from money already committed elsewhere —
+            typically a lump landing while savings sit locked in retirement accounts.</>
+        )}
+      </div>
+    </div>
+  );
+};
 
 const AddButton = ({ onClick, label }) => (
   <button
@@ -1474,9 +1574,11 @@ function Calculator({ shared, isMobile }) {
   // once per lever and report what each one is really worth, in years of retirement.
   const levers = useMemo(() => {
     if (sim.fireCross == null) return [];
+    // Only levers you can actually pull. Market return and inflation used to be listed (flagged "not
+    // your choice") and would usually top the table — which is true but useless as advice, and it
+    // squashed the bars for every decision you can really make. They're gone: this table is now
+    // exclusively actionable, and the bar scale is set by real choices.
     const defs = [
-      { label: "Real return +1pt", assumption: true, over: { nominalReturn: p.nominalReturn + 0.01 } },
-      { label: "Inflation +1pt", assumption: true, over: { inflation: p.inflation + 0.01 } },
       { label: "Retirement spend −$10k/yr", over: { retirementSpendToday: Math.max(0, p.retirementSpendToday - 10000) } },
       { label: "Your take-home +$10k/yr", over: { annualTakeHome: p.annualTakeHome + 10000 } },
       { label: "Living costs −$5k/yr", over: { nonHousingLiving: Math.max(0, p.nonHousingLiving - 5000) } },
@@ -1502,10 +1604,6 @@ function Calculator({ shared, isMobile }) {
   }, [p, sim.fireCross]);
 
   const maxLever = Math.max(...levers.map((l) => Math.abs(l.delta ?? 0)), 0.01);
-  const bestBehaviour = Math.max(...levers.filter((l) => !l.assumption).map((l) => Math.abs(l.delta ?? 0)), 0);
-  const topLever = levers[0];
-  // if the biggest mover is a market assumption rather than anything you decide, say so plainly
-  const assumptionRules = topLever?.assumption && Math.abs(topLever.delta) > bestBehaviour;
   const ticks = []; for (let a = 30; a <= sim.END; a += 10) ticks.push(a);
 
   const Stat = ({ label, value, accent, sub }) => (
@@ -2130,6 +2228,20 @@ function Calculator({ shared, isMobile }) {
             </div>
           )}
 
+          {/* the arithmetic behind an underwater cash account — shown whenever it happens, whether or not
+              it also cost you a retirement date */}
+          <CashLedger cause={sim.underwaterCause} accessAge={sim.accessYou} />
+
+          {sim.coastShortfall && (
+            <div style={{ background: C.panel2, border: `1px solid ${C.coast}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink, lineHeight: 1.6 }}>
+              <b style={{ color: C.coast }}>Coast FIRE isn't reachable on these inputs.</b> To coast from age{" "}
+              {sim.coastShortfall.age} — stop saving and still retire on time — you'd need{" "}
+              <b>{fmtM(sim.coastShortfall.need)}</b> by then, but you'd have <b>{fmtM(sim.coastShortfall.have)}</b>:
+              short by <b style={{ color: C.coral }}>{fmtM(sim.coastShortfall.gap)}</b>. Push the coast age later, save
+              more before it, or lower the retirement budget the coast bar is sized against.
+            </div>
+          )}
+
           {retireToday && !retireOnLoan && (
             <div style={{ background: `${C.teal}1A`, border: `2px solid ${C.teal}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, alignItems: "flex-start" }}>
               <span style={{ fontSize: 22, lineHeight: 1.1 }} aria-hidden>✅</span>
@@ -2208,13 +2320,6 @@ function Calculator({ shared, isMobile }) {
             </div>
           )}
 
-          {sim.illiquidAge && !retireOnLoan && (
-            <div style={{ background: C.panel2, border: `1px solid ${C.coral}`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
-              ⚠ Taxable cash goes negative at age <b>{sim.illiquidAge}</b> — a lump (house, college) lands with the
-              money stuck in retirement accounts. In reality that's a loan or a 10% early-withdrawal penalty.
-            </div>
-          )}
-
           {sim.fireCross && sim.mortgageAtFire > 0 && !retireOnLoan && (
             <div style={{ background: C.panel2, border: `1px solid ${C.brass}55`, borderRadius: 8, padding: "10px 14px", fontSize: 13, color: C.ink }}>
               You'd retire still owing <b>{fmt(sim.mortgageAtFire)}/yr</b> of principal and interest across{" "}
@@ -2242,7 +2347,8 @@ function Calculator({ shared, isMobile }) {
                 What moves the needle
               </div>
               <p style={{ margin: "0 0 14px", fontSize: 12, color: C.mute }}>
-                Years of retirement bought by changing one thing, everything else held fixed.
+                Years of retirement bought by changing one thing, everything else held fixed. Only choices you
+                control — market return and inflation live in <b>Advanced settings</b>.
                 <span style={{ color: C.teal }}> Teal = retire earlier.</span>
               </p>
 
@@ -2253,9 +2359,7 @@ function Calculator({ shared, isMobile }) {
                   const col = d == null ? C.mute : Math.abs(d) < 0.05 ? C.mute : earlier ? C.teal : C.coral;
                   return (
                     <div key={l.label} style={{ display: "grid", gridTemplateColumns: "1fr 90px 46px", alignItems: "center", gap: 10 }}>
-                      <span style={{ fontSize: 12, color: l.assumption ? C.brass : C.ink }}>
-                        {l.label}{l.assumption && <span style={{ color: C.mute }}> · not your choice</span>}
-                      </span>
+                      <span style={{ fontSize: 12, color: C.ink }}>{l.label}</span>
                       <div style={{ height: 6, background: `${C.line}80`, borderRadius: 3, overflow: "hidden" }}>
                         <div style={{
                           width: `${Math.min(100, (Math.abs(d ?? 0) / maxLever) * 100)}%`,
@@ -2269,15 +2373,6 @@ function Calculator({ shared, isMobile }) {
                   );
                 })}
               </div>
-
-              {assumptionRules && (
-                <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.line}`, fontSize: 12, color: C.ink, lineHeight: 1.6 }}>
-                  ⚠ <b>Your retirement date is dominated by an assumption you don't control.</b>{" "}
-                  “{topLever.label}” moves it <b>{Math.abs(topLever.delta).toFixed(1)} years</b> — more than any decision
-                  you can make, the best of which is worth {bestBehaviour.toFixed(1)}y. Treat the headline age as a
-                  midpoint, not a date: drag the return slider to see the range you're really planning inside.
-                </div>
-              )}
             </div>
           )}
         </div>

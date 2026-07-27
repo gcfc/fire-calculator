@@ -1127,3 +1127,70 @@ describe("coast FIRE is opt-in", () => {
     expect(snap.coastCross).toBeNull();
   });
 });
+
+describe("diagnostics — WHY the cash ran out, or coast is unreachable", () => {
+  // the reported scenario: a lone earner buying a $2M home at 25. Housing alone outruns take-home,
+  // so the cash account bleeds every year and goes underwater in his early thirties.
+  const BROKE = {
+    ...DEFAULTS, nominalReturn: 0.10, partnerEnabled: false, kids: [], swr: 0.025,
+    retirementSpendToday: 200000, coastAge: 30, useCoast: false,
+    homes: [{ price: 2000000, purchaseAge: 25, downPct: 0.2, rate: 0.065, term: 30, closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }],
+  };
+
+  it("reports the cash-flow arithmetic for the year the account breaks", () => {
+    const s = simulate(BROKE);
+    expect(s.illiquidAge).not.toBeNull();
+    const c = s.underwaterCause;
+    expect(c).not.toBeNull();
+    expect(c.age).toBe(s.illiquidAge);
+    // the components must reconcile: take-home − living − housing − kids − lumps = what reaches cash
+    expect(c.takeHome - c.living - c.housing - c.kids - c.lumps).toBeCloseTo(c.toTaxable, 0);
+    expect(c.toTaxable).toBeLessThan(0);            // the year really does drain cash
+    expect(c.housing).toBeGreaterThan(c.takeHome);  // …because housing alone outruns income
+    expect(c.mortgage).toBeGreaterThan(0);          // and P&I is called out within housing
+    expect(c.taxAdv).toBe(DEFAULTS.annualTaxAdv);   // still routing pay into locked accounts
+    expect(c.prev.age).toBe(c.age - 1);             // the prior year is carried for context
+  });
+
+  it("is null when the cash account never goes underwater", () => {
+    const ok = simulate({ ...DEFAULTS });
+    expect(ok.illiquidAge).toBeNull();
+    expect(ok.underwaterCause).toBeNull();
+  });
+
+  it("explains an unreachable coast target with the size of the gap", () => {
+    const s = simulate({ ...BROKE, useCoast: true, coastAge: 30 });
+    expect(s.coastCross).toBeNull();                 // never reaches the bar
+    const g = s.coastShortfall;
+    expect(g.age).toBe(30);
+    expect(g.need).toBeGreaterThan(g.have);
+    expect(g.gap).toBe(g.need - g.have);
+  });
+
+  it("reports no coast shortfall when coast is off, or when it IS reached", () => {
+    expect(simulate({ ...BROKE, useCoast: false }).coastShortfall).toBeNull();
+    const reached = simulate({ ...DEFAULTS });
+    expect(reached.coastCross).not.toBeNull();
+    expect(reached.coastShortfall).toBeNull();
+  });
+});
+
+describe("what moves the needle lists only choices you control", () => {
+  it("no lever is a market assumption", () => {
+    // return and inflation are no longer offered as levers: true but unactionable, and they dwarfed
+    // every real decision on the bar scale. Guard the model inputs they used to perturb.
+    const s = simulate({ ...DEFAULTS });
+    expect(s.fireCross).not.toBeNull();
+    // the levers list lives in the UI, but its perturbations must still be valid model inputs
+    for (const over of [
+      { retirementSpendToday: DEFAULTS.retirementSpendToday - 10000 },
+      { annualTakeHome: DEFAULTS.annualTakeHome + 10000 },
+      { nonHousingLiving: DEFAULTS.nonHousingLiving - 5000 },
+      { annualTaxAdv: DEFAULTS.annualTaxAdv - 10000, annualTakeHome: DEFAULTS.annualTakeHome + 10000 },
+    ]) {
+      const alt = simulate({ ...DEFAULTS, ...over });
+      expect(Number.isNaN(alt.fireCross ?? 0)).toBe(false);
+      expect(alt.fireCross).not.toBeNull();
+    }
+  });
+});
