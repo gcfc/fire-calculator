@@ -917,6 +917,47 @@ const CashLedger = ({ cause, accessAge }) => {
   );
 };
 
+// Page footnote: the disclaimers a financial calculator needs, plus an honest account of what the page
+// does with what you type. Every privacy claim below is verifiable in this file — the model runs in the
+// browser, and there is no storage, cookie, analytics or telemetry code anywhere in the project. The two
+// caveats (webfonts, and share links carrying inputs) are stated rather than glossed over.
+const Footnote = () => (
+  <div style={{
+    marginTop: 28, paddingTop: 14, borderTop: `1px solid ${C.line}`,
+    fontSize: 10.5, lineHeight: 1.65, color: C.mute, maxWidth: 900,
+  }}>
+    <p style={{ margin: "0 0 8px" }}>
+      <b style={{ color: C.ink }}>Not financial advice.</b> This is a free educational tool for exploring
+      scenarios, not investment, tax, legal or retirement advice, and using it creates no advisory
+      relationship. It is not affiliated with, endorsed by, or acting on behalf of any financial
+      institution. Every figure it shows is a projection from the assumptions you enter, not a prediction
+      or a guarantee. The model is deliberately simplified — it assumes one fixed rate of return with no
+      market volatility or sequence-of-returns risk, models no taxes, and treats property as a pure
+      expense with no equity or resale value — so real outcomes will differ, potentially by a lot.
+      Assumed returns are not indicative of future results. Verify anything that matters with a qualified
+      professional before acting on it.
+    </p>
+    <p style={{ margin: "0 0 8px" }}>
+      <b style={{ color: C.ink }}>Privacy.</b> Everything is calculated locally in your browser. There are
+      no accounts, no cookies, no local storage, no analytics and no tracking of any kind: the figures you
+      enter are never transmitted to us, never stored, and never used for any purpose — we cannot see them.
+      Closing the tab discards them. Two things are worth knowing: a <em>share link</em> encodes your inputs
+      into the link itself (after the <code>#</code>, which browsers do not send to web servers), so the
+      data travels only to whoever you give the link to — treat it as you would the numbers themselves, and
+      use the plot-only option to share the chart without the inputs. Separately, the page loads its
+      typefaces from Google Fonts, so your browser contacts Google to fetch them, and the static host
+      serving this page may keep ordinary access logs (such as IP address) as any web server does.
+    </p>
+    <p style={{ margin: 0 }}>
+      <b style={{ color: C.ink }}>Terms.</b> Provided as is and as available, without warranties of any
+      kind, express or implied, including accuracy, merchantability or fitness for a particular purpose.
+      To the fullest extent permitted by law, the authors accept no liability for any loss or damage
+      arising from use of, or reliance on, this tool or its output. You are responsible for your own
+      financial decisions. Use of the page constitutes acceptance of these terms.
+    </p>
+  </div>
+);
+
 const AddButton = ({ onClick, label }) => (
   <button
     onClick={onClick}
@@ -1452,6 +1493,7 @@ function SharedPlot({ snap, isMobile }) {
           Build your own projection →
         </button>
       </div>
+      <Footnote />
     </div>
   );
 }
@@ -2377,6 +2419,7 @@ function Calculator({ shared, isMobile }) {
           )}
         </div>
       </div>
+      <Footnote />
     </div>
   );
 }
