@@ -1194,3 +1194,61 @@ describe("what moves the needle lists only choices you control", () => {
     }
   });
 });
+
+describe("the year-by-year trace explains the chart's shape", () => {
+  it("covers every year exactly once, in order, and labels the phases", () => {
+    const s = simulate({ ...DEFAULTS });
+    expect(s.trace.length).toBe(s.END - DEFAULTS.currentAge + 1);
+    expect(s.trace[0].age).toBe(DEFAULTS.currentAge);
+    expect(s.trace[s.trace.length - 1].age).toBe(s.END);
+    s.trace.forEach((t, i) => { if (i) expect(t.age).toBe(s.trace[i - 1].age + 1); });
+    // exactly one "retires" year, and it is the year the crossing falls in
+    const retiring = s.trace.filter((t) => t.phase === "retires");
+    expect(retiring.length).toBe(1);
+    expect(retiring[0].age).toBe(Math.floor(s.fireCross));
+    // everything before it is working, everything after is retired
+    expect(s.trace.filter((t) => t.age < retiring[0].age).every((t) => t.phase === "working")).toBe(true);
+    expect(s.trace.filter((t) => t.age > retiring[0].age).every((t) => t.phase === "retired")).toBe(true);
+  });
+
+  it("each year's end balances carry into the next year's start", () => {
+    const s = simulate({ ...DEFAULTS });
+    for (let i = 1; i < s.trace.length; i++) {
+      // end-of-year and start-of-next are the same instant, so they must agree (to rounding)
+      expect(Math.abs(s.trace[i].startTaxable - s.trace[i - 1].endTaxable)).toBeLessThanOrEqual(1);
+      expect(Math.abs(s.trace[i].startTaxAdv - s.trace[i - 1].endTaxAdv)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("the totals are the sum of the two buckets", () => {
+    const s = simulate({ ...DEFAULTS });
+    for (const t of s.trace) {
+      expect(Math.abs(t.startTotal - (t.startTaxable + t.startTaxAdv))).toBeLessThanOrEqual(1);
+      expect(Math.abs(t.endTotal - (t.endTaxable + t.endTaxAdv))).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("shows WHY the pot climbs after retirement: locked accounts grow while taxable is drawn down", () => {
+    // this is the counter-intuitive shape the trace exists to explain
+    const s = simulate({ ...DEFAULTS });
+    const locked = s.trace.filter((t) => t.phase === "retired" && t.locked);
+    expect(locked.length).toBeGreaterThan(1);
+    for (const t of locked) {
+      expect(t.income).toBe(0);                          // no earnings — you've retired
+      expect(t.contributions).toBe(0);                   // …and nothing new going in
+      expect(t.endTaxAdv).toBeGreaterThan(t.startTaxAdv); // yet the locked bucket still grows
+      expect(t.endTaxable).toBeLessThan(t.startTaxable);  // because only taxable pays the bills
+    }
+    // and the buckets flip once the wall opens: the locked one starts being spent
+    const open = s.trace.filter((t) => t.phase === "retired" && !t.locked);
+    expect(open.length).toBeGreaterThan(0);
+  });
+
+  it("marks accounts unlocked only from the access age onward", () => {
+    const s = simulate({ ...DEFAULTS });
+    for (const t of s.trace) {
+      if (t.phase === "working") continue;
+      expect(t.locked).toBe(t.age + 1 <= s.accessYou);
+    }
+  });
+});

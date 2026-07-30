@@ -595,6 +595,7 @@ export function simulate(p) {
   let coastCross = null, coastCrossValue = null, prevCoastGap = null, prevCoastReal = null;
   let minSave = Infinity, minSaveAge = null, illiquidAge = null;
   const rows = [];
+  const trace = [];        // one explained line per year: flows in, flows out, what each bucket did
 
   for (let age = p.currentAge; age <= END; age++) {
     const infl = Math.pow(1 + p.inflation, age - p.currentAge);
@@ -644,6 +645,8 @@ export function simulate(p) {
       events,
     });
 
+    const stBefore = st;                                 // balances entering the year, for the trace
+
     if (working) {
       // Does the crossing fall inside this year? Solve for the exact instant rather than
       // rounding up to the next birthday.
@@ -687,6 +690,40 @@ export function simulate(p) {
       st = r.st;
       if (r.short && illiquidAge === null) illiquidAge = age;
     }
+
+    // --- the year, explained ------------------------------------------------
+    // Every year is one line of arithmetic: what came in, what went out, and what each bucket did.
+    // The point is to make the counter-intuitive shape of the chart legible — above all, that the
+    // retirement bucket KEEPS GROWING after you retire, because it is locked until 59.5 and therefore
+    // compounds untouched while only the taxable account is being drawn down.
+    {
+      const inflEndYr = inflAt(age + 1);
+      const r2 = (x) => Math.round(x / inflEndYr);                 // end-of-year $ -> today's $
+      const wasWorking = working;                                  // `working` was captured pre-transition
+      const retiredThisYear = wasWorking && T !== null;
+      const startTaxAdv = stBefore.taxAdvYou + stBefore.taxAdvPartner;
+      const endTaxAdv = st.taxAdvYou + st.taxAdvPartner;
+      // reachable this year? (the buckets open at their owner's 59.5, or retire+5 with a ladder)
+      const openYou = !p.enforceAccess || (T !== null ? age + 1 > unlockAt(accessYou, T) : age + 1 > accessYou);
+      const openPartner = !p.enforceAccess || (T !== null ? age + 1 > unlockAt(accessPartner, T) : age + 1 > accessPartner);
+      const f = flows(age);
+      trace.push({
+        age,
+        phase: retiredThisYear ? "retires" : wasWorking ? "working" : "retired",
+        retireAt: retiredThisYear ? T : null,
+        // balances, in today's dollars, before and after the year
+        startTaxable: Math.round(stBefore.taxable / infl), startTaxAdv: Math.round(startTaxAdv / infl),
+        endTaxable: r2(st.taxable), endTaxAdv: r2(endTaxAdv),
+        startTotal: Math.round(startReal), endTotal: r2(st.taxable + endTaxAdv),
+        // the flows that drove it (a working year earns and contributes; a retired year spends)
+        income: wasWorking ? Math.round(f.takeHome / infl) : Math.round((incomeAt(age) + partnerTakeHomeAt(age)) / infl),
+        spending: wasWorking ? Math.round((f.living + f.housing + f.kidCost + f.lumps) / infl)
+                             : Math.round(retireExpense(age) / infl),
+        contributions: wasWorking ? Math.round((f.taxAdvYou + f.taxAdvPartner) / infl) : 0,
+        // whether the locked bucket could legally be touched at all this year
+        locked: !(openYou || openPartner),
+      });
+    }
   }
 
   // terminal balance, AFTER the final year is spent — zero by construction when total wealth binds
@@ -704,7 +741,7 @@ export function simulate(p) {
     })),
     lastPayoff,
     mortgageAtFire: T == null ? 0 : piAt(Math.floor(T)),   // P&I still running when you retire
-    minSave: Math.round(minSave), minSaveAge, end, rows, END,
+    minSave: Math.round(minSave), minSaveAge, end, rows, trace, END,
     accessYou, accessPartner, partnerOffset, hasPartner,
     // one-off expense/windfall markers for the chart, and each debt's derived payoff age for its card
     expenseMarks: (p.expenses || []).filter((e) => (+e.amount) || 0).map((e) => ({ age: Math.round(e.age), amount: +e.amount })),
@@ -957,6 +994,74 @@ const Footnote = () => (
     </p>
   </div>
 );
+
+// Year-by-year arithmetic for the whole projection. The chart shows the shape; this shows the sums that
+// produce it — and in particular answers the question the shape provokes: why does the portfolio keep
+// CLIMBING after you retire? Because the retirement bucket is locked until 59.5, so it compounds
+// untouched while only the taxable account is drawn down.
+const TraceTable = ({ trace, accessAge, fireCross }) => {
+  if (!trace || !trace.length) return null;
+  const money = (v) => (v === 0 ? "0" : fmt(v));
+  const phaseColor = { working: C.teal, retires: C.brass, retired: C.mute };
+  const cell = { padding: "3px 8px", whiteSpace: "nowrap", textAlign: "right" };
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <div style={{ maxHeight: 360, overflowY: "auto", border: `1px solid ${C.line}`, borderRadius: 6 }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
+          <thead>
+            <tr style={{ position: "sticky", top: 0, background: C.panel, color: C.mute, zIndex: 1 }}>
+              <th style={{ ...cell, textAlign: "left" }}>Age</th>
+              <th style={{ ...cell, textAlign: "left" }}>Phase</th>
+              <th style={cell}>In</th>
+              <th style={cell}>Out</th>
+              <th style={cell}>→401k</th>
+              <th style={cell}>Taxable</th>
+              <th style={cell}>Retirement</th>
+              <th style={cell}>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {trace.map((t) => {
+              const retiring = t.phase === "retires";
+              const dTaxable = t.endTaxable - t.startTaxable;
+              const dAdv = t.endTaxAdv - t.startTaxAdv;
+              return (
+                <tr key={t.age} style={{
+                  borderTop: `1px solid ${C.line}55`,
+                  background: retiring ? `${C.brass}1A` : "transparent",
+                }}>
+                  <td style={{ ...cell, textAlign: "left", color: C.ink }}>{t.age}</td>
+                  <td style={{ ...cell, textAlign: "left", color: phaseColor[t.phase] }}>
+                    {retiring ? `retires ${fireCross != null ? fireCross.toFixed(1) : ""}` : t.phase}
+                    {t.locked && t.phase !== "working" ? <span style={{ color: C.locked }}> · locked</span> : null}
+                  </td>
+                  <td style={{ ...cell, color: t.income ? C.teal : C.mute }}>{money(t.income)}</td>
+                  <td style={{ ...cell, color: C.ink }}>{money(t.spending)}</td>
+                  <td style={{ ...cell, color: t.contributions ? C.locked : C.mute }}>{money(t.contributions)}</td>
+                  <td style={{ ...cell, color: t.endTaxable < 0 ? C.coral : C.liquid }}>
+                    {money(t.endTaxable)} <span style={{ color: dTaxable < 0 ? C.coral : C.mute, fontSize: 10 }}>
+                      ({dTaxable >= 0 ? "+" : "−"}{money(Math.abs(dTaxable))})</span>
+                  </td>
+                  <td style={{ ...cell, color: C.locked }}>
+                    {money(t.endTaxAdv)} <span style={{ color: C.mute, fontSize: 10 }}>
+                      ({dAdv >= 0 ? "+" : "−"}{money(Math.abs(dAdv))})</span>
+                  </td>
+                  <td style={{ ...cell, color: C.ink }}>{money(t.endTotal)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 10, color: C.mute, marginTop: 6, lineHeight: 1.6 }}>
+        All figures in today's dollars, at the END of each year; the bracketed number is that year's change.
+        “In” is take-home while working, and guaranteed income (pension/Social Security) plus a working
+        partner's pay once retired. “Out” is the whole bill: living, housing, kids and any one-off costs.
+        Retirement accounts are marked <span style={{ color: C.locked }}>locked</span> until {accessAge}.
+      </div>
+    </div>
+  );
+};
 
 const AddButton = ({ onClick, label }) => (
   <button
@@ -1279,7 +1384,10 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
   return (
     <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: "18px 14px 8px" }}>
       <ResponsiveContainer width="100%" height={340}>
-        <ComposedChart data={rows} margin={{ top: 8, right: 12, left: 8, bottom: 4 }}>
+        {/* the top margin has to clear the ReferenceLine labels ("59.5", "partner stops 67"), which are
+            drawn ABOVE the plot area — at the old 8px they were sliced in half. The right margin does the
+            same job horizontally for a label sitting near the end of the axis. */}
+        <ComposedChart data={rows} margin={{ top: 26, right: 26, left: 8, bottom: 4 }}>
           <CartesianGrid stroke={C.line} vertical={false} />
           {/* shade every stretch where spendable cash is negative — drawn first so it sits behind the curves */}
           {show.underwater ? underwaterSpans.map(([a, b], i) => (
@@ -1513,6 +1621,8 @@ function Calculator({ shared, isMobile }) {
   const [p, setP] = useState(() => (shared && shared.mode === "full" ? { ...DEFAULTS, ...shared.p } : DEFAULTS));
   const [show, setShow] = useState(() => ({ ...defaultShow(), ...(shared && shared.mode === "full" ? shared.show : null) }));
   const [advancedOpen, setAdvancedOpen] = useState(false);   // the rarely-touched settings start folded
+  const [traceOpen, setTraceOpen] = useState(false);         // the year-by-year arithmetic, on demand
+  const [leversOpen, setLeversOpen] = useState(true);        // …but the levers are the payoff, so open
   const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
   const setPct = (k, v) => setP((s) => ({ ...s, [k]: v / 100 }));
 
@@ -1646,6 +1756,17 @@ function Calculator({ shared, isMobile }) {
   }, [p, sim.fireCross]);
 
   const maxLever = Math.max(...levers.map((l) => Math.abs(l.delta ?? 0)), 0.01);
+
+  // The stretch after you retire but before the 59.5 wall opens: the retirement bucket cannot be touched,
+  // so it compounds untouched and drags the TOTAL curve upward even though you've stopped earning. That
+  // shape reads as a bug until it's spelled out, so pull the numbers for the trace section's callout.
+  const lockedGrowth = useMemo(() => {
+    const seg = sim.trace.filter((t) => t.phase !== "working" && t.locked);
+    if (seg.length < 2) return null;
+    const from = seg[0].startTaxAdv, to = seg[seg.length - 1].endTaxAdv;
+    if (to <= from) return null;                       // only worth explaining when it actually grows
+    return { from, to, fromAge: seg[0].age, toAge: seg[seg.length - 1].age + 1 };
+  }, [sim.trace]);
   const ticks = []; for (let a = 30; a <= sim.END; a += 10) ticks.push(a);
 
   const Stat = ({ label, value, accent, sub }) => (
@@ -2382,13 +2503,34 @@ function Calculator({ shared, isMobile }) {
             show={show} setShow={setShow}
           />
 
+          {/* TRACE THE NUMBERS — the year-by-year arithmetic behind the chart */}
+          <Collapsible
+            title="Trace the numbers"
+            subtitle="Year-by-year: what came in, what went out, and what each bucket did"
+            open={traceOpen} onToggle={() => setTraceOpen((v) => !v)}
+          >
+            {lockedGrowth && (
+              <div style={{ background: `${C.locked}14`, border: `1px solid ${C.locked}`, borderRadius: 8, padding: "12px 14px", fontSize: 13, color: C.ink, lineHeight: 1.6 }}>
+                <b style={{ color: C.locked }}>Why the portfolio keeps climbing after you retire.</b> From{" "}
+                <b>{lockedGrowth.fromAge}</b> to <b>{lockedGrowth.toAge}</b> your retirement accounts are
+                <b> locked</b> — you legally can't spend them — so they compound untouched, growing from{" "}
+                <b>{fmtM(lockedGrowth.from)}</b> to <b>{fmtM(lockedGrowth.to)}</b> while only your taxable cash is
+                drawn down. The total curve rises because that locked growth outruns what you're spending out of
+                taxable. It isn't free money: it's money you can't reach yet, which is exactly what the coral
+                bridge line is about.
+              </div>
+            )}
+            <TraceTable trace={sim.trace} accessAge={sim.accessYou} fireCross={sim.fireCross} />
+          </Collapsible>
+
           {/* WHAT MOVES THE NEEDLE — each row is a full re-run of the model, not a rule of thumb */}
           {levers.length > 0 && (
-            <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18 }}>
-              <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 4 }}>
-                What moves the needle
-              </div>
-              <p style={{ margin: "0 0 14px", fontSize: 12, color: C.mute }}>
+            <Collapsible
+              title="What moves the needle"
+              subtitle="Years of retirement bought by each choice you control"
+              open={leversOpen} onToggle={() => setLeversOpen((v) => !v)}
+            >
+              <p style={{ margin: 0, fontSize: 12, color: C.mute }}>
                 Years of retirement bought by changing one thing, everything else held fixed. Only choices you
                 control — market return and inflation live in <b>Advanced settings</b>.
                 <span style={{ color: C.teal }}> Teal = retire earlier.</span>
@@ -2415,7 +2557,7 @@ function Calculator({ shared, isMobile }) {
                   );
                 })}
               </div>
-            </div>
+            </Collapsible>
           )}
         </div>
       </div>
