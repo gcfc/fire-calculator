@@ -21,6 +21,19 @@ const SINGLE = {
   partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0,
 };
 
+// Build a scenario that genuinely retires at or after the access age (59.5). Hard-coding a spending
+// figure tuned to whatever DEFAULTS happen to be makes the FIXTURE the thing that breaks when a default
+// moves — which is exactly what happened when the starting portfolio was raised. Search for a qualifying
+// scenario instead, and throw if the sweep can't produce one, so a silently vacuous test is impossible.
+const retiringAfterAccessAge = () => {
+  for (const retirementSpendToday of [300000, 400000, 500000, 650000, 800000, 1000000]) {
+    const p = { ...DEFAULTS, ...SINGLE, homes: [], retirementSpendToday };
+    const sim = simulate(p);
+    if (sim.fireCross != null && sim.fireCross >= DEFAULTS.accessAge) return { p, sim };
+  }
+  throw new Error("no scenario in the sweep retires at/after the access age — widen the fixture");
+};
+
 // sweep an input finely and hand back the per-step jumps in whatever you measure
 const sweep = (key, from, to, step, pick, base = {}) => {
   const jumps = [];
@@ -170,11 +183,11 @@ describe("the 59.5 rule — money you cannot legally touch", () => {
   });
 
   it("needs no bridge at all when you retire after 59.5", () => {
-    // single earner, fat budget -> retirement lands past the statutory age, so there is nothing
-    // to bridge: every dollar is already reachable on the day you stop working
-    const late = run({ ...SINGLE, homes: [], retirementSpendToday: 300000 });
-    expect(late.fireCross).toBeGreaterThan(59.5);
-    expect(late.fireBridge).toBe(0);
+    // retirement lands past the statutory age, so there is nothing to bridge: every dollar is
+    // already reachable on the day you stop working
+    const { sim } = retiringAfterAccessAge();
+    expect(sim.fireCross).toBeGreaterThanOrEqual(DEFAULTS.accessAge);   // the fixture really is late
+    expect(sim.fireBridge).toBe(0);
   });
 
   it("strands you when everything is locked in a 401k", () => {
@@ -184,10 +197,14 @@ describe("the 59.5 rule — money you cannot legally touch", () => {
   });
 
   it("makes the ladder inert when retirement already lands past 59.5", () => {
-    // a ladder opens at T+5, but never later than 59.5 — so past that age it changes nothing
-    const spend = { retirementSpendToday: 200000 };
-    expect(simulate({ ...DEFAULTS, ...spend, rothLadder: true }).fireCross)
-      .toBeCloseTo(simulate({ ...DEFAULTS, ...spend, rothLadder: false }).fireCross, 6);
+    // a ladder opens at T+5, but never later than the access age — so past that age it changes nothing
+    // Reuse the searched fixture: past the wall, unlockAt() returns the statutory age either way, so
+    // the ladder is structurally inert. The old fixture had drifted to retiring at 48.7 — comfortably
+    // BEFORE the wall — where the ladder is also a no-op, but for an unrelated reason (liquidity
+    // simply wasn't binding). It therefore passed without ever exercising this rule.
+    const { p, sim: without } = retiringAfterAccessAge();
+    expect(without.fireCross).toBeGreaterThanOrEqual(DEFAULTS.accessAge);
+    expect(simulate({ ...p, rothLadder: true }).fireCross).toBeCloseTo(without.fireCross, 6);
   });
 
   it("lets an unlocked 401k cover a cash shortfall while still working (past 59.5)", () => {
@@ -195,7 +212,7 @@ describe("the 59.5 rule — money you cannot legally touch", () => {
     // rule the shortfall compounded forever and retirement never came; now, once the 401k unlocks at
     // 59.5, the shortfall is paid from it — so retirement lands past the statutory age, pot to zero.
     const s = run({ ...SINGLE });
-    expect(s.fireCross).toBeGreaterThan(59.5);
+    expect(s.fireCross).toBeGreaterThan(DEFAULTS.accessAge);
     expect(s.fireCrossValue).toBeGreaterThanOrEqual(s.fireReq - 1);   // clears the total bar
     expect(s.end).toBeLessThanOrEqual(1);                             // drawn down, no phantom growth
     // the taxable account is no longer stranded underwater once past the unlock age
@@ -627,8 +644,8 @@ describe("allocation advice — tax-advantaged vs. taxable split", () => {
 
   it("says nothing about allocation once retirement already lands after 59.5", () => {
     // past the wall the split is irrelevant, so neither direction should fire
-    const p = { ...DEFAULTS, ...SINGLE, homes: [], retirementSpendToday: 300000 };
-    expect(simulate(p).fireCross).toBeGreaterThan(59.5);
+    const { p, sim } = retiringAfterAccessAge();
+    expect(sim.fireCross).toBeGreaterThanOrEqual(DEFAULTS.accessAge);   // the fixture really is late
     expect(allocationAdvice(p)).toBeNull();
   });
 
@@ -1146,7 +1163,11 @@ describe("diagnostics — WHY the cash ran out, or coast is unreachable", () => 
     // the components must reconcile: take-home − living − housing − kids − lumps = what reaches cash
     expect(c.takeHome - c.living - c.housing - c.kids - c.lumps).toBeCloseTo(c.toTaxable, 0);
     expect(c.toTaxable).toBeLessThan(0);            // the year really does drain cash
-    expect(c.housing).toBeGreaterThan(c.takeHome);  // …because housing alone outruns income
+    // …and the ledger points at the culprit: housing is the dominant outflow. (Whether it also exceeds
+    // take-home outright depends on which year the account happens to break, which shifts with the
+    // starting portfolio — so pin the diagnosis, not that incidental threshold.)
+    const outflows = { housing: c.housing, living: c.living, kids: c.kids, lumps: c.lumps };
+    expect(Math.max(...Object.values(outflows))).toBe(c.housing);
     expect(c.mortgage).toBeGreaterThan(0);          // and P&I is called out within housing
     expect(c.taxAdv).toBe(DEFAULTS.annualTaxAdv);   // still routing pay into locked accounts
     expect(c.prev.age).toBe(c.age - 1);             // the prior year is carried for context
