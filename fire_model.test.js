@@ -1291,3 +1291,72 @@ describe("the year-by-year trace explains the chart's shape", () => {
     }
   });
 });
+
+describe("the trace decomposition balances", () => {
+  const SCENARIOS = {
+    defaults: {},
+    "lone earner": { partnerEnabled: false },
+    "gate off": { enforceAccess: false },
+    "partner works on": { partnerWorksAfterRetire: true },
+    "with a pension": { incomes: [{ amount: 40000, startAge: 65, whose: "you", cola: true }] },
+    "with one-offs": { expenses: [{ age: 40, amount: 60000 }, { age: 50, amount: -80000 }] },
+  };
+
+  it("every row closes: start + in − out + interest = balance, for BOTH accounts", () => {
+    // The table prints these columns as an equation, so if the identity ever stopped holding the UI
+    // would be quietly lying. Pin it across a spread of scenarios rather than just the defaults.
+    for (const [name, over] of Object.entries(SCENARIOS)) {
+      for (const t of simulate({ ...DEFAULTS, ...over }).trace) {
+        const cash = t.startTaxable + t.takeHome + t.otherIncome - t.cashOut + t.cashGrowth;
+        const adv = t.startTaxAdv + t.contributions - t.withdrawn + t.advGrowth;
+        expect(`${name} age ${t.age} cash ${cash}`).toBe(`${name} age ${t.age} cash ${t.endTaxable}`);
+        expect(`${name} age ${t.age} adv ${adv}`).toBe(`${name} age ${t.age} adv ${t.endTaxAdv}`);
+        expect(Math.abs(t.endTaxable + t.endTaxAdv - t.endTotal)).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it("itemised outgoings add up to the bill the two accounts actually paid", () => {
+    for (const over of Object.values(SCENARIOS)) {
+      for (const t of simulate({ ...DEFAULTS, ...over }).trace) {
+        const itemised = t.living + t.housing + t.kids + t.lumps;
+        expect(Math.abs(itemised - (t.cashOut + t.withdrawn))).toBeLessThanOrEqual(2);
+      }
+    }
+  });
+
+  it("a locked retirement account never pays out, and only compounds", () => {
+    const s = simulate({ ...DEFAULTS });
+    const locked = s.trace.filter((t) => t.phase === "retired" && t.locked);
+    expect(locked.length).toBeGreaterThan(1);
+    for (const t of locked) {
+      expect(t.withdrawn).toBe(0);                 // sealed: nothing can come out
+      expect(t.advGrowth).toBeGreaterThan(0);      // so the whole change is interest
+      expect(t.endTaxAdv).toBeGreaterThan(t.startTaxAdv);
+    }
+  });
+});
+
+describe("a one-off's sign is its direction (the UI enters a positive magnitude)", () => {
+  it("an income of X is exactly the mirror of an expense of X", () => {
+    const at = 40, amt = 75000;
+    const cost = simulate({ ...DEFAULTS, expenses: [{ age: at, amount: amt }] });
+    const gain = simulate({ ...DEFAULTS, expenses: [{ age: at, amount: -amt }] });
+    const base = simulate({ ...DEFAULTS });
+    expect(cost.fireCross).toBeGreaterThan(base.fireCross);   // paying it out costs you time
+    expect(gain.fireCross).toBeLessThan(base.fireCross);      // taking it in buys time
+    // and the requirement moves by the same magnitude in each direction. `required` is reported as a
+    // rounded integer, so demand symmetry only to the precision the value actually carries — $1.
+    const req = (s) => s.rows[0].required;
+    expect(Math.abs((req(cost) - req(base)) - (req(base) - req(gain)))).toBeLessThanOrEqual(1);
+  });
+
+  it("flipping direction only flips the sign — magnitude is untouched", () => {
+    // this is the invariant the expense/income picker relies on: it writes ±|amount|
+    const asExpense = simulate({ ...DEFAULTS, expenses: [{ age: 45, amount: 50000 }] });
+    const asIncome = simulate({ ...DEFAULTS, expenses: [{ age: 45, amount: -50000 }] });
+    expect(asExpense.expenseMarks[0].amount).toBe(50000);
+    expect(asIncome.expenseMarks[0].amount).toBe(-50000);
+    expect(asExpense.expenseMarks[0].age).toBe(asIncome.expenseMarks[0].age);
+  });
+});

@@ -10,6 +10,8 @@ const C = {
   bg: "#0E1A1F", panel: "#14252B", panel2: "#1B303733", ink: "#EAE6DD",
   brass: "#C9A24B", teal: "#5FB0A6", coral: "#D9695A", mute: "#7A8A8E",
   line: "#26424B", liquid: "#9AD5CB", coast: "#B48EAD", locked: "#7FA8D9",
+  // panel2 is deliberately translucent; popovers need a FULLY opaque surface or the page shows through
+  tip: "#1B3037",
 };
 
 // track a CSS media query so inline-styled layout can collapse on small screens
@@ -699,36 +701,86 @@ export function simulate(p) {
     }
 
     // --- the year, explained ------------------------------------------------
-    // Every year is one line of arithmetic: what came in, what went out, and what each bucket did.
-    // The point is to make the counter-intuitive shape of the chart legible — above all, that the
-    // retirement bucket KEEPS GROWING after you retire, because it is locked until 59.5 and therefore
-    // compounds untouched while only the taxable account is being drawn down.
+    // Every year decomposes into: what each bucket started with, the cash that moved in and out of it,
+    // the interest it earned, and what it ended with. The decomposition RECONCILES exactly —
+    //     start + in − out + growth = end
+    // for both buckets — because `growth` is derived as the residual rather than modelled separately.
+    // That is what makes the table trustworthy: if the arithmetic ever stopped adding up, the growth
+    // column would visibly absorb the error instead of hiding it.
+    //
+    // Above all it explains the shape that looks wrong at first glance — the retirement bucket keeps
+    // growing after you retire because it is locked, so its "out" is zero and its growth compounds
+    // untouched while only the cash account is drawn down.
     {
       const inflEndYr = inflAt(age + 1);
-      const r2 = (x) => Math.round(x / inflEndYr);                 // end-of-year $ -> today's $
-      const wasWorking = working;                                  // `working` was captured pre-transition
+      const r2 = (x) => x / inflEndYr;                              // end-of-year nominal $ -> today's $
+      const wasWorking = working;                                   // captured before the transition
       const retiredThisYear = wasWorking && T !== null;
       const startTaxAdv = stBefore.taxAdvYou + stBefore.taxAdvPartner;
       const endTaxAdv = st.taxAdvYou + st.taxAdvPartner;
-      // reachable this year? (the buckets open at their owner's 59.5, or retire+5 with a ladder)
       const openYou = !p.enforceAccess || (T !== null ? age + 1 > unlockAt(accessYou, T) : age + 1 > accessYou);
       const openPartner = !p.enforceAccess || (T !== null ? age + 1 > unlockAt(accessPartner, T) : age + 1 > accessPartner);
       const f = flows(age);
+      const partnerWorks = partnerEarnsInRetirement(age);
+      const yearFV = fv(1);                                         // $1/yr flowing all year, valued at year end
+
+      // --- the individual lines, as end-of-year nominal amounts ---
+      // The year you retire is part salary and part drawdown. Charging it a full year of BOTH (a full
+      // year's pay AND a full year's retirement budget) would leave a wild figure in the residual — it
+      // showed up as −$268k of "interest" in the year of retirement — so split the transition year at
+      // the retirement instant and weight each side by the fraction of the year it actually occupies.
+      const wFrac = retiredThisYear ? Math.min(1, Math.max(0, T - age)) : (wasWorking ? 1 : 0);
+      const rFrac = 1 - wFrac;
+      const retiredLiving = (partnerWorks ? interimLiving : p.retirementSpendToday) * infl;
+      const retiredLumps = downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age);
+      const takeHomeFV   = f.takeHome * wFrac * yearFV;
+      const otherIncFV   = (incomeAt(age) + partnerTakeHomeAt(age)) * rFrac * yearFV;
+      const livingFV     = (f.living * wFrac + retiredLiving * rFrac) * yearFV;
+      const housingFV    = housingAt(age) * yearFV;                 // charged whether you work or not
+      const kidsFV       = f.kidCost * wFrac * yearFV;              // the retirement budget covers the household
+      const lumpsFV      = (f.lumps * wFrac + retiredLumps * rFrac) * yearFV;
+      const contribFV    = ((f.taxAdvYou + f.taxAdvPartner) * wFrac + partnerTaxAdvAt(age) * rFrac) * yearFV;
+
+      // What the LOCKED bucket paid out: everything it held (plus this year's contributions and growth)
+      // that is no longer there. Zero while it is sealed — which is the whole point.
+      const advWithdrawFV = Math.max(0, startTaxAdv * grow(1) + contribFV - endTaxAdv);
+      const spendFV = livingFV + housingFV + kidsFV + lumpsFV;
+      const cashOutFV = spendFV - advWithdrawFV;                    // the share of the bill cash covered
+
+      // Round to today's dollars FIRST, then derive interest as the residual of the rounded figures.
+      // Balances are deflated at their own instant (start by this year's index, end by next year's) so
+      // each row's end still equals the next row's start — but that means the two ends of a row are in
+      // different index years, and a residual computed in nominal terms would not close in real terms.
+      // Deriving growth from the displayed numbers makes every printed row add up exactly, and the
+      // figure it yields is the REAL (inflation-adjusted) return, which is what a today's-dollars
+      // table should be showing anyway.
+      const startTaxableR = Math.round(stBefore.taxable / infl), endTaxableR = Math.round(r2(st.taxable));
+      const startTaxAdvR  = Math.round(startTaxAdv / infl),      endTaxAdvR  = Math.round(r2(endTaxAdv));
+      const takeHomeR = Math.round(r2(takeHomeFV)),  otherIncR = Math.round(r2(otherIncFV));
+      const cashOutR  = Math.round(r2(cashOutFV));
+      const contribR  = Math.round(r2(contribFV)),   withdrawnR = Math.round(r2(advWithdrawFV));
+
       trace.push({
         age,
         phase: retiredThisYear ? "retires" : wasWorking ? "working" : "retired",
         retireAt: retiredThisYear ? T : null,
-        // balances, in today's dollars, before and after the year
-        startTaxable: Math.round(stBefore.taxable / infl), startTaxAdv: Math.round(startTaxAdv / infl),
-        endTaxable: r2(st.taxable), endTaxAdv: r2(endTaxAdv),
-        startTotal: Math.round(startReal), endTotal: r2(st.taxable + endTaxAdv),
-        // the flows that drove it (a working year earns and contributes; a retired year spends)
-        income: wasWorking ? Math.round(f.takeHome / infl) : Math.round((incomeAt(age) + partnerTakeHomeAt(age)) / infl),
-        spending: wasWorking ? Math.round((f.living + f.housing + f.kidCost + f.lumps) / infl)
-                             : Math.round(retireExpense(age) / infl),
-        contributions: wasWorking ? Math.round((f.taxAdvYou + f.taxAdvPartner) / infl) : 0,
-        // whether the locked bucket could legally be touched at all this year
         locked: !(openYou || openPartner),
+        // balances (today's dollars)
+        startTaxable: startTaxableR, endTaxable: endTaxableR,
+        startTaxAdv: startTaxAdvR,   endTaxAdv: endTaxAdvR,
+        startTotal: Math.round(startReal), endTotal: Math.round(r2(st.taxable + endTaxAdv)),
+        // cash account: money in, the bill it covered, and the real interest that closes the row
+        takeHome: takeHomeR, otherIncome: otherIncR,
+        living: Math.round(r2(livingFV)), housing: Math.round(r2(housingFV)),
+        kids: Math.round(r2(kidsFV)), lumps: Math.round(r2(lumpsFV)),
+        cashOut: cashOutR,
+        cashGrowth: endTaxableR - startTaxableR - takeHomeR - otherIncR + cashOutR,
+        // retirement accounts: contributions in, withdrawals out, real interest closing the row
+        contributions: contribR, withdrawn: withdrawnR,
+        advGrowth: endTaxAdvR - startTaxAdvR - contribR + withdrawnR,
+        // kept for the existing callout/tests
+        income: takeHomeR + otherIncR,
+        spending: Math.round(r2(spendFV)),
       });
     }
   }
@@ -874,16 +926,23 @@ const InfoIcon = ({ children }) => {
       onMouseEnter={fit} onFocus={fit}
       style={{
         display: "inline-flex", alignItems: "center", justifyContent: "center",
-        width: 13, height: 13, borderRadius: "50%", border: `1px solid ${C.mute}`, color: C.mute,
-        fontSize: 9, fontWeight: 700, fontStyle: "italic", lineHeight: 1, cursor: "help",
-        position: "relative", flexShrink: 0, verticalAlign: "middle", fontFamily: "Georgia, serif",
+        width: 14, height: 14, borderRadius: "50%", border: `1px solid ${C.mute}`, color: C.mute,
+        lineHeight: 1, cursor: "help", position: "relative", flexShrink: 0, verticalAlign: "middle",
+        textTransform: "none", letterSpacing: "normal",
       }}>
-      i
+      {/* an inline SVG, not the letter "i": a text glyph inherits text-transform from whatever it sits
+          in, so the icon rendered as a capital "I" inside the uppercase section titles. A drawn mark
+          can't be transformed, restyled by a font stack, or reflowed by letter-spacing. */}
+      <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden focusable="false"
+        style={{ display: "block", overflow: "visible" }}>
+        <circle cx="8" cy="3.6" r="1.35" fill="currentColor" />
+        <rect x="6.8" y="6.4" width="2.4" height="7.2" rx="1.2" fill="currentColor" />
+      </svg>
       <span ref={bubble} className="info-bubble" style={{
         position: "absolute", bottom: "calc(100% + 7px)", left: -6, zIndex: 40,
         width: "max-content", maxWidth: "min(260px, calc(100vw - 24px))", padding: "8px 10px",
-        background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6,
-        boxShadow: "0 8px 22px rgba(0,0,0,.5)",
+        background: C.tip, border: `1px solid ${C.line}`, borderRadius: 6,
+        boxShadow: "0 8px 22px rgba(0,0,0,.55)",
         color: C.ink, fontSize: 11, fontWeight: 400, fontStyle: "normal", lineHeight: 1.55,
         textTransform: "none", letterSpacing: "normal", textAlign: "left",
         fontFamily: "'Space Grotesk', system-ui, sans-serif",
@@ -1041,30 +1100,47 @@ const Footnote = () => {
 // untouched while only the taxable account is drawn down.
 const TraceTable = ({ trace, accessAge, fireCross }) => {
   if (!trace || !trace.length) return null;
-  const money = (v) => (v === 0 ? "0" : fmt(v));
+  const money = (v) => (!v ? <span style={{ color: `${C.mute}66` }}>·</span> : fmt(Math.abs(v)));
   const phaseColor = { working: C.teal, retires: C.brass, retired: C.mute };
-  const cell = { padding: "3px 8px", whiteSpace: "nowrap", textAlign: "right" };
+  const cell = { padding: "3px 7px", whiteSpace: "nowrap", textAlign: "right" };
+  const grp = { ...cell, fontSize: 9, letterSpacing: ".06em", textTransform: "uppercase", textAlign: "center", fontWeight: 400 };
+  const edge = `1px solid ${C.line}`;
   return (
-    <div style={{ overflowX: "auto" }}>
-      <div style={{ maxHeight: 360, overflowY: "auto", border: `1px solid ${C.line}`, borderRadius: 6 }}>
-        <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
+    <div>
+      <div style={{ maxHeight: 420, overflow: "auto", border: `1px solid ${C.line}`, borderRadius: 6 }}>
+        <table style={{ borderCollapse: "collapse", fontFamily: "'JetBrains Mono', monospace", fontSize: 11, minWidth: "100%" }}>
           <thead>
-            <tr style={{ position: "sticky", top: 0, background: C.panel, color: C.mute, zIndex: 1 }}>
+            {/* Grouping the columns by ACCOUNT is what makes the table readable: the two buckets obey
+                different rules (one pays the bills, one is sealed until 59.5), and seeing each one's
+                in / out / interest side by side is precisely what explains the chart's shape. */}
+            <tr style={{ position: "sticky", top: 0, background: C.panel, color: C.mute, zIndex: 2 }}>
+              <th style={grp} colSpan={2} />
+              <th style={{ ...grp, color: C.teal, borderLeft: edge }} colSpan={2}>money in</th>
+              <th style={{ ...grp, color: C.coral, borderLeft: edge }} colSpan={4}>money out</th>
+              <th style={{ ...grp, color: C.liquid, borderLeft: edge }} colSpan={2}>cash account (taxable)</th>
+              <th style={{ ...grp, color: C.locked, borderLeft: edge }} colSpan={3}>retirement accounts</th>
+              <th style={{ ...grp, borderLeft: edge }} />
+            </tr>
+            <tr style={{ position: "sticky", top: 19, background: C.panel, color: C.mute, zIndex: 2, boxShadow: `0 1px 0 ${C.line}` }}>
               <th style={{ ...cell, textAlign: "left" }}>Age</th>
               <th style={{ ...cell, textAlign: "left" }}>Phase</th>
-              <th style={cell}>In</th>
-              <th style={cell}>Out</th>
-              <th style={cell}>→401k</th>
-              <th style={cell}>Taxable</th>
-              <th style={cell}>Retirement</th>
-              <th style={cell}>Total</th>
+              <th style={{ ...cell, borderLeft: edge }}>pay</th>
+              <th style={cell}>other</th>
+              <th style={{ ...cell, borderLeft: edge }}>living</th>
+              <th style={cell}>housing</th>
+              <th style={cell}>kids</th>
+              <th style={cell}>one-off</th>
+              <th style={{ ...cell, borderLeft: edge }}>interest</th>
+              <th style={cell}>balance</th>
+              <th style={{ ...cell, borderLeft: edge }}>in</th>
+              <th style={cell}>out</th>
+              <th style={cell}>interest</th>
+              <th style={{ ...cell, borderLeft: edge }}>total</th>
             </tr>
           </thead>
           <tbody>
             {trace.map((t) => {
               const retiring = t.phase === "retires";
-              const dTaxable = t.endTaxable - t.startTaxable;
-              const dAdv = t.endTaxAdv - t.startTaxAdv;
               return (
                 <tr key={t.age} style={{
                   borderTop: `1px solid ${C.line}55`,
@@ -1075,18 +1151,26 @@ const TraceTable = ({ trace, accessAge, fireCross }) => {
                     {retiring ? `retires ${fireCross != null ? fireCross.toFixed(1) : ""}` : t.phase}
                     {t.locked && t.phase !== "working" ? <span style={{ color: C.locked }}> · locked</span> : null}
                   </td>
-                  <td style={{ ...cell, color: t.income ? C.teal : C.mute }}>{money(t.income)}</td>
-                  <td style={{ ...cell, color: C.ink }}>{money(t.spending)}</td>
-                  <td style={{ ...cell, color: t.contributions ? C.locked : C.mute }}>{money(t.contributions)}</td>
-                  <td style={{ ...cell, color: t.endTaxable < 0 ? C.coral : C.liquid }}>
-                    {money(t.endTaxable)} <span style={{ color: dTaxable < 0 ? C.coral : C.mute, fontSize: 10 }}>
-                      ({dTaxable >= 0 ? "+" : "−"}{money(Math.abs(dTaxable))})</span>
+                  {/* money in */}
+                  <td style={{ ...cell, color: C.teal, borderLeft: edge }}>{money(t.takeHome)}</td>
+                  <td style={{ ...cell, color: C.teal }}>{money(t.otherIncome)}</td>
+                  {/* money out */}
+                  <td style={{ ...cell, color: C.ink, borderLeft: edge }}>{money(t.living)}</td>
+                  <td style={{ ...cell, color: C.ink }}>{money(t.housing)}</td>
+                  <td style={{ ...cell, color: C.ink }}>{money(t.kids)}</td>
+                  <td style={{ ...cell, color: C.ink }}>{money(t.lumps)}</td>
+                  {/* cash account */}
+                  <td style={{ ...cell, color: t.cashGrowth < 0 ? C.coral : C.liquid, borderLeft: edge }}>
+                    {t.cashGrowth < 0 ? "−" : ""}{money(t.cashGrowth)}
                   </td>
-                  <td style={{ ...cell, color: C.locked }}>
-                    {money(t.endTaxAdv)} <span style={{ color: C.mute, fontSize: 10 }}>
-                      ({dAdv >= 0 ? "+" : "−"}{money(Math.abs(dAdv))})</span>
+                  <td style={{ ...cell, color: t.endTaxable < 0 ? C.coral : C.liquid }}>{money(t.endTaxable)}</td>
+                  {/* retirement accounts */}
+                  <td style={{ ...cell, color: C.locked, borderLeft: edge }}>{money(t.contributions)}</td>
+                  <td style={{ ...cell, color: C.locked }}>{money(t.withdrawn)}</td>
+                  <td style={{ ...cell, color: t.advGrowth < 0 ? C.coral : C.locked }}>
+                    {t.advGrowth < 0 ? "−" : ""}{money(t.advGrowth)}
                   </td>
-                  <td style={{ ...cell, color: C.ink }}>{money(t.endTotal)}</td>
+                  <td style={{ ...cell, color: C.ink, borderLeft: edge }}>{money(t.endTotal)}</td>
                 </tr>
               );
             })}
@@ -1094,10 +1178,14 @@ const TraceTable = ({ trace, accessAge, fireCross }) => {
         </table>
       </div>
       <div style={{ fontSize: 10, color: C.mute, marginTop: 6, lineHeight: 1.6 }}>
-        All figures in today's dollars, at the END of each year; the bracketed number is that year's change.
-        “In” is take-home while working, and guaranteed income (pension/Social Security) plus a working
-        partner's pay once retired. “Out” is the whole bill: living, housing, kids and any one-off costs.
-        Retirement accounts are marked <span style={{ color: C.locked }}>locked</span> until {accessAge}.
+        Today's dollars, at the END of each year. Each account balances exactly:{" "}
+        <b style={{ color: C.ink }}>start + in − out + interest = balance</b>, so “interest” is the real
+        (inflation-adjusted) return that closes the row. “Pay” is take-home while working; “other” is
+        guaranteed income and a working partner's pay once retired. Retirement accounts are{" "}
+        <span style={{ color: C.locked }}>locked</span> until {accessAge} — while they are, their “out”
+        is zero and the interest simply compounds, which is why the total keeps climbing after you stop
+        working. A <span style={{ color: `${C.mute}` }}>·</span> is zero. Note that in take-home mode
+        your contributions are already excluded from “pay”, so they are not deducted again here.
       </div>
     </div>
   );
@@ -1260,6 +1348,7 @@ const SERIES = [
   { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
   { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
   { key: "expense", label: "major expense", color: C.coral, mark: "●", on: true },
+  { key: "windfall", label: "major income", color: C.liquid, mark: "●", on: true },
 ];
 
 // exported so tests read the real defaults rather than a hand-copy that silently goes stale whenever
@@ -1436,7 +1525,8 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
     underwater: underwaterSpans.length > 0,
     home: homeRows.length > 0,
     kids: kidRows.length > 0,
-    expense: (expenseMarks && expenseMarks.length > 0),
+    expense: !!(expenseMarks && expenseMarks.some((m) => m.amount >= 0)),
+    windfall: !!(expenseMarks && expenseMarks.some((m) => m.amount < 0)),
   };
   return (
     <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: "18px 14px 8px" }}>
@@ -1487,9 +1577,13 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
           {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
           {show.home ? homeRows.map((h) => <ReferenceDot key={h.age} x={h.age} y={h.portfolio} r={5} fill={C.brass} stroke={C.bg} />) : null}
           {show.kids ? kidRows.map((k) => <ReferenceDot key={k.age} x={k.age} y={k.portfolio} r={4} fill={C.ink} stroke={C.bg} />) : null}
-          {show.expense && expenseMarks ? expenseMarks.map((m, i) => {
+          {/* a one-off is a cost or income depending on its sign; they get their own colour AND their
+              own legend chip, so a teal dot on the chart has something to point back to */}
+          {expenseMarks ? expenseMarks.map((m, i) => {
+            const income = m.amount < 0;
+            if (!(income ? show.windfall : show.expense)) return null;
             const row = rows.find((r) => r.age === m.age);
-            return row ? <ReferenceDot key={`x${i}`} x={m.age} y={row.portfolio} r={5} fill={m.amount < 0 ? C.liquid : C.coral} stroke={C.bg} strokeWidth={1.5} /> : null;
+            return row ? <ReferenceDot key={`x${i}`} x={m.age} y={row.portfolio} r={5} fill={income ? C.liquid : C.coral} stroke={C.bg} strokeWidth={1.5} /> : null;
           }) : null}
           {show.coast && applies.coast && coastCross ? <ReferenceDot x={coastCross} y={coastCrossValue} r={5} fill={C.coast} stroke={C.bg} strokeWidth={2} /> : null}
           {show.retire && fireCross ? <ReferenceDot x={fireCross} y={fireCrossValue} r={7} fill={C.brass} stroke={C.ink} strokeWidth={2} /> : null}
@@ -2146,22 +2240,42 @@ function Calculator({ shared, isMobile }) {
               <AddButton onClick={addKid} label="add kid" />
             </div>
             {kidsCount === 0 && <div style={{ fontSize: 11, color: C.mute }}>No kids — no daycare, no college.</div>}
+            {/* `birthAge` is ALWAYS the stored value and `entry` only chooses how it is displayed, so
+                switching back and forth is lossless. The previous version rewrote the data on every
+                switch and clamped it at zero, which is why a kid entered as birth-age 30 came back as
+                27 after two toggles: 30 → max(0, 27−30)=0 → 27−0=27. Deriving instead of rewriting
+                removes that class of bug entirely. */}
             {p.kids.map((k, i) => {
-              const ageNowMode = k.ageNow != null && k.ageNow !== "";
-              const toAgeNow = () => setKid(i, { ageNow: Math.max(0, p.currentAge - (+k.birthAge || p.currentAge)), birthAge: undefined });
-              const toBirthAge = () => setKid(i, { birthAge: p.currentAge - (+k.ageNow || 0), ageNow: undefined });
+              // legacy share links may still carry `ageNow`; fold it into the canonical field for display
+              const birthAge = (k.ageNow != null && k.ageNow !== "") ? p.currentAge - (+k.ageNow) : (+k.birthAge);
+              const showNow = k.entry === "now";
+              const yearsAway = birthAge - p.currentAge;
               return (
-                <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                     <div style={{ flex: 1 }}>
-                      {ageNowMode
-                        ? <Num label={`Kid ${i + 1} — age now`} value={k.ageNow} step={1} onChange={(v) => setKid(i, { ageNow: v })} />
-                        : <Num label={`Kid ${i + 1} — your age at birth`} value={k.birthAge} yearRef={p.currentAge} onChange={(v) => setKid(i, { birthAge: v })} />}
+                      {showNow
+                        ? <Num label={`Kid ${i + 1} — age now`} value={p.currentAge - birthAge} step={1} min={-120}
+                            onChange={(v) => setKid(i, { birthAge: p.currentAge - v, ageNow: undefined })} />
+                        : <Num label={`Kid ${i + 1} — your age at birth`} value={birthAge} yearRef={p.currentAge}
+                            onChange={(v) => setKid(i, { birthAge: v, ageNow: undefined })} />}
                     </div>
                     <DropButton onClick={() => dropKid(i)} />
                   </div>
-                  <UnitPill label={ageNowMode ? "entering age now" : "entering birth age"}
-                    onClick={() => (ageNowMode ? toBirthAge() : toAgeNow())} />
+                  <select
+                    value={showNow ? "now" : "birth"} aria-label={`how to enter kid ${i + 1}'s age`}
+                    onChange={(ev) => setKid(i, { entry: ev.target.value, birthAge, ageNow: undefined })}
+                    style={{
+                      background: C.bg, border: `1px solid ${C.line}`, color: C.teal, borderRadius: 5,
+                      padding: "3px 5px", cursor: "pointer", fontSize: 10, alignSelf: "flex-start",
+                      fontFamily: "'Space Grotesk', sans-serif",
+                    }}>
+                    <option value="birth" style={{ background: C.panel, color: C.ink }}>entering birth age</option>
+                    <option value="now" style={{ background: C.panel, color: C.ink }}>entering age now</option>
+                  </select>
+                  {showNow && yearsAway > 0 && (
+                    <span style={{ fontSize: 10, color: C.mute }}>Not born yet — arrives in {yearsAway} year{yearsAway !== 1 ? "s" : ""}.</span>
+                  )}
                 </div>
               );
             })}
@@ -2179,9 +2293,9 @@ function Calculator({ shared, isMobile }) {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
                 Major expenses / income{" "}
-                <InfoIcon>Weddings, medical, a car, an inheritance. A <b>+</b> amount is a cost;
-                  a <b>−</b> amount is money in (inheritance, gift, home sale). Set an “until” age to
-                  repeat it every year across a window.</InfoIcon>
+                <InfoIcon>One-off events: a wedding, medical costs, a car, an inheritance. Pick whether
+                  each is money <em>out</em> or money <em>in</em> and enter the amount as a positive
+                  figure. Set an “until” age to repeat it every year across a window.</InfoIcon>
                 {p.expenses.length > 0 && <span style={{ color: C.mute }}> · {p.expenses.length}</span>}
               </div>
               <AddButton onClick={addExpense} label="add event" />
@@ -2194,9 +2308,28 @@ function Calculator({ shared, isMobile }) {
                   </div>
                   <DropButton onClick={() => dropExpense(i)} />
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                {/* Kind first, magnitude second. The stored value stays SIGNED (+cost / −income) so the
+                    model and every share link are untouched; the UI just splits that one number into a
+                    direction you pick and a magnitude you type, which removes the "why is my inheritance
+                    negative?" trap without touching the math. */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                    <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>this is an</span>
+                    <select
+                      value={e.amount < 0 ? "income" : "expense"}
+                      onChange={(ev) => setExpense(i, "amount", Math.abs(+e.amount || 0) * (ev.target.value === "income" ? -1 : 1))}
+                      style={{
+                        background: C.bg, border: `1px solid ${C.line}`, color: e.amount < 0 ? C.liquid : C.coral,
+                        borderRadius: 5, padding: "6px 6px", cursor: "pointer", fontSize: 13,
+                        fontFamily: "'Space Grotesk', sans-serif", width: "100%", boxSizing: "border-box",
+                      }}>
+                      <option value="expense" style={{ background: C.panel, color: C.ink }}>expense (money out)</option>
+                      <option value="income" style={{ background: C.panel, color: C.ink }}>income (money in)</option>
+                    </select>
+                  </label>
+                  <Num label="amount (today's $)" value={Math.abs(+e.amount || 0)} step={1000} min={0}
+                    onChange={(v) => setExpense(i, "amount", Math.abs(v) * ((+e.amount || 0) < 0 ? -1 : 1))} />
                   <Num label="at your age" value={e.age} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "age", v)} />
-                  <Num label="amount (today's $)" value={e.amount} step={1000} min={-1e12} onChange={(v) => setExpense(i, "amount", v)} />
                   <Num label="until age (blank=one-off)" value={e.until ?? ""} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "until", v || null)} />
                 </div>
                 {(() => {
@@ -2391,9 +2524,6 @@ function Calculator({ shared, isMobile }) {
               label={sim.homes.length > 1 ? "Last mortgage clear at" : "Mortgage clear at"}
               value={sim.lastPayoff ? `age ${sim.lastPayoff}` : "—"}
             />
-            {sim.incomePV > 0 && (
-              <Stat label="Guaranteed income · worth" value={fmtM(sim.incomePV)} accent={C.teal} />
-            )}
           </div>
 
           {neverRetire && (
