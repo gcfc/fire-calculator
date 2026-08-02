@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Interactive FIRE trajectory model — portfolio vs. the capital needed to last to 100.",
+  "description": "Interactive FIRE trajectory model \u2014 portfolio vs. the capital needed to last to 100.",
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/build-legal.mjs",
@@ -19,7 +19,6 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "playwright-core": "^1.62.1",
     "vite": "^7.1.5",
     "vite-plugin-singlefile": "^2.0.3",
     "vitest": "^4.1.10"
