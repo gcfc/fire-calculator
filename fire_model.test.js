@@ -1021,14 +1021,32 @@ describe("entry conveniences — enter what you actually know", () => {
 
   // ---- income: gross salary netted to take-home ---------------------------
   it("gross income at an effective rate equals the same figure entered as take-home", () => {
+    // Gross mode treats the entered figure as full pre-tax pay INCLUDING the pre-tax contribution, so
+    // the equivalent gross is (take-home / (1 - rate)) + contribution — the contribution is deducted
+    // before tax rather than taxed.
+    const rate = 0.25;
     const net = simulate({ ...DEFAULTS });
     const gross = simulate({
-      ...DEFAULTS, incomeMode: "gross", effTaxRate: 25,
-      annualTakeHome: DEFAULTS.annualTakeHome / 0.75, partnerIncome: DEFAULTS.partnerIncome / 0.75,
+      ...DEFAULTS, incomeMode: "gross", effTaxRate: rate * 100,
+      annualTakeHome: DEFAULTS.annualTakeHome / (1 - rate) + DEFAULTS.annualTaxAdv,
+      partnerIncome: DEFAULTS.partnerIncome / (1 - rate) + DEFAULTS.partnerTaxAdv,
     });
     expect(gross.rows).toEqual(net.rows);
     expect(gross.fireCross).toBe(net.fireCross);
     expect(gross.end).toBeCloseTo(net.end, 6);
+  });
+
+  it("gross mode does not tax the pre-tax contribution", () => {
+    // raising the 401k contribution moves money from taxable pay into the locked bucket; because it
+    // comes out before tax, total household wealth added that year should RISE by the tax saved on it,
+    // not stay flat as it would if the contribution were taxed first
+    const base = { ...DEFAULTS, incomeMode: "gross", effTaxRate: 25, annualTakeHome: 200000 };
+    const low = simulate({ ...base, annualTaxAdv: 10000 });
+    const high = simulate({ ...base, annualTaxAdv: 30000 });
+    const saved = (r) => r.rows[0].save;
+    expect(saved(high)).toBeGreaterThan(saved(low));            // the tax break is real…
+    // …and worth exactly the rate on the extra contribution (20k × 25%)
+    expect(saved(high) - saved(low)).toBeCloseTo(20000 * 0.25, 0);
   });
 
   it("incomeMode defaults to net, so effTaxRate is inert unless gross is chosen", () => {

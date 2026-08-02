@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
   ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ReferenceDot, ReferenceArea, ResponsiveContainer,
@@ -67,8 +67,15 @@ export function simulate(p) {
   // effective rate. This is purely an entry convenience — it touches only spendable income, exactly as
   // typing a smaller take-home would — not a tax model (401k/HSA contributions stay pre-tax, untouched).
   const netRate = p.incomeMode === "gross" ? Math.max(0, Math.min(100, +p.effTaxRate || 0)) / 100 : 0;
-  const takeHomeNet = p.annualTakeHome * (1 - netRate);
-  const partnerIncomeNet = p.partnerIncome * (1 - netRate);
+  // In gross mode the figure entered is the full PRE-TAX salary, which already includes the pre-tax
+  // 401k/HSA contribution. So the contribution comes out first — it is pre-tax by definition, and taxing
+  // it would be wrong — and the flat effective rate then applies to what is actually left to be taxed:
+  //   take-home = (gross − contributions) × (1 − rate)
+  // In net mode the entered figure is already take-home after contributions, so nothing is deducted.
+  const netOf = (gross, contrib) =>
+    p.incomeMode === "gross" ? Math.max(0, gross - contrib) * (1 - netRate) : gross;
+  const takeHomeNet = netOf(p.annualTakeHome, p.annualTaxAdv);
+  const partnerIncomeNet = netOf(p.partnerIncome, p.partnerTaxAdv);
 
   // ---- continuous-time conventions ------------------------------------------
   // Defined up front because EVERY sub-model has to use them. The 529 sinking fund once used
@@ -842,6 +849,54 @@ const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef }
   );
 };
 
+// An "i" that reveals its explanation on hover (and on keyboard focus, so it isn't mouse-only).
+// Explanatory prose used to sit permanently under the control it described, which made the input column
+// long and buried the fields themselves. CSS-only so there is no state to manage and nothing to
+// mispositition on re-render; the bubble is anchored to the icon and clamped to a readable width.
+const InfoIcon = ({ children }) => {
+  const bubble = useRef(null);
+  // A 260px bubble anchored to an icon sitting two-thirds across a 390px phone runs off the screen, and
+  // which icons do that depends on where the text wraps — so it can't be solved by hand-picking an anchor
+  // per icon. Measure on open and nudge horizontally by whatever it takes to sit inside the viewport.
+  const fit = () => {
+    const el = bubble.current;
+    if (!el) return;
+    el.style.transform = "none";                       // reset before measuring
+    const r = el.getBoundingClientRect();
+    const pad = 8;
+    let dx = 0;
+    if (r.right > window.innerWidth - pad) dx = window.innerWidth - pad - r.right;
+    if (r.left + dx < pad) dx = pad - (r.left + dx);
+    if (dx) el.style.transform = `translateX(${dx}px)`;
+  };
+  return (
+    <span className="info" tabIndex={0} role="note" aria-label="more information"
+      onMouseEnter={fit} onFocus={fit}
+      style={{
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        width: 13, height: 13, borderRadius: "50%", border: `1px solid ${C.mute}`, color: C.mute,
+        fontSize: 9, fontWeight: 700, fontStyle: "italic", lineHeight: 1, cursor: "help",
+        position: "relative", flexShrink: 0, verticalAlign: "middle", fontFamily: "Georgia, serif",
+      }}>
+      i
+      <span ref={bubble} className="info-bubble" style={{
+        position: "absolute", bottom: "calc(100% + 7px)", left: -6, zIndex: 40,
+        width: "max-content", maxWidth: "min(260px, calc(100vw - 24px))", padding: "8px 10px",
+        background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6,
+        boxShadow: "0 8px 22px rgba(0,0,0,.5)",
+        color: C.ink, fontSize: 11, fontWeight: 400, fontStyle: "normal", lineHeight: 1.55,
+        textTransform: "none", letterSpacing: "normal", textAlign: "left",
+        fontFamily: "'Space Grotesk', system-ui, sans-serif",
+        // `display:none` rather than visibility/opacity: an absolutely-positioned element still
+        // expands the document's scrollWidth while hidden, which was pushing the page to 619px on a
+        // 390px phone and creating a horizontal scrollbar. Taking it out of layout fixes that; the
+        // hover rule flips it back to `block` before onMouseEnter measures it.
+        display: "none",
+      }}>{children}</span>
+    </span>
+  );
+};
+
 // a compact free-text input for card labels (wedding, medical, student loan, …); display only
 const TextField = ({ label, value, onChange, placeholder }) => (
   <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
@@ -1118,26 +1173,32 @@ function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr
   const commit = (v) => onChange(mode === "mo" ? toAnnual(v, "mo") : usablePct ? Math.round(dollarsFromPct(v, base)) : v);
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-        <span>{label}</span>
+      <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
+      {/* input and unit picker share a row when there's room; `flexWrap` drops the picker onto its own
+          line on a narrow phone rather than crushing the number box. The input flexes but is allowed to
+          shrink (minWidth 0 beats the browser's default min-content floor for <input>), so the select
+          keeps its natural width and the number field gives up the space instead. */}
+      <span style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+        <span style={{ flex: "1 1 90px", minWidth: 0 }}>
+          <NumberInput
+            value={Number.isFinite(shown) ? Math.round(shown * 100) / 100 : 0}
+            step={mode === "mo" ? Math.max(1, Math.round(step / 12)) : usablePct ? 1 : step}
+            min={min}
+            onCommit={commit}
+          />
+        </span>
         {modes.length > 1 && (
           <select
             value={mode} onChange={(e) => setMode(e.target.value)} aria-label={`units for ${label}`}
             style={{
-              background: C.bg, border: `1px solid ${C.line}`, color: C.teal, borderRadius: 5,
-              padding: "1px 4px", cursor: "pointer", fontSize: 10, textTransform: "none",
-              fontFamily: "'Space Grotesk', sans-serif", flexShrink: 0,
+              background: C.bg, border: `1px solid ${C.line}`, color: C.teal, borderRadius: 6,
+              padding: "7px 4px", cursor: "pointer", fontSize: 11, textTransform: "none",
+              fontFamily: "'Space Grotesk', sans-serif", flexShrink: 0, maxWidth: "48%",
             }}>
             {modes.map((m) => <option key={m} value={m} style={{ background: C.panel, color: C.ink }}>{MONEY_LABEL[m]}</option>)}
           </select>
         )}
       </span>
-      <NumberInput
-        value={Number.isFinite(shown) ? Math.round(shown * 100) / 100 : 0}
-        step={mode === "mo" ? Math.max(1, Math.round(step / 12)) : usablePct ? 1 : step}
-        min={min}
-        onCommit={commit}
-      />
       {usablePct && (
         <span style={{ fontSize: 10, color: C.mute }}>≈ {fmt(Math.round(value))}/yr of {fmt(Math.round(base))} income</span>
       )}
@@ -1561,7 +1622,12 @@ function SharedPlot({ snap, isMobile }) {
 
   return (
     <div style={{ background: C.bg, color: C.ink, fontFamily: "'Space Grotesk', system-ui, sans-serif", padding: isMobile ? 12 : 24, borderRadius: 12 }}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');`}</style>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        /* InfoIcon: reveal on hover AND on keyboard focus, so the explanation is reachable without a mouse */
+        .info:hover > .info-bubble, .info:focus > .info-bubble, .info:focus-visible > .info-bubble {
+          display: block !important;
+        }
+        .info:focus-visible { outline: 2px solid ${C.teal}; outline-offset: 2px; }`}</style>
       <div style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 16, marginBottom: 20 }}>
         <div style={{ fontSize: 11, letterSpacing: ".2em", color: C.brass, textTransform: "uppercase", marginBottom: 6 }}>
           Shared projection · read-only
@@ -1792,7 +1858,12 @@ function Calculator({ shared, isMobile }) {
 
   return (
     <div style={{ background: C.bg, color: C.ink, fontFamily: "'Space Grotesk', system-ui, sans-serif", padding: isMobile ? 12 : 24, borderRadius: 12 }}>
-      <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');`}</style>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        /* InfoIcon: reveal on hover AND on keyboard focus, so the explanation is reachable without a mouse */
+        .info:hover > .info-bubble, .info:focus > .info-bubble, .info:focus-visible > .info-bubble {
+          display: block !important;
+        }
+        .info:focus-visible { outline: 2px solid ${C.teal}; outline-offset: 2px; }`}</style>
 
       <div style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 16, marginBottom: 20 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
@@ -1855,6 +1926,28 @@ function Calculator({ shared, isMobile }) {
                     {p.partnerEnabled !== false ? "included" : "no partner"}
                   </label>
                 )}
+                {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && (
+                  <InfoIcon>
+                    <b style={{ color: C.ink }}>Every field here is in your partner's own age.</b>{" "}
+                    {sim.partnerOffset === 0
+                      ? "They're the same age as you, so your timelines agree."
+                      : `They're ${Math.abs(sim.partnerOffset)} year${Math.abs(sim.partnerOffset) !== 1 ? "s" : ""} ${sim.partnerOffset > 0 ? "younger" : "older"} than you, so their financial timeline runs ${Math.abs(sim.partnerOffset)} year${Math.abs(sim.partnerOffset) !== 1 ? "s" : ""} ${sim.partnerOffset > 0 ? "behind" : "ahead"} of yours.`}
+                    <br />
+                    Their 401k opens at their {p.accessAge} — when you are{" "}
+                    <span style={{ color: C.brass }}>{sim.accessPartner.toFixed(1)}</span>.
+                    {sim.partnerStopsAtAge != null ? (
+                      <> You retire first; they keep earning until they're <b>{p.partnerEnd}</b> — your age{" "}
+                        <span style={{ color: C.brass }}>{sim.partnerStopsAtAge.toFixed(1)}</span>.</>
+                    ) : sim.partnerAgeAtFire != null ? (
+                      <> You retire together when they are{" "}
+                        <span style={{ color: C.brass }}>{sim.partnerAgeAtFire.toFixed(1)}</span>.</>
+                    ) : null}
+                    {sim.partnerOffset > 0 && (
+                      <> The money must last until they reach {p.endAge} — your age{" "}
+                        <span style={{ color: C.brass }}>{sim.END}</span>.</>
+                    )}
+                  </InfoIcon>
+                )}
                 {group === "Retirement" && (
                   <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, color: C.mute, letterSpacing: ".03em" }}>
                     <input type="checkbox" checked={p.useCoast !== false}
@@ -1866,28 +1959,33 @@ function Calculator({ shared, isMobile }) {
               </div>
               {!(group === "Partner" && p.partnerEnabled === false) && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {fields.map(([l, k, o]) => (o.money
-                  ? <MoneyField key={k} label={l} value={p[k]} onChange={(v) => set(k, v)} step={o.step} modes={o.modes} base={o.base} />
-                  : field(l, k, p[k], set, o)))}
+                {fields.map(([l, k, o]) => (
+                  <React.Fragment key={k}>
+                    {o.money
+                      ? <MoneyField label={l} value={p[k]} onChange={(v) => set(k, v)} step={o.step} modes={o.modes} base={o.base} />
+                      : field(l, k, p[k], set, o)}
+                    {/* the gross/net switch belongs beside the salary it reinterprets, not in a
+                        separate block further down the column */}
+                    {k === "annualTakeHome" && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: -4 }}>
+                        <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 11, color: C.ink }}>
+                          <input type="checkbox" checked={gross}
+                            onChange={(e) => set("incomeMode", e.target.checked ? "gross" : "net")}
+                            style={{ accentColor: C.teal, cursor: "pointer", width: 15, height: 15, flexShrink: 0 }} />
+                          I entered gross salary
+                          <InfoIcon>Treats the figure above as your full pre-tax salary — including your
+                            pre-tax 401k/HSA contribution. The contribution comes out first, then the flat
+                            effective rate is applied to the rest, and both are applied to your partner's
+                            salary too. A convenience, not a tax model.</InfoIcon>
+                        </label>
+                        {gross && field("Effective tax rate %", "effTaxRate", p.effTaxRate, set, { step: 1, max: 100 })}
+                      </div>
+                    )}
+                  </React.Fragment>
+                ))}
               </div>
               )}
 
-              {group === "You" && (
-                <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-                  <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
-                    <input type="checkbox" checked={gross}
-                      onChange={(e) => set("incomeMode", e.target.checked ? "gross" : "net")}
-                      style={{ accentColor: C.teal, cursor: "pointer", width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
-                    <span style={{ fontSize: 11, color: C.ink, lineHeight: 1.4 }}>
-                      I entered gross salary, not take-home
-                      <span style={{ display: "block", fontSize: 10, color: C.mute, marginTop: 2 }}>
-                        Nets your and your partner's salary down by a flat effective rate — a convenience, not a tax model.
-                      </span>
-                    </span>
-                  </label>
-                  {gross && field("Effective tax rate %", "effTaxRate", p.effTaxRate, set, { step: 1, max: 100 })}
-                </div>
-              )}
 
               {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && (
                 <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1895,11 +1993,10 @@ function Calculator({ shared, isMobile }) {
                     <input type="checkbox" checked={!!p.partnerWorksAfterRetire}
                       onChange={(e) => set("partnerWorksAfterRetire", e.target.checked)}
                       style={{ accentColor: C.teal, cursor: "pointer", width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
-                    <span style={{ fontSize: 11, color: C.ink, lineHeight: 1.4 }}>
+                    <span style={{ fontSize: 11, color: C.ink, lineHeight: 1.4, display: "inline-flex", alignItems: "center", gap: 6 }}>
                       Partner keeps working after you retire
-                      <span style={{ display: "block", fontSize: 10, color: C.mute, marginTop: 2 }}>
-                        Their income (to their age {p.partnerEnd}) funds the household, so you can retire sooner if the math allows.
-                      </span>
+                      <InfoIcon>Their income (to their age {p.partnerEnd}) funds the household, so you can
+                        retire sooner if the math allows.</InfoIcon>
                     </span>
                   </label>
                   {p.partnerWorksAfterRetire &&
@@ -1939,28 +2036,6 @@ function Calculator({ shared, isMobile }) {
                 </Warn>
               )}
 
-              {group.startsWith("Partner") && p.partnerEnabled !== false && p.partnerAge > 0 && (
-                <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
-                  <b style={{ color: C.ink }}>Every field above is in your partner's own age.</b>{" "}
-                  {sim.partnerOffset === 0
-                    ? "They're the same age as you, so your timelines agree."
-                    : `They're ${Math.abs(sim.partnerOffset)} year${Math.abs(sim.partnerOffset) !== 1 ? "s" : ""} ${sim.partnerOffset > 0 ? "younger" : "older"} than you, so their financial timeline runs ${Math.abs(sim.partnerOffset)} year${Math.abs(sim.partnerOffset) !== 1 ? "s" : ""} ${sim.partnerOffset > 0 ? "behind" : "ahead"} of yours.`}
-                  <br />
-                  Their 401k opens at their {p.accessAge} — when you are{" "}
-                  <span style={{ color: C.brass }}>{sim.accessPartner.toFixed(1)}</span>.
-                  {sim.partnerStopsAtAge != null ? (
-                    <> You retire first; they keep earning until they're <b>{p.partnerEnd}</b> — your age{" "}
-                      <span style={{ color: C.brass }}>{sim.partnerStopsAtAge.toFixed(1)}</span>.</>
-                  ) : sim.partnerAgeAtFire != null ? (
-                    <> You retire together when they are{" "}
-                      <span style={{ color: C.brass }}>{sim.partnerAgeAtFire.toFixed(1)}</span>.</>
-                  ) : null}
-                  {sim.partnerOffset > 0 && (
-                    <> The money must last until they reach {p.endAge} — your age{" "}
-                      <span style={{ color: C.brass }}>{sim.END}</span>.</>
-                  )}
-                </div>
-              )}
             </div>
           ))}
 
@@ -2103,15 +2178,14 @@ function Calculator({ shared, isMobile }) {
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
-                Major expenses / income {p.expenses.length > 0 && <span style={{ color: C.mute }}>· {p.expenses.length}</span>}
+                Major expenses / income{" "}
+                <InfoIcon>Weddings, medical, a car, an inheritance. A <b>+</b> amount is a cost;
+                  a <b>−</b> amount is money in (inheritance, gift, home sale). Set an “until” age to
+                  repeat it every year across a window.</InfoIcon>
+                {p.expenses.length > 0 && <span style={{ color: C.mute }}> · {p.expenses.length}</span>}
               </div>
               <AddButton onClick={addExpense} label="add event" />
             </div>
-            {p.expenses.length === 0 && (
-              <div style={{ fontSize: 11, color: C.mute }}>
-                Weddings, medical, a car, a windfall. <b>+</b> is a cost, <b>−</b> is money in (inheritance, gift, home sale).
-              </div>
-            )}
             {p.expenses.map((e, i) => (
               <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, background: C.bg, display: "flex", flexDirection: "column", gap: 8 }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
@@ -2152,17 +2226,15 @@ function Calculator({ shared, isMobile }) {
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
-                Retirement income {p.incomes?.length > 0 && <span style={{ color: C.mute }}>· {p.incomes.length}</span>}
+                Retirement income{" "}
+                <InfoIcon>Pension, Social Security, an annuity — guaranteed income you'll draw <em>in</em>
+                  retirement. It lowers the number you need and, being spendable cash, shrinks the 59.5
+                  bridge. A pot (a lump-sum payout, a rollover) is not this — add that to your portfolio
+                  instead.</InfoIcon>
+                {p.incomes?.length > 0 && <span style={{ color: C.mute }}> · {p.incomes.length}</span>}
               </div>
               <AddButton onClick={addIncome} label="add income" />
             </div>
-            {(p.incomes?.length ?? 0) === 0 && (
-              <div style={{ fontSize: 11, color: C.mute }}>
-                Pension, Social Security, an annuity — guaranteed income you'll draw <em>in</em> retirement. It lowers the
-                number you need and, being spendable cash, shrinks the 59.5 bridge. A pot (a lump-sum payout, a rollover)
-                is not this — add that to your portfolio instead.
-              </div>
-            )}
             {(p.incomes || []).map((inc, i) => {
               const onPartner = inc.whose === "partner";
               const refAge = onPartner ? p.partnerAge : p.currentAge;
@@ -2212,15 +2284,13 @@ function Calculator({ shared, isMobile }) {
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
-                Debts {p.debts.length > 0 && <span style={{ color: C.mute }}>· {p.debts.length}</span>}
+                Debts{" "}
+                <InfoIcon>Student, car and personal loans. Enter the balance you owe today, the rate, and
+                  what you actually pay each month — the payoff age is derived from those.</InfoIcon>
+                {p.debts.length > 0 && <span style={{ color: C.mute }}> · {p.debts.length}</span>}
               </div>
               <AddButton onClick={addDebt} label="add debt" />
             </div>
-            {p.debts.length === 0 && (
-              <div style={{ fontSize: 11, color: C.mute }}>
-                Student, car, personal loans. Enter the balance, rate, and what you pay each month — the payoff age is derived.
-              </div>
-            )}
             {p.debts.map((d, i) => {
               const payoff = sim.debtPayoffs[i];
               return (
@@ -2317,15 +2387,9 @@ function Calculator({ shared, isMobile }) {
                 sub={sim.coastCross ? `${(sim.coastCross - p.currentAge).toFixed(1)} years from now` : null} />
             )}
             <Stat label="Liquid (taxable) at that point" value={sim.fireTaxable != null ? fmtM(sim.fireTaxable) : "—"} accent={C.liquid} />
-            <Stat label="Locked until 59.5" value={sim.lockedShare ? (sim.lockedShare * 100).toFixed(0) + "%" : "—"} accent={sim.lockedShare > 0.6 ? C.coral : C.ink} />
             <Stat
               label={sim.homes.length > 1 ? "Last mortgage clear at" : "Mortgage clear at"}
               value={sim.lastPayoff ? `age ${sim.lastPayoff}` : "—"}
-            />
-            <Stat
-              label={`Tightest saving year · age ${sim.minSaveAge ?? "—"}`}
-              value={sim.minSave === Infinity ? "—" : fmt(sim.minSave)}
-              accent={sim.minSave < 0 ? C.coral : C.ink}
             />
             {sim.incomePV > 0 && (
               <Stat label="Guaranteed income · worth" value={fmtM(sim.incomePV)} accent={C.teal} />
