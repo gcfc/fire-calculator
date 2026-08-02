@@ -1156,8 +1156,8 @@ const Warn = ({ children }) => (
 );
 
 export const DEFAULTS = {
-  currentAge: 27, startPortfolio: 400000, startPortfolioTaxAdv: 200000,
-  annualTakeHome: 144000, annualTaxAdv: 40000,
+  currentAge: 27, startPortfolio: 600000, startPortfolioTaxAdv: 200000,
+  annualTakeHome: 144000, annualTaxAdv: 36000,
   nonHousingLiving: 36000, rentAnnual: 36000, inflation: 0.03, nominalReturn: 0.07,
   // add or drop as many as you like; each home carries its own loan and each kid its own clock
   homes: [{
@@ -1411,7 +1411,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
           />
           {show.access && enforceAccess ? (
             <ReferenceLine x={wallAt} stroke={C.mute} strokeDasharray="2 4"
-              label={{ value: wallShifted ? `unlock ${wallAt.toFixed(0)}` : `${accessYou}`, fill: C.mute, fontSize: 10, position: "top" }} />
+              label={{ value: wallShifted ? `${wallAt.toFixed(0)}` : `${accessYou}`, fill: C.mute, fontSize: 10, position: "top" }} />
           ) : null}
           {show.partnerStops && showPartnerStops ? (
             <ReferenceLine x={partnerStopsAtAge} stroke={C.brass} strokeDasharray="4 3"
@@ -1841,7 +1841,7 @@ function Calculator({ shared, isMobile }) {
               ["Retirement spending, excluding housing", "retirementSpendToday", { step: 5000, money: true }],
               ["Life Expectancy", "endAge", { yearRef: p.currentAge }],
               // the coast target only exists when coast FIRE is switched on below
-              ...(p.useCoast !== false ? [["Coast FIRE: retire at age", "coastAge", { yearRef: p.currentAge }]] : []),
+              ...(p.useCoast !== false ? [["Coast FIRE: fully retire at age", "coastAge", { yearRef: p.currentAge }]] : []),
             ]],
           ].map(([group, fields]) => (
             <div key={group} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14 }}>
@@ -1860,7 +1860,7 @@ function Calculator({ shared, isMobile }) {
                     <input type="checkbox" checked={p.useCoast !== false}
                       onChange={(e) => set("useCoast", e.target.checked)}
                       style={{ accentColor: C.coast, cursor: "pointer", width: 15, height: 15 }} />
-                    coast FIRE
+                    Calculate coast FIRE
                   </label>
                 )}
               </div>
@@ -1898,7 +1898,7 @@ function Calculator({ shared, isMobile }) {
                     <span style={{ fontSize: 11, color: C.ink, lineHeight: 1.4 }}>
                       Partner keeps working after you retire
                       <span style={{ display: "block", fontSize: 10, color: C.mute, marginTop: 2 }}>
-                        Their income (to their age {p.partnerEnd}) funds the household, so you can retire sooner.
+                        Their income (to their age {p.partnerEnd}) funds the household, so you can retire sooner if the math allows.
                       </span>
                     </span>
                   </label>
@@ -1943,8 +1943,8 @@ function Calculator({ shared, isMobile }) {
                 <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
                   <b style={{ color: C.ink }}>Every field above is in your partner's own age.</b>{" "}
                   {sim.partnerOffset === 0
-                    ? "They're the same age as you, so the two clocks agree."
-                    : `They're ${Math.abs(sim.partnerOffset)}y ${sim.partnerOffset > 0 ? "younger" : "older"} than you, so their clock runs ${Math.abs(sim.partnerOffset)}y ${sim.partnerOffset > 0 ? "behind" : "ahead"} of yours.`}
+                    ? "They're the same age as you, so your timelines agree."
+                    : `They're ${Math.abs(sim.partnerOffset)} year${Math.abs(sim.partnerOffset) !== 1 ? "s" : ""} ${sim.partnerOffset > 0 ? "younger" : "older"} than you, so their financial timeline runs ${Math.abs(sim.partnerOffset)} year${Math.abs(sim.partnerOffset) !== 1 ? "s" : ""} ${sim.partnerOffset > 0 ? "behind" : "ahead"} of yours.`}
                   <br />
                   Their 401k opens at their {p.accessAge} — when you are{" "}
                   <span style={{ color: C.brass }}>{sim.accessPartner.toFixed(1)}</span>.
@@ -2099,13 +2099,13 @@ function Calculator({ shared, isMobile }) {
             )}
           </div>
 
-          {/* MAJOR EXPENSES — one-off lumps in today's $; +cost / −windfall; optional window */}
+          {/* MAJOR EXPENSES / INCOME — one-off lumps in today's $; +cost / -income; optional window */}
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
               <div style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>
-                Major expenses {p.expenses.length > 0 && <span style={{ color: C.mute }}>· {p.expenses.length}</span>}
+                Major expenses / income {p.expenses.length > 0 && <span style={{ color: C.mute }}>· {p.expenses.length}</span>}
               </div>
-              <AddButton onClick={addExpense} label="add expense" />
+              <AddButton onClick={addExpense} label="add event" />
             </div>
             {p.expenses.length === 0 && (
               <div style={{ fontSize: 11, color: C.mute }}>
@@ -2248,7 +2248,7 @@ function Calculator({ shared, isMobile }) {
 
           <Collapsible
             title="Advanced settings"
-            subtitle="59.5 rule · college funding · return, inflation and withdrawal assumptions"
+            subtitle="59.5 rule · child college funding · return, inflation and withdrawal assumptions"
             open={advancedOpen} onToggle={() => setAdvancedOpen((v) => !v)}
           >
             <SubSection title="Access to retirement accounts">
@@ -2260,7 +2260,7 @@ function Calculator({ shared, isMobile }) {
                 sub={p.rothLadder ? "on — converted funds free after 5 years, so taxable cash account bridges only 5 years of expense (not to 59.5)" : "off — retirement accounts locked until 59.5"} />
             </SubSection>
 
-            <SubSection title="College funding">
+            <SubSection title="Child College funding">
               <Toggle on={p.collegeSpread} onClick={() => set("collegeSpread", !p.collegeSpread)}
                 label="Spread tuition over 4 years"
                 sub={p.collegeSpread ? "on — quarter each at ages 18–21" : "off — single lump at 18"} />
@@ -2307,13 +2307,13 @@ function Calculator({ shared, isMobile }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
           <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
             <Stat label={`FIRE number · lasts to ${sim.END}`} value={retireOnLoan || !sim.fireCrossValue ? "—" : fmtM(sim.fireCrossValue)} accent={neverRetire || retireOnLoan ? C.coral : C.brass} />
-            <Stat label="FIRE age" value={retireOnLoan ? "on a loan" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink}
+            <Stat label="FIRE age" value={retireOnLoan ? "—" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink}
               sub={retireOnLoan || !sim.fireCross ? null : `${(sim.fireCross - p.currentAge).toFixed(1)} years from now`} />
             {sim.useCoast && (
               <Stat label={`Coast FIRE number today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
             )}
             {sim.useCoast && (
-              <Stat label="Coast FIRE age" value={sim.coastCross ? sim.coastCross.toFixed(1) : "not yet"} accent={C.coast}
+              <Stat label="Coast FIRE age" value={sim.coastCross ? sim.coastCross.toFixed(1) : "—"} accent={C.coast}
                 sub={sim.coastCross ? `${(sim.coastCross - p.currentAge).toFixed(1)} years from now` : null} />
             )}
             <Stat label="Liquid (taxable) at that point" value={sim.fireTaxable != null ? fmtM(sim.fireTaxable) : "—"} accent={C.liquid} />
