@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  simulate, DEFAULTS, EMPTY, isRunnable,
+  simulate, DEFAULTS, EMPTY, isRunnable, planReadiness,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -1509,5 +1509,63 @@ describe("the app opens empty", () => {
     const demo = simulate(DEFAULTS);
     expect(demo.fireCross).not.toBeNull();
     expect(demo.rows.length).toBeGreaterThan(0);
+  });
+});
+
+describe("a half-filled form has no answer to give", () => {
+  // THE BUG: with no retirement budget entered, retireExpense() is zero every year, so Need[] is
+  // identically zero, so ANY balance clears the bar. An age-only form reported "you could stop
+  // working today" — and because you retire in year one, every working-year input became inert:
+  // sweeping non-housing living costs moved neither the date nor the terminal value by a cent.
+  const PARTIAL = {
+    ...EMPTY, currentAge: 30, startCash: 10000, startPortfolio: 500000,
+    startPortfolioTaxAdv: 200000, annualTakeHome: 144000, annualTaxAdv: 30000,
+  };
+
+  it("reproduces the inert sweep it exists to prevent", () => {
+    const dates = [0, 20000, 40000, 80000].map((nonHousingLiving) =>
+      simulate({ ...PARTIAL, nonHousingLiving }).fireCross);
+    expect(new Set(dates).size).toBe(1);         // nothing moves…
+    expect(dates[0]).toBe(PARTIAL.currentAge);   // …because you "retire" on day one
+    expect(planReadiness(PARTIAL).ready).toBe(false);
+  });
+
+  it("moves again the moment a retirement budget exists", () => {
+    const withBudget = { ...PARTIAL, retirementSpendToday: 60000 };
+    expect(planReadiness(withBudget).ready).toBe(true);
+    const dates = [0, 20000, 40000, 80000].map((nonHousingLiving) =>
+      simulate({ ...withBudget, nonHousingLiving }).fireCross);
+    expect(new Set(dates).size).toBe(4);
+    for (let i = 1; i < dates.length; i++) expect(dates[i]).toBeGreaterThan(dates[i - 1]);
+  });
+
+  it("asks for an age, a retirement budget, and something to fund it with", () => {
+    const keysMissing = (p) => planReadiness(p).checks.filter((c) => !c.ok).map((c) => c.key);
+    expect(keysMissing(EMPTY)).toEqual(["age", "spend", "resources"]);
+    expect(keysMissing({ ...EMPTY, currentAge: 30 })).toEqual(["spend", "resources"]);
+    expect(keysMissing({ ...EMPTY, currentAge: 30, retirementSpendToday: 60000 })).toEqual(["resources"]);
+    expect(keysMissing({ ...EMPTY, currentAge: 30, retirementSpendToday: 60000, annualTakeHome: 90000 })).toEqual([]);
+  });
+
+  it("counts savings alone as enough to fund it — someone already retired has no income", () => {
+    const retiree = { ...EMPTY, currentAge: 67, retirementSpendToday: 50000, startPortfolio: 1200000 };
+    expect(planReadiness(retiree).ready).toBe(true);
+  });
+
+  it("counts a pension alone, too", () => {
+    const p = { ...EMPTY, currentAge: 67, retirementSpendToday: 50000,
+                incomes: [{ label: "SS", amount: 30000, startAge: 67, whose: "you", cola: true }] };
+    expect(planReadiness(p).ready).toBe(true);
+  });
+
+  it("ignores a partner's money while the partner is switched off", () => {
+    const p = { ...EMPTY, currentAge: 30, retirementSpendToday: 60000,
+                partnerEnabled: false, partnerAge: 30, partnerPortfolio: 900000 };
+    expect(planReadiness(p).ready).toBe(false);
+    expect(planReadiness({ ...p, partnerEnabled: true }).ready).toBe(true);
+  });
+
+  it("the demo is ready by construction", () => {
+    expect(planReadiness(DEFAULTS).ready).toBe(true);
   });
 });

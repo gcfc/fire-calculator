@@ -101,6 +101,31 @@ export const isRunnable = (p) => {
   return q.currentAge > 0 && q.endAge > q.currentAge && q.nominalReturn > -1;
 };
 
+// isRunnable() is the guard against NaN. This is the stronger question: are there enough figures for
+// the ANSWER to mean anything?
+//
+// The case that forced it: with no retirement budget, retireExpense() is zero every year, so Need[]
+// is identically zero, so any portfolio at all clears the bar and the model reports "you could stop
+// working today" — on a form where only the age has been typed. That is arithmetically correct and
+// completely useless. Worse, it makes every working-year input inert: if you retire in year one you
+// never work a year, so living costs and savings rate cannot move the answer, which reads as the
+// inputs being broken.
+//
+// So: something going out, something to fund it with, and a timeline to put them on.
+export const planReadiness = (p) => {
+  const q = normalizeParams(p);
+  const withPartner = q.partnerAge > 0 && p.partnerEnabled !== false;
+  const savings = q.startCash + q.startPortfolio + (withPartner ? q.partnerCash + q.partnerPortfolio : 0);
+  const income = q.annualTakeHome + (withPartner ? q.partnerIncome : 0)
+    + (p.incomes || []).reduce((s, i) => s + Math.abs(+i.amount || 0), 0);
+  const checks = [
+    { key: "age", label: "Your age", ok: q.currentAge > 0 && q.endAge > q.currentAge },
+    { key: "spend", label: "Retirement spending — what a year costs once you stop", ok: q.retirementSpendToday > 0 },
+    { key: "resources", label: "Income, or savings to live on", ok: income > 0 || savings > 0 },
+  ];
+  return { ready: checks.every((c) => c.ok), checks };
+};
+
 // The same shape simulate() always returns, with nothing in it. Kept exhaustive on purpose — a test
 // pins its key set against a real run, so a new output can't be added to one and forgotten in the other.
 const emptyResult = (p) => ({
@@ -2141,10 +2166,13 @@ function Calculator({ shared, isMobile }) {
   // met with debt / an early-withdrawal penalty, not real cash. Drives the shaded band on the chart.
   // Same helper the shared-plot view uses, so both read "underwater" identically.
   const underwaterSpans = useMemo(() => underwaterOf(sim.rows, sim.END), [sim]);
-  // Until there is an age and a horizon there is no projection at all — which is NOT the same as
-  // "you never retire". Every diagnostic below has to be gated on this, or an untouched form opens
-  // on a red banner telling the visitor their plan has failed.
-  const hasPlan = sim.rows.length > 0;
+  // Until the inputs make the question well posed there is no answer to show — which is NOT the same
+  // as "you never retire", nor as "you can retire today". Every panel below is gated on this, because
+  // a half-filled form otherwise produces confident nonsense in both directions: an untouched form
+  // reads as a failed plan, and an age-only form reads as "stop working today" (Need is zero when no
+  // spending has been entered, so any balance clears it).
+  const readiness = useMemo(() => planReadiness(p), [p]);
+  const hasPlan = readiness.ready && sim.rows.length > 0;
   const neverRetire = hasPlan && sim.fireCross == null;
   // WHY you're stuck — three genuinely different failures, and the fix differs for each:
   //  • bridge     — enough in total AND enough liquid; only the 59.5 wall blocks you (gate-off retires)
@@ -2180,7 +2208,10 @@ function Calculator({ shared, isMobile }) {
   // simulate() is pure and cheap, so instead of guessing at advice we re-run the whole model
   // once per lever and report what each one is really worth, in years of retirement.
   const levers = useMemo(() => {
-    if (sim.fireCross == null) return [];
+    // `ready` as well as a date: on a half-filled form the model still returns a crossing (at your
+    // current age, because Need is zero), and every lever then re-runs to the same 0.0y — a table of
+    // nothing, eight simulations per keystroke to produce it.
+    if (!readiness.ready || sim.fireCross == null) return [];
     // Only levers you can actually pull. Market return and inflation used to be listed (flagged "not
     // your choice") and would usually top the table — which is true but useless as advice, and it
     // squashed the bars for every decision you can really make. They're gone: this table is now
@@ -2859,6 +2890,12 @@ function Calculator({ shared, isMobile }) {
             />
           </div>}
 
+          {/* Every banner below reads the simulation, and the simulation happily answers a
+              half-filled form — Need is zero when no spending has been entered, so an age-only
+              form genuinely does clear the bar. Gating the whole block in one place is what keeps
+              a new banner from being added without its guard, which is exactly how "you could stop
+              working today" ended up greeting people who had typed nothing but their age. */}
+          {hasPlan && (<>
           {neverRetire && (
             <div style={{ background: `${C.coral}1A`, border: `2px solid ${C.coral}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, alignItems: "flex-start" }}>
               <span style={{ fontSize: 22, lineHeight: 1.1 }} aria-hidden>🚫</span>
@@ -3028,6 +3065,7 @@ function Calculator({ shared, isMobile }) {
               sits above the naive {fmtM(sim.naiveNumber)}.
             </div>
           )}
+          </>)}
 
           {!hasPlan && (
             <div style={{
@@ -3036,9 +3074,21 @@ function Calculator({ shared, isMobile }) {
               justifyContent: "center", gap: 10, padding: 24, textAlign: "center",
             }}>
               <div style={{ fontSize: 15, color: C.ink, fontWeight: 500 }}>Nothing to plot yet</div>
-              <div style={{ fontSize: 13, color: C.mute, maxWidth: 420, lineHeight: 1.6 }}>
-                Enter your age to start a projection, then fill in as much or as little as you like —
-                homes, kids, debts and pensions are all optional.
+              <div style={{ fontSize: 13, color: C.mute, maxWidth: 440, lineHeight: 1.6 }}>
+                Three figures make the question answerable. Everything else — homes, kids, a partner,
+                debts, pensions — is optional detail you can layer on afterwards.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 7, margin: "6px 0 2px", textAlign: "left" }}>
+                {readiness.checks.map((c) => (
+                  <div key={c.key} style={{ display: "flex", gap: 9, alignItems: "baseline", fontSize: 13 }}>
+                    <span style={{ color: c.ok ? C.teal : C.mute, fontSize: 13, lineHeight: 1.3 }} aria-hidden>
+                      {c.ok ? "◉" : "○"}
+                    </span>
+                    <span style={{ color: c.ok ? C.mute : C.ink, textDecoration: c.ok ? "line-through" : "none" }}>
+                      {c.label}
+                    </span>
+                  </div>
+                ))}
               </div>
               <button
                 onClick={() => { setP(DEFAULTS); setShow(defaultShow()); }}
