@@ -139,7 +139,7 @@ const emptyResult = (p) => ({
   partnerStopsAtAge: null, unlockYouAtFire: null,
   fireTaxable: null, fireLocked: null, fireBridge: null, lockedShare: 0, illiquidAge: null,
   underwaterCause: null,
-  useCoast: p.useCoast !== false, coastTarget: null, coastCross: null, coastCrossValue: null,
+  useCoast: p.useCoast !== false, coastSpecified: false, coastTarget: null, coastCross: null, coastCrossValue: null,
   coastToday: null, coastShortfall: null,
   partnerAgeAtFire: null, partnerAgeAtEnd: null,
 });
@@ -664,8 +664,13 @@ export function simulate(rawP) {
   // Coast is opt-in: when it's off nothing here is computed and every coast output is null, so the
   // chart, legend and stats have nothing to draw rather than being merely hidden.
   const useCoast = p.useCoast !== false;
-  const coastTarget = useCoast ? Math.min(Math.max(p.coastAge, p.currentAge + 1), END) : null;
-  const coastAt = (t) => (useCoast ? needAt(coastTarget) / grow(coastTarget - t) : null);
+  // A coast age you have not typed is not a target. Blank normalises to 0, and the clamp below would
+  // quietly turn that into "coast to next year" — a whole curve drawn off a number nobody chose.
+  // Ticking the box asks the question; it does not answer it, so there is no curve until the age is
+  // given. `useCoast` still reports the checkbox, so the UI can tell "off" from "asked, unanswered".
+  const coastSpecified = useCoast && p.coastAge > 0;
+  const coastTarget = coastSpecified ? Math.min(Math.max(p.coastAge, p.currentAge + 1), END) : null;
+  const coastAt = (t) => (coastTarget != null ? needAt(coastTarget) / grow(coastTarget - t) : null);
 
   // --- annual flow RATES (nominal $/yr) during a working year ---------------
   const flows = (age) => {
@@ -872,7 +877,7 @@ export function simulate(rawP) {
     const total = totalOf(st);
     const startReal = total / infl;
     const working = T === null;
-    const coastReal = useCoast && age <= coastTarget ? coastAt(age) / infl : null;
+    const coastReal = coastTarget != null && age <= coastTarget ? coastAt(age) / infl : null;
 
     // hitting the coast bar means you could stop saving today and still retire on time
     const coastGap = coastReal == null ? null : startReal - coastReal;
@@ -948,7 +953,7 @@ export function simulate(rawP) {
             retirement: Math.round((sT.taxAdvYou + sT.taxAdvPartner) / inflT),
             bridge: Math.round(fireBridge),
             neededRetirement: Math.max(0, Math.round(fireReq) - Math.round(fireBridge)),
-            coast: useCoast && T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
+            coast: coastTarget != null && T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
             save: 0, events: [],
           });
         }
@@ -1108,9 +1113,9 @@ export function simulate(rawP) {
       // the cash balance going into the year that broke, so the shortfall can be put in context
       taxableAtStart: (rows.find((r) => r.age === illiquidAge) || {}).taxable ?? null,
     },
-    useCoast, coastTarget, coastCross, coastCrossValue, coastToday: useCoast ? coastAt(p.currentAge) : null,
+    useCoast, coastSpecified, coastTarget, coastCross, coastCrossValue, coastToday: coastAt(p.currentAge),
     // when coast is ON but never reached: what you'd need vs. what you'd have at the coast target
-    coastShortfall: !useCoast || coastCross != null ? null : (() => {
+    coastShortfall: !coastSpecified || coastCross != null ? null : (() => {
       const row = rows.find((r) => r.age === coastTarget) || rows[rows.length - 1];
       const bar = coastAt(row.age) / inflAt(row.age);
       return { age: row.age, have: Math.round(row.portfolio), need: Math.round(bar), gap: Math.round(bar - row.portfolio) };
@@ -2426,6 +2431,14 @@ function Calculator({ shared, isMobile }) {
                       : field(l, k, p[k], set, o)}
                     {/* the gross/net switch belongs beside the salary it reinterprets, not in a
                         separate block further down the column */}
+                    {/* ticking the box adds this field but no curve — say why, rather than leaving
+                        the chart looking broken */}
+                    {k === "coastAge" && !(p.coastAge > 0) && (
+                      <div style={{ fontSize: 10, color: C.mute, marginTop: -6, lineHeight: 1.6 }}>
+                        Enter the age you'd fully retire and the coast curve appears — it's the pot that,
+                        left alone from today with no further saving, still gets you there.
+                      </div>
+                    )}
                     {k === "annualTakeHome" && (
                       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: -4 }}>
                         <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 11, color: C.ink }}>
@@ -2899,10 +2912,10 @@ function Calculator({ shared, isMobile }) {
             <Stat label={`FIRE number · lasts to ${sim.END}`} value={retireOnLoan || !sim.fireCrossValue ? "—" : fmtM(sim.fireCrossValue)} accent={neverRetire || retireOnLoan ? C.coral : C.brass} />
             <Stat label="FIRE age" value={retireOnLoan ? "—" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink}
               sub={retireOnLoan || !sim.fireCross ? null : `${(sim.fireCross - p.currentAge).toFixed(1)} years from now`} />
-            {sim.useCoast && (
+            {sim.coastTarget != null && (
               <Stat label={`Coast FIRE number today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
             )}
-            {sim.useCoast && (
+            {sim.coastTarget != null && (
               <Stat label="Coast FIRE age" value={sim.coastCross ? sim.coastCross.toFixed(1) : "—"} accent={C.coast}
                 sub={sim.coastCross ? `${(sim.coastCross - p.currentAge).toFixed(1)} years from now` : null} />
             )}

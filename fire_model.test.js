@@ -1569,3 +1569,41 @@ describe("a half-filled form has no answer to give", () => {
     expect(planReadiness(DEFAULTS).ready).toBe(true);
   });
 });
+
+describe("coast FIRE needs a target before it draws anything", () => {
+  // THE BUG: a blank coast age normalises to 0, and the clamp turned that into currentAge + 1 — so
+  // ticking the checkbox drew a full coast curve against "retire next year", a target nobody chose.
+  const READY = { ...EMPTY, currentAge: 30, retirementSpendToday: 60000, annualTakeHome: 120000,
+                  startPortfolio: 400000 };
+
+  it("draws no curve while the coast age is blank", () => {
+    const s = simulate({ ...READY, useCoast: true, coastAge: "" });
+    expect(s.useCoast).toBe(true);            // the box is ticked…
+    expect(s.coastSpecified).toBe(false);     // …but the question is unanswered
+    expect(s.coastTarget).toBeNull();
+    expect(s.coastToday).toBeNull();
+    expect(s.coastCross).toBeNull();
+    expect(s.coastShortfall).toBeNull();
+    expect(s.rows.every((r) => r.coast == null)).toBe(true);
+  });
+
+  it("never invents a target one year out", () => {
+    const s = simulate({ ...READY, useCoast: true, coastAge: "" });
+    expect(s.coastTarget).not.toBe(READY.currentAge + 1);
+  });
+
+  it("draws it as soon as an age is given", () => {
+    const s = simulate({ ...READY, useCoast: true, coastAge: 50 });
+    expect(s.coastSpecified).toBe(true);
+    expect(s.coastTarget).toBe(50);
+    expect(s.coastToday).toBeGreaterThan(0);
+    expect(s.rows.some((r) => r.coast != null)).toBe(true);
+  });
+
+  it("is still fully off when the box is unticked", () => {
+    const s = simulate({ ...READY, useCoast: false, coastAge: 50 });
+    expect(s.useCoast).toBe(false);
+    expect(s.coastSpecified).toBe(false);
+    expect(s.coastTarget).toBeNull();
+  });
+});
