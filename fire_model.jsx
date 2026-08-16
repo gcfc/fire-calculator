@@ -2126,10 +2126,30 @@ function Calculator({ shared, isMobile }) {
     setP((s) => ({ ...s, homes: s.homes.map((h, j) => (j === i ? { ...h, ...patch } : h)) }));
   const setKid = (i, patch) =>
     setP((s) => ({ ...s, kids: s.kids.map((k, j) => (j === i ? { ...k, ...patch } : k)) }));
+  // Adding a kid seeds the three per-kid cost fields, because a kid with blank costs is a kid that
+  // costs nothing — the one thing we know is false. Only blanks are filled: a figure you have already
+  // typed (including a deliberate 0) survives adding a second kid untouched.
   const addKid = () =>
     setP((s) => {
       const last = s.kids[s.kids.length - 1];
-      return { ...s, kids: [...s.kids, { birthAge: last ? last.birthAge + 2 : s.currentAge + 2 }] };
+      const blank = (v) => v === "" || v === null || v === undefined;
+      const seed = (k) => (blank(s[k]) ? DEFAULTS[k] : s[k]);
+      // A new kid lands two years after the last one, or two years from now for the first. With no
+      // age to count from there is no sensible answer, so leave it blank for the user rather than
+      // inventing one: `"" + 2` is the string "2", which rendered as a birth age of two and, once a
+      // real age was typed, as a birth year decades in the past.
+      const usable = (v) => Number.isFinite(+v) && +v > 0;
+      // count from the last kid, or from your age when there is no last kid — or when that kid's own
+      // birth age is still blank, which is what happens if kids were added before the age was typed
+      const prev = last && usable(last.birthAge) ? +last.birthAge : +s.currentAge;
+      const birthAge = usable(prev) ? prev + 2 : "";
+      return {
+        ...s,
+        kids: [...s.kids, { birthAge }],
+        daycarePerKid: seed("daycarePerKid"),
+        ongoingPerKid: seed("ongoingPerKid"),
+        collegePerKid: seed("collegePerKid"),
+      };
     });
   const dropKid = (i) => setP((s) => ({ ...s, kids: s.kids.filter((_, j) => j !== i) }));
 
@@ -2593,7 +2613,10 @@ function Calculator({ shared, isMobile }) {
                 removes that class of bug entirely. */}
             {p.kids.map((k, i) => {
               // legacy share links may still carry `ageNow`; fold it into the canonical field for display
-              const birthAge = (k.ageNow != null && k.ageNow !== "") ? p.currentAge - (+k.ageNow) : (+k.birthAge);
+              // preserve a blank birth age as blank — coercing it with `+` turns "" into 0, which
+              // shows a typed-looking zero in a box the user has not filled in yet
+              const rawBirth = (k.ageNow != null && k.ageNow !== "") ? p.currentAge - (+k.ageNow) : k.birthAge;
+              const birthAge = (rawBirth === "" || rawBirth == null) ? "" : +rawBirth;
               const showNow = k.entry === "now";
               const yearsAway = birthAge - p.currentAge;
               return (
