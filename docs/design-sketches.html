@@ -1,0 +1,992 @@
+<title>FIRE Model Design Sketches</title>
+<style>
+  :root {
+    /* the app's own palette, lifted from fire_model.jsx — these mockups have to read as the app */
+    --bg: #0E1A1F;
+    --panel: #14252B;
+    --panel-2: #182D34;
+    --ink: #EAE6DD;
+    --mute: #7A8A8E;
+    --line: #26424B;
+    --teal: #5FB0A6;
+    --brass: #C9A24B;
+    --coral: #D9695A;
+    --liquid: #9AD5CB;
+    --locked: #7FA8D9;
+    --coast: #B48EAD;
+
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.62;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .measure { max-width: 720px; }
+
+  /* ---------- masthead ---------- */
+  .masthead { border-bottom: 1px solid var(--line); padding-bottom: 28px; margin-bottom: 40px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--brass);
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-size: clamp(28px, 4vw, 40px);
+    line-height: 1.12;
+    font-weight: 700;
+    letter-spacing: -.015em;
+    margin: 0 0 12px;
+    text-wrap: balance;
+  }
+  .standfirst { color: var(--mute); font-size: 16.5px; margin: 0; max-width: 660px; }
+
+  /* ---------- sections ---------- */
+  section { padding: 44px 0 8px; border-top: 1px solid var(--line); margin-top: 36px; }
+  section:first-of-type { border-top: none; margin-top: 0; padding-top: 8px; }
+
+  .q {
+    display: flex;
+    gap: 14px;
+    align-items: baseline;
+    margin-bottom: 6px;
+  }
+  .q-num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--brass);
+    letter-spacing: .1em;
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+  .q-text {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--mute);
+    letter-spacing: .02em;
+    margin: 0;
+  }
+  h2 {
+    font-size: clamp(22px, 3vw, 29px);
+    line-height: 1.2;
+    letter-spacing: -.01em;
+    font-weight: 700;
+    margin: 4px 0 18px;
+    text-wrap: balance;
+  }
+  h3 {
+    font-size: 13px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--teal);
+    font-weight: 500;
+    margin: 34px 0 12px;
+  }
+  p { margin: 0 0 15px; }
+  p.measure, ul.measure, ol.measure { max-width: 720px; }
+  a { color: var(--teal); }
+  strong { color: #fff; font-weight: 600; }
+  code {
+    font-family: var(--mono);
+    font-size: .88em;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--liquid);
+  }
+  ul, ol { max-width: 720px; padding-left: 20px; margin: 0 0 15px; }
+  li { margin-bottom: 8px; }
+
+  /* ---------- figure panels ---------- */
+  figure {
+    margin: 26px 0 8px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 22px;
+    overflow-x: auto;
+  }
+  figcaption {
+    font-size: 13px;
+    color: var(--mute);
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    line-height: 1.55;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+  svg { display: block; width: 100%; height: auto; min-width: 620px; }
+
+  .svg-label { font-family: var(--mono); font-size: 11px; fill: var(--ink); }
+  .svg-sub   { font-family: var(--mono); font-size: 9.5px; fill: var(--mute); }
+  .svg-axis  { font-family: var(--mono); font-size: 10px; fill: var(--mute); }
+  .svg-tag   { font-family: var(--mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+
+  /* ---------- callout ---------- */
+  .callout {
+    border-left: 2px solid var(--brass);
+    background: #1B303733;
+    padding: 14px 18px;
+    margin: 22px 0;
+    max-width: 720px;
+    font-size: 15px;
+  }
+  .callout.warn { border-left-color: var(--coral); }
+  .callout.good { border-left-color: var(--teal); }
+  .callout p:last-child { margin-bottom: 0; }
+
+  /* ---------- form mockup (section 1) ---------- */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 780px) { .compare { grid-template-columns: 1fr; } }
+
+  .mock {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .mock-head {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .mock-head.bad { color: var(--coral); }
+  .mock-head.ok  { color: var(--teal); }
+
+  .tier {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 10px 11px;
+    background: var(--panel);
+  }
+  .tier-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--teal);
+    margin-bottom: 8px;
+  }
+  .fld {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    padding: 4px 0;
+    border-bottom: 1px solid #26424B66;
+  }
+  .fld:last-child { border-bottom: none; }
+  .fld span:first-child { color: var(--mute); }
+  .fld span:last-child { font-family: var(--mono); color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  /* collapsed row that still shows its assumed value — the crux of section 1 */
+  .row-collapsed {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 9px 11px;
+    background: var(--panel);
+    font-size: 12px;
+  }
+  .row-collapsed .rc-name { color: var(--ink); display: flex; align-items: center; gap: 7px; }
+  .row-collapsed .rc-val {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--brass);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .chev { color: var(--mute); font-size: 10px; }
+
+  .row-hidden {
+    border: 1px dashed #26424B;
+    border-radius: 6px;
+    padding: 9px 11px;
+    background: transparent;
+    font-size: 12px;
+    color: var(--mute);
+    font-style: italic;
+  }
+
+  .result-strip {
+    border: 1px solid var(--brass);
+    border-radius: 6px;
+    padding: 10px 12px;
+    background: #C9A24B14;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .result-strip .rs-l { font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--mute); }
+  .result-strip .rs-v { font-family: var(--mono); font-size: 18px; color: var(--brass); font-variant-numeric: tabular-nums; }
+
+  .preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 4px 10px;
+    color: var(--mute);
+    background: var(--panel);
+    white-space: nowrap;
+  }
+  .chip.on { border-color: var(--teal); color: var(--bg); background: var(--teal); }
+
+  /* ---------- data table ---------- */
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin: 6px 0 18px; min-width: 520px; }
+  .table-scroll { overflow-x: auto; max-width: 860px; }
+  th, td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--mute);
+    font-weight: 500;
+  }
+  td.num { font-family: var(--mono); text-align: right; font-variant-numeric: tabular-nums; padding-right: 18px; }
+
+  /* ---------- routing diagram (section 4) ---------- */
+  .flowgrid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 18px; align-items: center; }
+  @media (max-width: 780px) { .flowgrid { grid-template-columns: 1fr; } .arrow-h { transform: rotate(90deg); } }
+  .box {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
+    background: var(--bg);
+  }
+  .box.src { border-color: var(--teal); }
+  .box-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--teal);
+    margin-bottom: 9px;
+  }
+  .box.out .box-title { color: var(--brass); }
+  .box.out { border-color: #C9A24B55; }
+  .box pre {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink);
+    margin: 0;
+    line-height: 1.65;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .box ul { padding-left: 16px; margin: 0; font-size: 12.5px; }
+  .box li { margin-bottom: 5px; color: var(--mute); }
+  .box li b { color: var(--ink); font-weight: 500; }
+  .arrow-h { font-size: 20px; color: var(--brass); text-align: center; }
+
+  .fin {
+    margin-top: 52px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    font-size: 12.5px;
+    color: var(--mute);
+    font-family: var(--mono);
+  }
+
+  :focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">fire-calculator · design notes</p>
+    <h1>Four sketches: packaging, mortality, flow, and routes</h1>
+    <p class="standfirst">
+      Answers to the four design questions, drawn in the app's own palette and wired to real output
+      from <code>simulate(DEFAULTS)</code> — FIRE age 44.2, bridge $2.60M, horizon 101.
+    </p>
+  </header>
+
+  <!-- ============================================================ 1 -->
+  <section>
+    <div class="q">
+      <span class="q-num">01</span>
+      <p class="q-text">Simple planner + separate advanced one, or something else?</p>
+    </div>
+    <h2>One form in three tiers — not two apps</h2>
+
+    <p class="measure">
+      A separate simple mode would have to either ignore housing, kids and the 59½ gate, or silently
+      assume them. The first rebuilds the naive calculator your README exists to argue against; the
+      second hides the assumptions that make your answer differ. Both undercut the product.
+    </p>
+    <p class="measure">
+      The fix is smaller than a second app: <strong>collapse the sections, but print their current
+      value in the header.</strong> That's the difference between progressive disclosure done well
+      and done badly. Hidden-with-a-silent-default is a trap; collapsed-with-a-visible-summary is a
+      summary the user can audit at a glance and open when they care.
+    </p>
+
+    <figure>
+      <div class="compare">
+        <div class="mock">
+          <div class="mock-head bad"><span>✕ two separate planners</span></div>
+          <div class="tier">
+            <div class="tier-title">simple mode</div>
+            <div class="fld"><span>Age</span><span>27</span></div>
+            <div class="fld"><span>Portfolio</span><span>$600,000</span></div>
+            <div class="fld"><span>Take-home</span><span>$144,000</span></div>
+            <div class="fld"><span>Spending</span><span>$100,000</span></div>
+          </div>
+          <div class="row-hidden">housing — renting forever</div>
+          <div class="row-hidden">kids — not modelled</div>
+          <div class="row-hidden">59½ access gate — not modelled</div>
+          <div class="result-strip" style="border-color: var(--coral); background: #D9695A14;">
+            <span class="rs-l">fire age</span>
+            <span class="rs-v" style="color: var(--coral);">34.8</span>
+          </div>
+          <p style="font-size:11.5px;color:var(--coral);margin:2px 0 0;line-height:1.5;">
+            <b style="color:var(--coral);">9.4 years early</b>, and wrong for exactly the reasons the
+            README names. Switching to Advanced then moves the date a decade later — which reads as
+            the tool breaking rather than the tool working.
+          </p>
+        </div>
+
+        <div class="mock">
+          <div class="mock-head ok"><span>✓ one form, three tiers</span></div>
+
+          <div class="preset-row">
+            <span class="chip on">couple + 2 kids</span>
+            <span class="chip">single</span>
+            <span class="chip">DINK</span>
+            <span class="chip">one income</span>
+            <span class="chip">late start</span>
+          </div>
+
+          <div class="tier">
+            <div class="tier-title">tier 1 · always open</div>
+            <div class="fld"><span>Your age</span><span>27</span></div>
+            <div class="fld"><span>Portfolio</span><span>$600,000</span></div>
+            <div class="fld"><span>Take-home</span><span>$144,000</span></div>
+            <div class="fld"><span>Retirement spend</span><span>$100,000</span></div>
+            <div class="fld"><span>Partner</span><span>included · 26</span></div>
+          </div>
+
+          <div class="row-collapsed">
+            <span class="rc-name"><span class="chev">▸</span> Homes</span>
+            <span class="rc-val">1 · $2.0M at 31</span>
+          </div>
+          <div class="row-collapsed">
+            <span class="rc-name"><span class="chev">▸</span> Kids</span>
+            <span class="rc-val">2 · born at 30, 32</span>
+          </div>
+          <div class="row-collapsed">
+            <span class="rc-name"><span class="chev">▸</span> Debts</span>
+            <span class="rc-val">none</span>
+          </div>
+          <div class="row-collapsed">
+            <span class="rc-name"><span class="chev">▸</span> Retirement income</span>
+            <span class="rc-val">none</span>
+          </div>
+          <div class="row-collapsed">
+            <span class="rc-name"><span class="chev">▸</span> Advanced</span>
+            <span class="rc-val">7% · 3% · locked to 59½</span>
+          </div>
+
+          <div class="result-strip">
+            <span class="rs-l">fire age</span>
+            <span class="rs-v">44.2</span>
+          </div>
+          <p style="font-size:11.5px;color:var(--mute);margin:2px 0 0;line-height:1.5;">
+            Same five fields to fill in. Every assumption is on screen and one click from editable,
+            so the number never moves for a reason the user can't see.
+          </p>
+        </div>
+      </div>
+      <figcaption>
+        Both mockups ask the user for the same five things. The difference is entirely in what
+        happens to <b>the other thirty-five inputs</b> — dropped, or folded into five auditable
+        summary lines. The left-hand figure is real: <code>simulate({…DEFAULTS, homes: [], kids: [],
+        enforceAccess: false})</code> returns <b>34.8</b> against the full model's <b>44.2</b>. A
+        simple mode isn't a gentler version of your answer, it's a different answer by nearly a decade.
+      </figcaption>
+    </figure>
+
+    <h3>The other three moves worth making</h3>
+    <ol class="measure">
+      <li>
+        <strong>Change the default household.</strong> 27 years old with $600k saved and a $2M house
+        is a very specific person. A first-time visitor with $40k saved reads that and leaves. Ship
+        the presets, and make the landing default a median-ish one.
+      </li>
+      <li>
+        <strong>Never let the chart fall below the fold.</strong> On mobile you currently stack ~40
+        inputs above the output. Put the chart first on small screens, or pin a two-line result strip
+        to the top. The live chart <em>is</em> the feedback loop — a user who never sees it react has
+        no reason to keep typing.
+      </li>
+      <li>
+        <strong>Add sliders next to the number fields on tier 1</strong>, not instead of them. Numbers
+        are for entering what you know; sliders are for exploring what you don't. Your Advanced panel
+        already has the pattern.
+      </li>
+    </ol>
+
+    <div class="callout">
+      <p>
+        <strong>Don't build a wizard.</strong> Step-through onboarding hides the chart during input,
+        which kills the one thing that makes this tool worth using. Tiering is vertical, not temporal.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============================================================ 2 -->
+  <section>
+    <div class="q">
+      <span class="q-num">02</span>
+      <p class="q-text">How does mortality probability look, and how does it affect the outcome distribution?</p>
+    </div>
+    <h2>Your horizon of 101 is roughly a 7% scenario</h2>
+
+    <p class="measure">
+      Mortality enters as a survival curve <code>S(a)</code> — the probability of still being alive at
+      age <code>a</code> — from the SSA Period Life Table. For a couple you want the
+      <strong>last-survivor</strong> curve, <code>1 − (1−S_you)(1−S_partner)</code>, because that is
+      exactly the horizon your model already computes as
+      <code>END = endAge + max(0, partnerOffset)</code>.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 780 300" role="img" aria-label="Survival probability from age 27 to 101, for one person and for at least one of a couple">
+        <!-- grid -->
+        <g stroke="#26424B" stroke-width="1">
+          <line x1="60" y1="30"  x2="750" y2="30"  />
+          <line x1="60" y1="85"  x2="750" y2="85"  />
+          <line x1="60" y1="140" x2="750" y2="140" />
+          <line x1="60" y1="195" x2="750" y2="195" />
+          <line x1="60" y1="250" x2="750" y2="250" />
+        </g>
+        <g class="svg-axis" text-anchor="end">
+          <text x="52" y="34">100%</text>
+          <text x="52" y="89">75%</text>
+          <text x="52" y="144">50%</text>
+          <text x="52" y="199">25%</text>
+          <text x="52" y="254">0%</text>
+        </g>
+        <g class="svg-axis" text-anchor="middle">
+          <text x="60"    y="270">27</text>
+          <text x="274.5" y="270">50</text>
+          <text x="414.5" y="270">65</text>
+          <text x="554.4" y="270">80</text>
+          <text x="694.3" y="270">95</text>
+          <text x="750.2" y="284" fill="#C9A24B">101</text>
+        </g>
+
+        <!-- band between the two curves = the couple's extra exposure -->
+        <path d="M60,30 134.6,30 227.9,30.2 274.5,30.4 321.2,30.9 367.8,32.1 414.5,34.2 461.1,38.4 507.7,46.3 554.4,61.7 601,89.8 647.7,134.7 694.3,188.8 740.9,229.3 750.2,234.4
+                 L750.2,242.1 740.9,239.4 694.3,217 647.7,181.8 601,144.8 554.4,113.6 507.7,89.8 461.1,72.7 414.5,60.4 367.8,51.3 321.2,44.3 274.5,39.2 227.9,36.2 134.6,31.8 60,30 Z"
+              fill="#5FB0A6" opacity="0.14" />
+
+        <!-- horizon marker -->
+        <line x1="750.2" y1="24" x2="750.2" y2="256" stroke="#C9A24B" stroke-width="1" stroke-dasharray="3 3" />
+
+        <!-- FIRE age marker -->
+        <line x1="219.4" y1="24" x2="219.4" y2="256" stroke="#C9A24B" stroke-width="1" stroke-dasharray="2 4" opacity="0.5" />
+        <text class="svg-sub" x="224" y="34" fill="#C9A24B">FIRE 44.2</text>
+
+        <!-- either-alive curve -->
+        <polyline fill="none" stroke="#5FB0A6" stroke-width="2"
+          points="60,30 134.6,30 227.9,30.2 274.5,30.4 321.2,30.9 367.8,32.1 414.5,34.2 461.1,38.4 507.7,46.3 554.4,61.7 601,89.8 647.7,134.7 694.3,188.8 740.9,229.3 750.2,234.4" />
+        <!-- single-life curve -->
+        <polyline fill="none" stroke="#C9A24B" stroke-width="2" stroke-dasharray="5 3"
+          points="60,30 134.6,31.8 227.9,36.2 274.5,39.2 321.2,44.3 367.8,51.3 414.5,60.4 461.1,72.7 507.7,89.8 554.4,113.6 601,144.8 647.7,181.8 694.3,217 740.9,239.4 750.2,242.1" />
+
+        <!-- median crossings -->
+        <circle cx="637" cy="140" r="3.5" fill="#C9A24B" />
+        <circle cx="690" cy="140" r="3.5" fill="#5FB0A6" />
+        <text class="svg-sub" x="600" y="132" fill="#C9A24B" text-anchor="middle">median 84</text>
+        <text class="svg-sub" x="700" y="132" fill="#5FB0A6" text-anchor="start">median 90</text>
+
+        <!-- endpoint callouts -->
+        <circle cx="750.2" cy="234.4" r="3.5" fill="#5FB0A6" />
+        <circle cx="750.2" cy="242.1" r="3.5" fill="#C9A24B" />
+        <text class="svg-label" x="744" y="212" text-anchor="end" fill="#5FB0A6">7% either alive</text>
+        <text class="svg-label" x="744" y="226" text-anchor="end" fill="#C9A24B">3.6% you alive</text>
+
+        <!-- legend -->
+        <g transform="translate(72, 214)">
+          <line x1="0" y1="0" x2="18" y2="0" stroke="#5FB0A6" stroke-width="2" />
+          <text class="svg-label" x="24" y="3.5">at least one of you alive</text>
+          <line x1="0" y1="18" x2="18" y2="18" stroke="#C9A24B" stroke-width="2" stroke-dasharray="5 3" />
+          <text class="svg-label" x="24" y="21.5">you alive</text>
+        </g>
+      </svg>
+      <figcaption>
+        Illustrative Gompertz-shaped curves from age 27 — replace with the real SSA Period Life Table
+        (~120 rows × 2 sexes, public domain). The shaded band is <b>the couple premium</b>: the years
+        where one of you is likely alive but you individually are not. It is the reason a last-survivor
+        horizon is the right one, and it peaks right where your plan is spending the most.
+      </figcaption>
+    </figure>
+
+    <h3>What it does to the numbers</h3>
+
+    <p class="measure">
+      There are three levels of ambition here, and the cheapest one is worth doing on its own.
+    </p>
+
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 15%">Level</th>
+            <th style="width: 33%">What it is</th>
+            <th style="width: 30%">New machinery</th>
+            <th>Effect</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>1</b></td>
+            <td>Survival ribbon on the age axis + a relabelled <code>endAge</code></td>
+            <td>One lookup table. No model change.</td>
+            <td>Reframes the horizon honestly. Nothing moves.</td>
+          </tr>
+          <tr>
+            <td><b>2</b></td>
+            <td>Mortality-weighted <code>Need</code> — discount each year's spend by <code>S(a)</code></td>
+            <td>One factor inside the existing backward induction.</td>
+            <td>Cuts <code>Need</code> ~8–12%. Leaves <code>Bridge</code> nearly untouched.</td>
+          </tr>
+          <tr>
+            <td><b>3</b></td>
+            <td>The full rich / broke / dead stack</td>
+            <td>Requires return distributions — i.e. the backtesting work first.</td>
+            <td>Replaces one date with a distribution.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout good">
+      <p>
+        <strong>Level 2 has a result you'll like.</strong> Mortality discounting bites hardest on
+        far-future spending, which is what <code>Need</code> is made of. It barely touches
+        <code>Bridge</code>, because the years between retiring at 44 and unlocking at 59½ are ones
+        you're ~97% likely to be alive for. So weighting by survival <em>lowers the wealth constraint
+        and leaves the liquidity constraint standing</em> — the bridge binds harder, not softer.
+      </p>
+      <p>
+        On your defaults it already binds exactly: <code>fireTaxable</code> and
+        <code>fireBridge</code> are both $2,595,315, to the dollar. Mortality-weighting widens that
+        gap rather than closing it, which strengthens the thesis the whole app is built on.
+      </p>
+    </div>
+
+    <div class="callout warn">
+      <p>
+        <strong>The caveat to ship alongside it.</strong> A mortality-weighted number is an
+        <em>expected</em> cost, and planning to an expectation means a coin-flip's chance of
+        outliving the money. That is why every serious planner sizes to a high percentile instead.
+        Show it as a second readout — "cost if you live to 101: $4.58M · expected cost: $4.1M" — never
+        as a replacement for the number.
+      </p>
+      <p>
+        While you're there: the field labelled <b>Life Expectancy</b> is misnamed. Life expectancy for
+        a 27-year-old is about 80. The field is a planning horizon, and calling it what it is would
+        stop people entering 80 and quietly underfunding by twenty years.
+      </p>
+    </div>
+
+    <h3>Level 3, once backtesting exists</h3>
+
+    <figure>
+      <svg viewBox="0 0 780 260" role="img" aria-label="Schematic stacked area chart of retirement outcomes by age, showing the dead wedge overtaking the broke wedge">
+        <defs>
+          <pattern id="hatch" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+            <line x1="0" y1="0" x2="0" y2="6" stroke="#7A8A8E" stroke-width="2.5" opacity="0.5" />
+          </pattern>
+        </defs>
+
+        <!-- 5x starting -->
+        <path d="M60,220 L60,40 L750,40 L750,220 Z" fill="#5FB0A6" opacity="0.30" />
+        <!-- at/above starting: boundary rises -->
+        <path d="M60,220 L60,40 C220,44 400,60 560,96 C640,124 710,160 750,186 L750,220 Z" fill="#5FB0A6" opacity="0.22" />
+        <!-- below starting -->
+        <path d="M60,220 L60,40 C220,48 400,74 560,124 C640,156 710,186 750,204 L750,220 Z" fill="#9AD5CB" opacity="0.20" />
+        <!-- broke -->
+        <path d="M60,220 L60,220 C300,220 480,214 600,206 C670,200 720,194 750,190 L750,220 Z" fill="#D9695A" opacity="0.65" />
+        <!-- dead wedge, from the top -->
+        <path d="M60,40 C220,42 340,50 440,68 C540,88 650,132 750,186 L750,40 Z" fill="url(#hatch)" />
+        <path d="M60,40 C220,42 340,50 440,68 C540,88 650,132 750,186" fill="none" stroke="#7A8A8E" stroke-width="1.5" />
+
+        <!-- frame -->
+        <line x1="60" y1="220" x2="750" y2="220" stroke="#26424B" />
+        <line x1="60" y1="40" x2="60" y2="220" stroke="#26424B" />
+
+        <g class="svg-axis" text-anchor="middle">
+          <text x="60"  y="238">44</text>
+          <text x="235" y="238">60</text>
+          <text x="410" y="238">75</text>
+          <text x="585" y="238">90</text>
+          <text x="750" y="238">101</text>
+        </g>
+        <text class="svg-axis" x="405" y="254" text-anchor="middle">age</text>
+
+        <text class="svg-tag" x="420" y="76"  fill="#7A8A8E">dead</text>
+        <text class="svg-tag" x="180" y="120" fill="#EAE6DD">solvent</text>
+        <text class="svg-tag" x="655" y="212" fill="#D9695A">broke</text>
+
+        <text class="svg-sub" x="70" y="34">P = 100%</text>
+      </svg>
+      <figcaption>
+        Schematic, not computed — this shape needs return distributions to be real. The point it makes
+        is the one Engaging Data makes: <b>the grey wedge swallows the red one.</b> Somewhere in your
+        seventies the dominant risk to the plan stops being the market and starts being the calendar.
+        No accumulation-phase calculator says this, and yours is already opinionated enough to.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ============================================================ 3 -->
+  <section>
+    <div class="q">
+      <span class="q-num">03</span>
+      <p class="q-text">How would the Sankey diagram look for this?</p>
+    </div>
+    <h2>One year at a time — and the locked channel is the story</h2>
+
+    <p class="measure">
+      A Sankey shows one year's flows: sources on the left, sinks on the right, ribbon width
+      proportional to dollars. Every number below is read straight out of
+      <code>sim.trace</code> on your defaults — no new math, just a second rendering of the table you
+      already ship.
+    </p>
+
+    <h3>Age 35 — working, both earning</h3>
+
+    <figure>
+      <svg viewBox="0 0 780 300" role="img" aria-label="Sankey diagram of cash flows at age 35: household income split into housing, kids, living, taxable savings and 401k">
+        <!-- ribbons: pay -> household -->
+        <path d="M22,24 C201,24 201,24 380,24 L380,152.2 C201,152.2 201,152.2 22,152.2 Z" fill="#5FB0A6" opacity="0.30" />
+        <path d="M22,162.2 C201,162.2 201,152.2 380,152.2 L380,254 C201,254 201,264 22,264 Z" fill="#5FB0A6" opacity="0.20" />
+
+        <!-- ribbons: household -> sinks -->
+        <path d="M394,24 C576,24 576,24 758,24 L758,122.1 C576,122.1 576,122.1 394,122.1 Z" fill="#C9A24B" opacity="0.32" />
+        <path d="M394,122.1 C576,122.1 576,130.1 758,130.1 L758,167.1 C576,167.1 576,159.1 394,159.1 Z" fill="#D9695A" opacity="0.32" />
+        <path d="M394,159.1 C576,159.1 576,175.1 758,175.1 L758,200.7 C576,200.7 576,184.7 394,184.7 Z" fill="#EAE6DD" opacity="0.16" />
+        <path d="M394,184.7 C576,184.7 576,208.7 758,208.7 L758,236 C576,236 576,212 394,212 Z" fill="#9AD5CB" opacity="0.36" />
+        <path d="M394,212 C576,212 576,244 758,244 L758,286 C576,286 576,254 394,254 Z" fill="#7FA8D9" opacity="0.36" />
+
+        <!-- nodes -->
+        <rect x="8"   y="24"    width="14" height="128.2" fill="#5FB0A6" />
+        <rect x="8"   y="162.2" width="14" height="101.8" fill="#5FB0A6" opacity="0.7" />
+        <rect x="380" y="24"    width="14" height="230"   fill="#EAE6DD" opacity="0.55" />
+        <rect x="758" y="24"    width="14" height="98.1"  fill="#C9A24B" />
+        <rect x="758" y="130.1" width="14" height="37"    fill="#D9695A" />
+        <rect x="758" y="175.1" width="14" height="25.6"  fill="#EAE6DD" opacity="0.6" />
+        <rect x="758" y="208.7" width="14" height="27.3"  fill="#9AD5CB" />
+        <rect x="758" y="244"   width="14" height="42"    fill="#7FA8D9" />
+
+        <!-- labels -->
+        <text class="svg-label" x="30" y="82">Your pay</text>
+        <text class="svg-sub"   x="30" y="95">$180,805</text>
+        <text class="svg-label" x="30" y="209">Partner pay</text>
+        <text class="svg-sub"   x="30" y="222">$143,639</text>
+
+        <text class="svg-label" x="387" y="16" text-anchor="middle" fill="#7A8A8E">household</text>
+        <text class="svg-sub"   x="387" y="268" text-anchor="middle">$324,444</text>
+
+        <text class="svg-label" x="750" y="69"  text-anchor="end" fill="#C9A24B">Housing</text>
+        <text class="svg-sub"   x="750" y="82"  text-anchor="end">$138,315</text>
+        <text class="svg-label" x="750" y="145" text-anchor="end" fill="#D9695A">Kids</text>
+        <text class="svg-sub"   x="750" y="158" text-anchor="end">$52,233</text>
+        <text class="svg-label" x="750" y="188" text-anchor="end">Living</text>
+        <text class="svg-sub"   x="750" y="200" text-anchor="end">$36,161</text>
+        <text class="svg-label" x="750" y="219" text-anchor="end" fill="#9AD5CB">→ taxable</text>
+        <text class="svg-sub"   x="750" y="231" text-anchor="end">$38,471</text>
+        <text class="svg-label" x="750" y="262" text-anchor="end" fill="#7FA8D9">→ 401k</text>
+        <text class="svg-sub"   x="750" y="274" text-anchor="end">$59,264</text>
+      </svg>
+      <figcaption>
+        Housing is <b>43% of everything the household earns</b> and more than the two savings channels
+        combined. That sentence is technically present in your trace table's <code>housing</code>
+        column, but nobody reads a column and feels it. This is the argument for the Sankey.
+      </figcaption>
+    </figure>
+
+    <h3>Age 50 — retired, six years in, still locked out</h3>
+
+    <figure>
+      <svg viewBox="0 0 780 320" role="img" aria-label="Sankey diagram at age 50 showing the taxable account funding all spending while the 401k is sealed behind the 59 and a half wall">
+        <!-- live ribbons -->
+        <path d="M22,26 C390,26 390,26 758,26 L758,83 C390,83 390,83 22,83 Z" fill="#C9A24B" opacity="0.32" />
+        <path d="M22,83 C390,83 390,91 758,91 L758,147.5 C390,147.5 390,139.5 22,139.5 Z" fill="#B48EAD" opacity="0.32" />
+        <path d="M22,139.5 C390,139.5 390,155.5 758,155.5 L758,212 C390,212 390,196 22,196 Z" fill="#EAE6DD" opacity="0.16" />
+
+        <rect x="8"   y="26"    width="14" height="170"  fill="#9AD5CB" />
+        <rect x="758" y="26"    width="14" height="57"   fill="#C9A24B" />
+        <rect x="758" y="91"    width="14" height="56.5" fill="#B48EAD" />
+        <rect x="758" y="155.5" width="14" height="56.5" fill="#EAE6DD" opacity="0.6" />
+
+        <text class="svg-label" x="30" y="105" fill="#9AD5CB">Taxable cash</text>
+        <text class="svg-sub"   x="30" y="118">drawdown $302,176</text>
+        <text class="svg-sub"   x="30" y="131">balance $1.80M → $1.57M</text>
+
+        <text class="svg-label" x="750" y="50"  text-anchor="end" fill="#C9A24B">Housing</text>
+        <text class="svg-sub"   x="750" y="63"  text-anchor="end">$101,282</text>
+        <text class="svg-label" x="750" y="115" text-anchor="end" fill="#B48EAD">College</text>
+        <text class="svg-sub"   x="750" y="128" text-anchor="end">$100,447</text>
+        <text class="svg-label" x="750" y="180" text-anchor="end">Living</text>
+        <text class="svg-sub"   x="750" y="193" text-anchor="end">$100,447</text>
+
+        <!-- the wall -->
+        <line x1="300" y1="228" x2="300" y2="308" stroke="#D9695A" stroke-width="1.5" stroke-dasharray="5 4" />
+        <text class="svg-tag" x="310" y="252" fill="#D9695A">sealed until 59½</text>
+        <text class="svg-sub" x="310" y="267" fill="#7A8A8E">9.5 years away</text>
+
+        <!-- severed channel -->
+        <path d="M22,240 L300,240 L300,296 L22,296 Z" fill="#7FA8D9" opacity="0.13" />
+        <rect x="8" y="240" width="14" height="56" fill="#7FA8D9" opacity="0.55" />
+        <line x1="288" y1="256" x2="312" y2="280" stroke="#D9695A" stroke-width="2.5" />
+        <line x1="312" y1="256" x2="288" y2="280" stroke="#D9695A" stroke-width="2.5" />
+
+        <text class="svg-label" x="30" y="262" fill="#7FA8D9">401k / IRA</text>
+        <text class="svg-sub"   x="30" y="275" fill="#7FA8D9">$2,480,383 · +$96,325 growth</text>
+        <text class="svg-sub"   x="30" y="288" fill="#7A8A8E">funds nothing this year</text>
+
+        <line x1="0" y1="222" x2="780" y2="222" stroke="#26424B" />
+      </svg>
+      <figcaption>
+        <b>This is the diagram the app has been missing.</b> The line chart tells you the bridge is
+        binding; the Sankey shows you a $2.48M channel with an X through it while a shrinking cash
+        account carries $302k of bills alone. The locked pot is <b>8× the annual drain</b> and
+        contributes nothing. Twelve years later the picture inverts exactly: at 62 the taxable node is
+        $0 and the same 401k channel funds every dollar of the $138,161 spend.
+      </figcaption>
+    </figure>
+
+    <h3>Build notes</h3>
+    <ul class="measure">
+      <li>
+        <strong>Add a year scrubber.</strong> Dragging across ages makes daycare appear and vanish, the
+        mortgage clear at 61, and the locked channel snap open at 59½. That's the whole plan as one
+        gesture.
+      </li>
+      <li>
+        <strong>Flows must balance — which is a feature.</strong> Your model permits negative taxable
+        balances, so in an underwater year the sinks exceed the sources. Give the deficit its own
+        coral source node labelled <em>borrowed</em>. A Sankey makes an implicit loan impossible to
+        miss, where the line chart only shades it.
+      </li>
+      <li>
+        <strong>Reuse <code>C</code> directly</strong> — housing brass, kids coral, taxable liquid,
+        401k locked-blue. The Sankey then reads as the same object as the chart legend rather than a
+        second visual language.
+      </li>
+      <li>
+        Recharts ships a <code>&lt;Sankey&gt;</code> component, but it's rigid about node placement and
+        won't do the severed-channel treatment above. Given how much bespoke SVG the chart panel
+        already contains, hand-rolling ~40 lines of path math is likely less work than fighting it.
+      </li>
+    </ul>
+  </section>
+
+  <!-- ============================================================ 4 -->
+  <section>
+    <div class="q">
+      <span class="q-num">04</span>
+      <p class="q-text">Elaborate on scenario landing pages — how do they look, and how is that the same work as presets?</p>
+    </div>
+    <h2>One table of parameter overrides, rendered two ways</h2>
+
+    <p class="measure">
+      A scenario landing page is a real URL — <code>/scenario/dual-income/</code> — serving a real HTML
+      file whose <code>&lt;title&gt;</code>, meta description and opening prose are all about that one
+      situation, with the calculator underneath it <em>already filled in</em> for that situation. The
+      visitor lands from search on a page that appears to have been built for them, and it was, at
+      a marginal cost of about thirty lines of copy.
+    </p>
+
+    <h3>Anatomy of one page</h3>
+
+    <figure>
+      <div class="mock" style="max-width: 620px; margin: 0 auto; gap: 10px;">
+        <div class="row-collapsed" style="border-color:#C9A24B55;">
+          <span class="rc-name" style="color:var(--brass);">&lt;title&gt;</span>
+          <span class="rc-val" style="color:var(--ink);">Coast FIRE calculator for dual-income couples</span>
+        </div>
+        <div class="row-collapsed" style="border-color:#C9A24B55;">
+          <span class="rc-name" style="color:var(--brass);">meta description</span>
+          <span class="rc-val" style="color:var(--mute);">Two salaries, two 401ks, two unlock dates…</span>
+        </div>
+        <div class="tier">
+          <div class="tier-title">h1 + 250 words, pre-rendered</div>
+          <p style="font-size:12px;color:var(--mute);margin:0;line-height:1.6;">
+            Why two incomes change the maths — the second 401k unlocks on a different date, and the
+            horizon runs to whichever of you lives longer.
+          </p>
+        </div>
+        <div class="tier" style="border-color:#5FB0A6;">
+          <div class="tier-title">the calculator, pre-filled</div>
+          <div class="fld"><span>partnerEnabled</span><span>true</span></div>
+          <div class="fld"><span>kids</span><span>[]</span></div>
+          <div class="fld"><span>partnerIncome</span><span>$120,000</span></div>
+        </div>
+        <div class="tier">
+          <div class="tier-title">FAQ · 4–6 questions</div>
+          <p style="font-size:12px;color:var(--mute);margin:0;line-height:1.6;">
+            Long-tail search surface. Schema.org FAQPage markup earns rich results.
+          </p>
+        </div>
+        <div class="preset-row" style="padding-top:2px;">
+          <span class="chip">with kids</span>
+          <span class="chip">single income</span>
+          <span class="chip">with a pension</span>
+          <span class="chip">late starter</span>
+        </div>
+      </div>
+      <figcaption>
+        Only two of these five blocks are per-scenario writing. The rest is the app you already have,
+        plus a parameter override.
+      </figcaption>
+    </figure>
+
+    <h3>Why it's the same work as presets</h3>
+
+    <p class="measure">
+      Because a preset and a landing page are the same record. A preset is
+      <code>{label, params}</code>. A landing page is <code>{label, params}</code> plus copy and a
+      slug. Build the table once and both fall out of it:
+    </p>
+
+    <figure>
+      <div class="flowgrid">
+        <div class="box src">
+          <div class="box-title">one source of truth</div>
+<pre>SCENARIOS = {
+  "dual-income": {
+    label: "Two incomes, no kids",
+    params: {
+      kids: [],
+      partnerEnabled: true,
+      partnerIncome: 120000,
+    },
+    title: "Coast FIRE for…",
+    blurb: "…",
+    faq: [ … ],
+  },
+  "with-kids":     { … },
+  "single-income": { … },
+}</pre>
+        </div>
+
+        <div class="arrow-h">→</div>
+
+        <div style="display:flex; flex-direction:column; gap:14px;">
+          <div class="box out">
+            <div class="box-title">in-app preset chips</div>
+            <ul>
+              <li>Reads <b>label</b> + <b>params</b> only</li>
+              <li>Click → <code>setP({...DEFAULTS, ...params})</code></li>
+              <li>Zero new plumbing — same shape your share links already decode</li>
+            </ul>
+          </div>
+          <div class="box out">
+            <div class="box-title">static landing pages</div>
+            <ul>
+              <li>Reads <b>every</b> field</li>
+              <li>Emits <code>dist/scenario/&lt;slug&gt;/index.html</code></li>
+              <li>Boots the app with <code>params</code> pre-applied</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <figcaption>
+        Ship the preset chips first — they're a day's work and they fix the on-ramp problem from
+        sketch 01 on their own. The landing pages are then a build script over a table that already
+        exists.
+      </figcaption>
+    </figure>
+
+    <div class="callout good">
+      <p>
+        <strong>You have already written this build script.</strong>
+        <code>scripts/build-legal.mjs</code> walks <code>LEGAL_PAGES</code>, renders each to
+        <code>dist/&lt;slug&gt;/index.html</code> with its own title, meta description and
+        <code>robots</code> tag, and cross-links the set in a footer. A scenario generator is that
+        file with <code>SCENARIOS</code> swapped in and the app bundle included instead of inline
+        prose styling. The hard part — clean URLs from a static host without a router — is solved and
+        shipping.
+      </p>
+    </div>
+
+    <h3>Two things to get right</h3>
+    <ol class="measure">
+      <li>
+        <strong>Pre-render the prose into the HTML.</strong> Google executes JavaScript, but
+        inconsistently and on a delay. Since you're generating files at build time anyway, bake the
+        h1, the 250 words and the FAQ into the served markup and let React hydrate around them. This
+        is also what makes the page useful before the bundle parses.
+      </li>
+      <li>
+        <strong>Give the root <code>index.html</code> a description and Open Graph tags.</strong> It
+        currently has a title and nothing else — no description, no <code>og:image</code>, no
+        canonical. Every share link anyone has ever sent unfurls as a bare URL. That's a smaller fix
+        than the landing pages and probably worth more per hour.
+      </li>
+    </ol>
+
+    <div class="callout warn">
+      <p>
+        <strong>Keep the count honest.</strong> Six to eight scenarios that genuinely differ — dual
+        income, single income, with kids, with a pension, already own a home, late starter — is a
+        content strategy. Forty permutations of the same three fields is doorway-page spam, and
+        Google has an explicit policy against it. The test: does the pre-filled state actually change
+        the answer, and does the prose say something that isn't true of the other pages?
+      </p>
+    </div>
+  </section>
+
+  <p class="fin">
+    Figures from <code>simulate(DEFAULTS)</code> at commit <code>bc2e072</code> · survival curves
+    illustrative, pending SSA Period Life Table · mockups use system faces in place of Space Grotesk
+    and JetBrains Mono.
+  </p>
+
+</div>
