@@ -2721,7 +2721,10 @@ function Calculator({ shared, isMobile }) {
                       <Num label="What it's worth today" value={h.price ?? 0} step={25000} onChange={(v) => setHome(i, "price", v)} />
                       <Num label="Mortgage rate %" value={h.rate ?? 0} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
                       <Num label="Payment / mo (P&I)" value={h.monthlyPI ?? 0} step={100} onChange={(v) => setHome(i, "monthlyPI", v)} />
-                      <Num label="Years left" value={h.yearsLeft ?? 0} step={1} onChange={(v) => setHome(i, "yearsLeft", v)} />
+                      {/* a duration, not an age — so anchor the year hint at today rather than at
+                          your current age, and it reads as the year the mortgage clears */}
+                      <Num label="Years left" value={h.yearsLeft ?? 0} step={1} yearRef={0}
+                        onChange={(v) => setHome(i, "yearsLeft", v)} />
                       <Num label="Property tax / yr ($)" value={h.propTaxAnnual ?? 0} step={500} onChange={(v) => setHome(i, "propTaxAnnual", v)} />
                       <Num label="Ins + maint / yr ($)" value={h.insMaintAnnual ?? 0} step={500} onChange={(v) => setHome(i, "insMaintAnnual", v)} />
                     </div>
