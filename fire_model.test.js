@@ -769,11 +769,21 @@ describe("a partner who keeps working after you retire (opt-in)", () => {
       partnerAge: 24, partnerIncome: 50000, partnerTaxAdv: 7000, partnerPortfolio: 25000, partnerPortfolioTaxAdv: 5000,
       partnerStart: 24, partnerEnd: 65, partnerWorksAfterRetire: true, retirementSpendToday: 60000, coastAge: 40,
     };
-    const s = simulate(p);
+    // Kids now cost real money in retirement (they used to be free once you stopped working), and two
+    // of them are exactly enough to stop this partner from over-covering the bill. The phenomenon being
+    // pinned is about the partner carrying the household, so pin it on the household without kids —
+    // and pin the kids' effect separately, just below.
+    const s = simulate({ ...p, kids: [] });
     expect(s.fireCross).toBe(p.currentAge);          // "retire today" — clamped at the earliest possible instant
     expect(s.rows[0].required).toBeLessThan(0);      // Need < 0: future income already outweighs future spending
     expect(s.end).toBeGreaterThan(1_000_000);        // terminal is a real surplus, NOT drawn to zero
     expect(Number.isNaN(s.end)).toBe(false);
+
+    // …and adding the two kids back is what breaks the over-coverage: their costs land squarely in
+    // the retired years, so the requirement flips positive and the date moves out.
+    const withKids = simulate(p);
+    expect(withKids.rows[0].required).toBeGreaterThan(0);
+    expect(withKids.fireCross).toBeGreaterThan(p.currentAge);
 
     // and it really is the partner carrying it: living at the FULL retirement budget in the interim
     // (so the partner no longer over-covers) restores the ordinary interior crossing and ~$0 terminal.
@@ -1648,6 +1658,56 @@ describe("guaranteed income counts in every year it runs", () => {
   it("still lands the horizon on zero with a stream spanning both phases", () => {
     const s = simulate({ ...BASE, rothLadder: true, enforceAccess: false,
       incomes: [{ label: "SS", amount: 25000, startAge: 58, whose: "you", cola: true }] });
+    expect(Math.abs(s.end)).toBeLessThan(5);
+  });
+});
+
+describe("kids cost the same whether or not you have a job", () => {
+  // THE BUG: kidCostAt() was charged in flows() and absent from retireExpense(), so retiring early
+  // with young children made daycare and school free for their entire childhood. Retire at 40 with a
+  // two-year-old and the model charged $0 a year until college.
+  const EARLY = {
+    ...DEFAULTS, currentAge: 40, partnerEnabled: false, homes: [], kids: [{ birthAge: 38 }],
+    retirementSpendToday: 60000, startPortfolio: 2500000, startPortfolioTaxAdv: 0,
+    startCash: 50000, enforceAccess: false, rentAnnual: 0,
+  };
+
+  it("charges daycare and school in retired years", () => {
+    const s = simulate(EARLY);
+    const retiredKidYears = s.trace.filter((t) => t.phase === "retired" && t.age >= 40 && t.age <= 55);
+    expect(retiredKidYears.length).toBeGreaterThan(0);
+    expect(retiredKidYears.every((t) => t.kids > 0)).toBe(true);
+  });
+
+  it("makes an early retirement with young kids genuinely more expensive", () => {
+    const withKid = simulate(EARLY);
+    const without = simulate({ ...EARLY, kids: [] });
+    expect(withKid.rows[0].required).toBeGreaterThan(without.rows[0].required);
+    expect(withKid.fireCross).toBeGreaterThanOrEqual(without.fireCross);
+  });
+
+  it("still stops charging once they age out", () => {
+    const s = simulate(EARLY);
+    const grown = s.trace.filter((t) => t.age - 38 > 21);
+    expect(grown.length).toBeGreaterThan(0);
+    expect(grown.every((t) => t.kids === 0)).toBe(true);
+  });
+
+  it("both phases read one list, so nothing can be charged in only one of them", () => {
+    // a household that never retires early still sees identical kid costs on either side of the date
+    const s = simulate({ ...DEFAULTS, kids: [{ birthAge: 30 }] });
+    const at = Math.floor(s.fireCross);
+    const before = s.trace.find((t) => t.age === at - 1);
+    const after = s.trace.find((t) => t.age === at + 1);
+    const kidAgeBefore = at - 1 - 30, kidAgeAfter = at + 1 - 30;
+    // both inside the 6-17 band ⇒ the same real cost, regardless of which side of retirement it is
+    if (kidAgeBefore >= 6 && kidAgeBefore <= 17 && kidAgeAfter >= 6 && kidAgeAfter <= 17) {
+      expect(after.kids).toBeCloseTo(before.kids, -2);
+    }
+  });
+
+  it("still lands the horizon on zero with kids spanning the retirement date", () => {
+    const s = simulate({ ...DEFAULTS, kids: [{ birthAge: 38 }], rothLadder: true, enforceAccess: false });
     expect(Math.abs(s.end)).toBeLessThan(5);
   });
 });

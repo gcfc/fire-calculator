@@ -426,23 +426,38 @@ export function simulate(rawP) {
   // Nominal spending in year `age` once retired. retirementSpendToday now EXCLUDES housing —
   // with several homes coming and going there is no single "housing cost" to bake into it, so
   // housing is priced from the homes themselves every year instead of being assumed away.
-  const retireExpense = (age) => {
-    const infl = Math.pow(1 + p.inflation, age - p.currentAge);
-    return p.retirementSpendToday * infl   // non-housing budget
-         + housingAt(age)                  // rent, or carry + P&I on every home owned that year
-         + downAt(age)                     // closing cash on anything bought this year
-         + (netCollege[age] || 0)          // college the 529 didn't cover
-         + (contrib529[age] || 0)          // …and the 529 you are still feeding. Retiring does not
-                                           // stop the sinking fund: if these were left out, any
-                                           // contribution scheduled after retirement would be free
-                                           // money, and a slow 529 would buy you an earlier date.
-         + extraOutflowAt(age)             // one-off life expenses + any debt service still running
-         - incomeAt(age);                  // pension / Social Security / annuity — liquid, offsets the bill.
-                                           // Subtracting it HERE threads it through every retirement
-                                           // consumer at once (the Need curve, the bridge, and the forward
-                                           // drawdown all read retireExpense), and touches nothing in the
-                                           // working-year accumulation, which never calls it.
+  // ---- one flow list, two phases -------------------------------------------
+  // Working years and retired years used to build their cash flow in two independent places —
+  // flows() and retireExpense() — each deciding for itself what a year contains. They drifted, twice:
+  // a pension was subtracted in one and never added in the other, and kid costs were charged in one
+  // and silently free in the other (retire at 40 with a two-year-old and daycare through high school
+  // cost nothing). Both are the same defect: a flow present in one list and missing from the other.
+  //
+  // So there is now ONE list. Each entry says what it costs in a given year and which phases it
+  // applies to, and both phases read it through the same evaluator. A new cost cannot be added to
+  // half the model any more, because there is no longer a half to add it to.
+  //
+  // `household` is the one genuinely phase-dependent line: your working budget before you retire,
+  // your retirement budget after. Everything else is charged in both.
+  const HOUSEHOLD = "household", KIDS = "kids", HOUSING = "housing", LUMPS = "lumps", INCOME = "income";
+  const flowList = (age, phase) => {
+    const infl = inflAt(age);
+    const retired = phase === "retired";
+    return [
+      { key: HOUSEHOLD, amount: (retired ? p.retirementSpendToday : p.nonHousingLiving) * infl },
+      { key: HOUSING, amount: housingAt(age) },
+      // charged in BOTH phases — a child at home costs the same whether or not you have a job
+      { key: KIDS, amount: kidCostAt(age) },
+      { key: LUMPS, amount: downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age) },
+      // pension / Social Security / annuity: negative because it offsets the bill rather than adding
+      // to it. Liquid, so it also shrinks the pre-59.5 bridge.
+      { key: INCOME, amount: -incomeAt(age) },
+    ];
   };
+  const flowTotal = (age, phase) => flowList(age, phase).reduce((s, f) => s + f.amount, 0);
+  const flowOf = (age, phase, key) => flowList(age, phase).find((f) => f.key === key).amount;
+
+  const retireExpense = (age) => flowTotal(age, "retired");
 
   // ---- one partner still earning after you retire (opt-in) ------------------
   // Their earn-window [earnFrom, earnTo] is fixed in the partner's OWN age, so it is independent of
@@ -682,14 +697,16 @@ export function simulate(rawP) {
     // subtracts incomeAt(); working years never call it, so a pension or Social Security claimed
     // while still employed used to vanish entirely — $40k/yr for five working years changed the
     // balances, and the retirement date, by exactly nothing.
-    const takeHome = takeHomeNet * infl + (partnerOn ? partnerIncomeNet * infl : 0) + incomeAt(age);
+    const salary = takeHomeNet * infl + (partnerOn ? partnerIncomeNet * infl : 0);
     const taxAdvYou = p.annualTaxAdv * infl;
     const taxAdvPartner = partnerOn ? p.partnerTaxAdv * infl : 0;
-    const living = p.nonHousingLiving * infl;
-    const housing = housingAt(age);
-    const kidCost = kidCostAt(age);
-    // every lump (down payments, college, 529, life expenses, debt service) comes out of taxable
-    const lumps = downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age);
+    // the SAME list the retired phase reads, asked for the working phase — so nothing can be charged
+    // in one and forgotten in the other. `-INCOME` because the list stores it as a negative outflow.
+    const living = flowOf(age, "working", HOUSEHOLD);
+    const housing = flowOf(age, "working", HOUSING);
+    const kidCost = flowOf(age, "working", KIDS);
+    const lumps = flowOf(age, "working", LUMPS);
+    const takeHome = salary - flowOf(age, "working", INCOME);
     const surplus = takeHome - (living + housing + kidCost);
     // the components ride along so the UI can show WHY a year drains cash, not just that it did
     return { taxable: surplus - lumps, taxAdvYou, taxAdvPartner, save: surplus + taxAdvYou + taxAdvPartner,
@@ -1009,7 +1026,6 @@ export function simulate(rawP) {
       const wFrac = retiredThisYear ? Math.min(1, Math.max(0, T - age)) : (wasWorking ? 1 : 0);
       const rFrac = 1 - wFrac;
       const retiredLiving = (partnerWorks ? interimLiving : p.retirementSpendToday) * infl;
-      const retiredLumps = downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age);
       // Salary in the "pay" column, guaranteed income in "other" — in BOTH phases. flows() now folds
       // the pension into take-home so working years actually receive it, but the trace should still
       // show it for what it is. The two columns are only ever added together downstream, so moving a
@@ -1018,9 +1034,12 @@ export function simulate(rawP) {
       const takeHomeFV   = (f.takeHome - pension) * wFrac * yearFV;
       const otherIncFV   = (pension + partnerTakeHomeAt(age) * rFrac) * yearFV;
       const livingFV     = (f.living * wFrac + retiredLiving * rFrac) * yearFV;
-      const housingFV    = housingAt(age) * yearFV;                 // charged whether you work or not
-      const kidsFV       = f.kidCost * wFrac * yearFV;              // the retirement budget covers the household
-      const lumpsFV      = (f.lumps * wFrac + retiredLumps * rFrac) * yearFV;
+      // housing, kids and lumps are phase-independent in the flow list, so they are charged for the
+      // whole year rather than split across the transition — only the household budget line differs
+      // between working and retired, and only it needs the wFrac/rFrac weighting.
+      const housingFV    = housingAt(age) * yearFV;
+      const kidsFV       = f.kidCost * yearFV;
+      const lumpsFV      = f.lumps * yearFV;
       const contribFV    = ((f.taxAdvYou + f.taxAdvPartner) * wFrac + partnerTaxAdvAt(age) * rFrac) * yearFV;
 
       // What the LOCKED bucket paid out: everything it held (plus this year's contributions and growth)
