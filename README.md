@@ -9,20 +9,30 @@ than the usual "25× your spending" rule of thumb:
 Those are two different constraints, and most calculators only check the first. This one makes you
 clear both.
 
-![age 27 → 101, in today's dollars](#) <!-- screenshot goes here -->
+---
+
+## Contents
+
+- [Why it exists](#why-it-exists)
+- [Quick start](#quick-start)
+- [A guide for people, not programmers](#a-guide-for-people-not-programmers) ← start here if you just want to use it
+- [Software architecture](#software-architecture)
+- [The math](#the-math)
+- [Known limitations](#known-limitations)
+- [Tests](#tests)
 
 ---
 
 ## Why it exists
 
-The naive FIRE number is `annual spending ÷ safe withdrawal rate`. It quietly assumes your
-spending is flat forever, that you own your home outright, that children are free, and that every
-dollar you have saved is available on the day you quit.
+The naive FIRE number is `annual spending ÷ safe withdrawal rate`. It quietly assumes your spending
+is flat forever, that you own your home outright, that children are free, and that every dollar you
+have saved is available on the day you quit.
 
-None of that is true. This model instead prices the actual life: a mortgage that outlives your
-retirement date, daycare that ends, college that lands as a lump in your late forties, a partner
-whose income starts and stops on *their* clock, and — the one almost nobody models — the fact that
-**401k/IRA money is locked until 59½**.
+None of that is true. This model prices the actual life: a mortgage that outlives your retirement
+date, daycare that ends, college that lands as a lump in your late forties, a partner whose income
+starts and stops on *their* clock, a house you might sell, and — the one almost nobody models — the
+fact that **401k/IRA money is locked until 59½**.
 
 The last one is decisive. A household can easily be a millionaire on paper and still be unable to
 retire at 45, because the money is in the wrong *box*.
@@ -36,73 +46,165 @@ npm install
 npm run dev      # http://localhost:5173 — hot-reloads on save
 ```
 
-Other commands:
-
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Dev server with hot reload. |
-| `npm test` | Runs the model's test suite (194 tests, ~5s). |
+| `npm test` | The model's test suite (257 tests, ~6s). |
 | `npm run test:watch` | Same, in watch mode. |
 | `npm run build` | Emits `dist/index.html` — a **single self-contained file** (React and Recharts inlined). Double-click it, email it, or drop it on any static host. |
 | `npm run preview` | Serves the built `dist/` to sanity-check the bundle. |
 
-### Repo layout
-
-```
-fire_model.jsx        the whole thing: the model (simulate) + the UI (FireModel)
-fire_model.test.js    194 tests — every one pins a real bug or an invariant
-index.html            page shell that Vite serves
-src/main.jsx          mounts <FireModel/> into #root
-vite.config.js        React plugin + single-file build
-```
-
-`simulate(params)` is a **pure function** and is exported, so you can drive the model without ever
-mounting the UI:
-
-```js
-import { simulate, DEFAULTS } from "./fire_model.jsx";
-
-const s = simulate({ ...DEFAULTS, annualTakeHome: 160000 });
-console.log(s.fireCross);        // 43.13   <- retire at this age
-console.log(s.fireCrossValue);   // 4561475 <- the number you need at that moment
-console.log(s.fireBridge);       // 2711760 <- how much of it must be reachable before 59.5
-```
-
-`fireCross` is `null` when the inputs never permit retirement — the model says "never" rather than
-inventing an answer. It is *also* null when the only path to a date runs the spendable account
-negative and `allowBorrowing` is off (the default); `fireCrossIfBorrowed` still carries the raw
-crossing in that case, so the UI can say "you'd retire at 44.2, but only on a loan".
+> **Deploying:** GitHub Pages must be set to **GitHub Actions**, not "deploy from a branch". The repo
+> root `index.html` points at raw JSX that no browser can execute, so serving the source directly
+> gives a blank page. The workflow builds and publishes `dist/`.
 
 ---
 
-## How to use it
+## A guide for people, not programmers
 
-**The app opens empty.** Every box is blank, there is no home, kid or partner, and the chart says so
-rather than showing a stranger's projection. Press **Load demo** for a fully worked household you can
-then edit. (The horizon, return, inflation and withdrawal-rate assumptions keep their defaults — a
-slider has no empty state, and they are the figures a first-time visitor is least able to supply.)
+### It opens empty on purpose
 
-**Fill in the left column with your real figures.** Homes and kids are `+`-addable lists — each
-home carries its own price, purchase age, down payment, rate, term, closing costs, property tax and
-upkeep; each kid has their own birth year.
+Every box is blank, and the chart says *"Nothing to plot yet"* rather than showing a stranger's
+projection you would have to overwrite field by field. Press **Load demo** for a fully worked
+household to poke at.
 
-**Read the chart.** Everything is in *today's dollars*.
+Three figures make the question answerable, and the empty panel ticks them off as you fill them in:
+
+1. **Your age** (and the horizon, which keeps a default)
+2. **Retirement spending** — what a year costs once you stop
+3. **Income, or savings to live on** — either will do; someone already retired has no income
+
+Nothing is shown until all three exist. That is not fussiness: with no retirement budget the
+requirement is *zero*, so any balance at all clears it and the model would cheerfully tell an empty
+form "you could stop working today".
+
+### What goes where
+
+| Section | What it is for |
+| --- | --- |
+| **You / Partner** | Age, cash, investments, the slice of investments in a 401k/IRA, take-home pay, contributions, living costs, rent. Every partner field is in **their** age, not yours. |
+| **Retirement** | What a year costs once you stop (excluding housing — homes price themselves), your horizon, and optional coast FIRE. |
+| **Homes** | Any number. Each carries its own price, purchase age, down payment, rate, term, closing costs, property tax and upkeep — and an optional **sale age**. |
+| **Kids** | Any number, each with a name and their own clock. Cost fields appear only for phases a child has not already aged out of. |
+| **Major expenses / income** | One-offs and windows. Datable at an age, or **relative to retirement**. |
+| **Retirement income** | Pensions, Social Security, annuities. Streams, not pots. |
+| **Debts** | Balance, rate and the payment you actually make; the payoff age is derived. |
+| **Advanced** | The 59½ rule, Roth ladder, borrowing, college funding, and every rate assumption. |
+
+Type a figure you know; drag the slider under it for one you are feeling out. The slider's range is a
+soft window that recentres as you go, so it never refuses a number you type.
+
+### Reading the chart
+
+Everything is in **today's dollars**.
 
 | Mark | Meaning |
 | --- | --- |
 | **Teal line** | Your portfolio, total. |
 | **Brass dashed** | What you'd need *in total* at each age for the money to survive the horizon. It falls as your remaining life shortens and mortgages burn off. |
-| **Coral dashed** | The **bridge** — the slice that must sit in a *taxable* account, because 401k dollars are unreachable before 59½. |
-| **Pale line** | Your taxable (reachable) money. |
+| **Coral dashed** | The **bridge** — the slice that must be reachable *now*, because 401k dollars are sealed before 59½. |
+| **Pale line** | Your spendable money: cash plus taxable investments. |
+| **Brass dotted** | Home equity. Deliberately *not* part of the portfolio — you cannot spend a house. |
 | **Purple dashed** | The **coast** bar — stop saving today, still retire on time. |
 | **Brass dot** | Retirement: where teal clears brass **and** pale clears coral, whichever binds last. |
 
 Every series is a clickable chip below the chart — the legend *is* the control.
 
-**Then read "What moves the needle"** at the bottom. Each row is a full re-run of the model with one
-input changed, reported in *years of retirement bought*. It is the honest answer to "so what should
-I actually do?", and it will usually tell you something uncomfortable — like that a single point of
-assumed investment return outweighs every decision you can actually make.
+### The four panels underneath
+
+- **Where the money goes** — one year's cash flow as a Sankey, with a slider to drag across the whole
+  plan. Watch daycare appear and vanish, the mortgage clear, and the retirement accounts sit sealed
+  while your savings carry the bills alone.
+- **Will it survive history?** — your plan replayed against real sequences of returns since 1928.
+- **Trace the numbers** — the year-by-year arithmetic behind every line on the chart.
+- **What moves the needle** — each row is a full re-run of the model, ranked in years of retirement
+  bought.
+
+### Sharing
+
+Two kinds of link, both encoded into the URL — there is no backend and nothing is stored anywhere:
+
+- **Plot only** — the chart, without your numbers.
+- **Full details** — the whole calculator, pre-filled and editable.
+
+---
+
+## Software architecture
+
+```
+fire_model.jsx        the model (simulate) and the UI (FireModel) — ~4,000 lines
+history.js            annual US market returns since 1928, bundled not fetched
+fire_model.test.js    257 tests — every one pins a real bug or an invariant
+legal.js              privacy/terms copy
+scripts/build-legal.mjs  renders legal.js to dist/<slug>/index.html
+index.html            page shell Vite serves
+src/main.jsx          mounts <FireModel/> into #root
+vite.config.js        React plugin + single-file build
+```
+
+### The shape of it
+
+`simulate(params)` is a **pure function**, exported, and costs about a millisecond. Everything else
+is built on that fact:
+
+```js
+import { simulate, DEFAULTS } from "./fire_model.jsx";
+
+const s = simulate({ ...DEFAULTS, annualTakeHome: 160000 });
+s.fireCross;        // 43.37   <- retire at this age
+s.fireCrossValue;   // 4645396 <- the number you need at that moment
+s.fireBridge;       // 2763979 <- how much of it must be reachable before 59.5
+```
+
+Because it is pure and cheap, features that would otherwise need bespoke maths are just *more calls*:
+
+| Feature | How it works |
+| --- | --- |
+| **What moves the needle** | Re-runs the whole model once per lever and reports the change in retirement age. Not a rule of thumb — a one-at-a-time finite-difference sensitivity analysis. |
+| **Allocation advice** | Binary-searches the smallest shift from 401k to taxable that captures the gain. |
+| **Phase-relative expenses** | Iterates to a fixed point (see [§10](#10-phase-relative-expenses)). |
+| **Backtesting** | Replays the forward path once per historical sequence. |
+
+### Three layers, and the boundary between them
+
+1. **`normalizeParams` / `isRunnable` / `planReadiness`** — input hygiene. The app opens with blank
+   boxes, so `simulate` is called with `""` in most fields on the first render, and `"" + 5` is the
+   string `"5"`. Coercing once, up front, is what keeps a blank form from producing string arithmetic
+   deep inside the model.
+2. **`simulateOnce`** — the model proper. Deterministic, pure, no React.
+3. **`simulate`** — wraps `simulateOnce` in the fixed-point iteration that phase-relative expenses
+   need, and short-circuits to a single call when there aren't any.
+
+### One flow list, two phases
+
+Working years and retired years used to build their cash flow in two independent places, each
+deciding for itself what a year contained. **They drifted, twice** — a pension was subtracted in one
+and never added in the other, and kid costs were charged in one and silently free in the other.
+
+There is now one list. Each entry says what it costs in a given year and which phase it belongs to;
+`household` is the only genuinely phase-dependent line (working budget before you retire, retirement
+budget after) and everything else is charged in both. A cost cannot be added to half the model,
+because there is no longer a half to add it to.
+
+### Replay hooks
+
+Backtesting does **not** re-solve the plan. You make a plan on an assumption and then test it against
+what happened, so the planning rate keeps driving `Need[]`, the bridge and the date, while a sampled
+sequence drives only the forward path. That split is the whole of it: two optional inputs
+(`__returns`, `__fixedRetireAt`) and no duplicated drawdown accounting — which matters, because a
+second copy of that accounting is exactly how the two bugs above happened.
+
+### State and rendering
+
+- One `useState` holding the entire parameter object; every input is a controlled edit into it.
+- `useMemo` on `simulate(p)` — one model run per keystroke, plus one for the gate-off comparison.
+- The chart is Recharts; the Sankey is hand-rolled SVG (Recharts' Sankey cannot express a severed
+  channel, and the chart panel already contains a lot of bespoke SVG).
+- Backtesting is **on demand**. A few hundred trials is most of a second, and a success rate that
+  flickers while you type reads as noise rather than as a result. Results clear on any input change,
+  so a stale figure can never sit under new numbers.
+- No backend, no account, no analytics, no network calls. The market data is bundled for the same
+  reason.
 
 ---
 
@@ -128,60 +230,59 @@ value. A balance $B$ earning $r$ while $c$ per year flows in becomes $B\,G^{t} +
 **This matters.** It is what allows retirement to happen at a real-valued instant like age 43.93
 rather than snapping to a birthday — see [§7](#7-solving-for-the-retirement-instant).
 
-### 1. Homes
+### 1. Four buckets
 
-Each home is an independent stream of cash. For a home of price $P$, down payment fraction $d$,
-annual rate $i$, term $n$ years, bought at age $a_0$:
+| Bucket | Rate | Reachable before 59½? |
+| --- | --- | --- |
+| **Cash** | `cashReturn` (4% default) | yes |
+| **Taxable investments** | `nominalReturn` | yes |
+| **Your 401k / IRA** | `nominalReturn` | no |
+| **Partner's 401k / IRA** | `nominalReturn` | no |
+
+**Spendable** = cash + taxable investments. That is the quantity the bridge is measured against.
+Cash is drawn down first — spending savings before selling assets is what actually happens.
+
+### 2. Homes
+
+For a home of price $P$, down payment fraction $d$, annual rate $i$, term $n$ years, bought at age $a_0$:
 
 $$L = P(1-d) \qquad
 \text{P\&I}_{\text{yr}} = 12 \cdot \frac{L \cdot \tfrac{i}{12}\left(1+\tfrac{i}{12}\right)^{12n}}
 {\left(1+\tfrac{i}{12}\right)^{12n} - 1}$$
 
-the standard level-payment amortisation, and it runs from $a_0$ until $a_0 + n$. Cash needed at
-closing is $(d + c)P$ for closing-cost fraction $c$. Carrying costs at age $a$:
+the standard level-payment amortisation. Cash needed at closing is $(d + c)P$. Carrying costs at age $a$:
 
-$$\text{carry}(a) = P \cdot \tau \cdot 1.02^{\,a - a_0} \;+\; P \cdot m \cdot (1+\pi)^{\,a-a_0}$$
+$$\text{carry}(a) = P \tau \cdot 1.02^{\,a - a_0} \;+\; P m (1+\pi)^{\,a-a_0}$$
 
-for property-tax rate $\tau$, upkeep+insurance rate $m$, inflation $\pi$. Property tax drifts at 2%
-(Prop-13-style assessment growth); upkeep tracks inflation.
+Property tax drifts at 2% (Prop-13-style assessment growth); upkeep tracks inflation.
 
-Total housing in a year is the sum of carry plus live P&I over every home owned by then — **plus
-rent, for as long as you own nothing to live in**.
+**Value and sale.** A home appreciates at `homeGrowth`, and principal outstanding follows the
+standard remaining-balance formula. Selling at age $a_s$ pays
 
-> ⚠️ **Known limitation.** Homes have **no equity and no resale value** — they are pure expense. So
-> "rent forever" is the single strongest lever in the model *by construction*. Don't read that as
-> advice; read it as a missing feature.
+$$\text{net} = V(a_s)\,(1 - \text{sellCost}) - \text{owed}(a_s)$$
 
-### 2. Kids
+into the taxable account, stops carry and P&I, and — if it was your only home — puts you back on
+rent. The net can be negative; the model lets a sale underwater stand rather than pretending a sale
+always pays.
+
+Equity ($V - \text{owed}$) rides on every row as its own chart series and is deliberately **not**
+part of the portfolio. You cannot spend a house.
+
+### 3. Kids
 
 Each kid costs `daycarePerKid` from age 0–5, `ongoingPerKid` from 6–17, and `collegePerKid` at 18
-(or spread over 18–21). All in today's dollars, inflated to the year they land.
+(or spread over 18–21). All in today's dollars, inflated to the year they land — and charged in
+**both** phases. A child at home costs the same whether or not you have a job.
 
-### 3. The 529 (optional)
+### 4. The 529 (optional)
 
-A side fund that compounds at the same $r$ and pays tuition first. It targets the present value of
-remaining college,
-
-$$\text{pv}_{\text{college}}(a) = \frac{\text{pv}_{\text{college}}(a{+}1) + \text{tuition}(a)\cdot \mathrm{fv}(1)}{G}$$
-
-and contributes up to the annual cap but never past that target, so it cannot overfund.
+A side fund compounding at the same $r$, paying tuition first. It targets the present value of
+remaining college and contributes up to the annual cap but never past that target, so it cannot
+overfund.
 
 > ⚠️ **In this model a 529 is a no-op.** It cannot help, because *no taxes are modelled* — and
 > tax-free growth is the entire point of a 529. The tests pin it as exactly wealth-neutral, so that
-> if it ever *does* start "helping", something has broken. (It used to: it compounded on year-end
-> lumps while the portfolio compounded continuously, so it silently destroyed ~3.4% of every
-> contribution.)
-
-### 4. Retirement spending
-
-`retirementSpendToday` **excludes housing** — housing is priced from the homes themselves every
-year, so baking a paid-off house into it would double-count. Nominal spending in year $a$:
-
-$$E(a) = \underbrace{S\,(1+\pi)^{a - a_{\text{now}}}}_{\text{non-housing}}
-\;+\; \text{housing}(a)
-\;+\; \text{downPayments}(a)
-\;+\; \text{college}_{\text{net of 529}}(a)
-\;+\; \text{529 contributions}(a)$$
+> if it ever *does* start "helping", something has broken.
 
 ### 5. The requirement curve — `Need`
 
@@ -191,179 +292,189 @@ horizon and land **exactly on zero**. By backward induction from `Need(END+1) = 
 $$\text{Need}(a) = \frac{\text{Need}(a{+}1) + E(a)\cdot \mathrm{fv}(1)}{G}$$
 
 The $\mathrm{fv}(1)$ factor is there because the balance keeps compounding *while* it is being spent
-down. Evaluated at any real instant $t = a + f$:
+down. This is the **brass dashed curve**.
 
-$$\text{Need}(t) = \frac{\text{Need}(a{+}1) + E(a)\cdot \mathrm{fv}(1-f)}{G^{\,1-f}}$$
+### 6. Two rates, one requirement
 
-This is the **brass dashed curve**.
-
-### 6. The bridge — the age-59½ constraint
-
-`Need` answers *"is there enough money?"*. It does **not** answer *"can you legally touch it?"*.
-
-The portfolio is split into three buckets: **taxable**, **your tax-advantaged**, and **your
-partner's**. Each tax-advantaged bucket unlocks at *its own owner's* 59½. Retiring at instant $T$,
-bucket unlock time is
-
-$$u = \begin{cases}
-\text{access age} & \text{hard gate} \\
-\min(\text{access age},\; T + 5) & \text{Roth conversion ladder}
-\end{cases}$$
-
-(a conversion ladder seasons each conversion for 5 years — but you'd never wait past the statutory
-age, hence the `min`.)
-
-The **bridge** is what taxable alone must cover before the locked money opens. With buckets sorted
-by unlock time, each contributes a checkpoint — taxable plus everything already unlocked must cover
-all spending up to the next unlock:
-
-$$\text{Bridge}(T) = \max_j \left[ \int_T^{u_j} E(s)\,e^{-\delta (s-T)}\,ds \;-\; \sum_{k:\,u_k < u_j} B_k \right]$$
-
-evaluated piecewise per year. This is the **coral dashed curve**.
-
-### 7. Solving for the retirement instant
-
-You may retire only when **both** hold:
-
-$$\underbrace{\text{total}(t) \;\ge\; \text{Need}(t)}_{\text{enough money}}
-\qquad\text{and}\qquad
-\underbrace{\text{taxable}(t) \;\ge\; \text{Bridge}(t)}_{\text{reachable in time}}$$
-
-so the binding gap is $\;g(t) = \min\big(\text{total} - \text{Need},\ \text{taxable} - \text{Bridge}\big)$,
-and **retirement $T$ is the root $g(T) = 0$** — found by bisection inside the year where $g$ changes
-sign, to a real-valued instant.
-
-Because `Need` is *defined* as the balance that lands on zero at the horizon, retiring exactly at
-$T$ makes the terminal balance **zero by construction**. That is not a coincidence, it's the check:
-
-- If **total wealth** binds → you end at exactly \$0.
-- If **liquidity** binds → you end with a genuine surplus, because the gate *forced* you to
-  over-save. That surplus is real, not an artifact.
-
-> This replaced an earlier version that retired at `ceil(fireCross)`. Because the decision snapped to
-> a whole year while the inputs moved smoothly, the terminal balance **sawtoothed** — climbing to
-> \$3.92M and collapsing to \$0.30M between two adjacent salary inputs. The suite now sweeps inputs in
-> \$250 steps and asserts the terminal balance never moves by more than \$1.
-
-### 8. Coast FIRE
-
-"Coast" = stop saving, keep working, let the pot compound untouched until you retire at `coastAge`.
-So the coast bar is just the retirement requirement at the coast target, discounted back with **no
-further contributions**:
-
-$$\text{Coast}(t) = \frac{\text{Need}(\text{coastAge})}{G^{\,\text{coastAge} - t}}$$
-
-It therefore **meets the `Need` curve exactly at `coastAge`** — which is both what makes the two
-curves readable together, and how the tests verify it.
-
-### 8b. Cash, and why it forces a two-rate requirement
-
-The portfolio is split into **cash** (savings/checking, earning `cashReturn`) and **investments**
-(earning $r$). Cash is spendable at any age — it counts toward the bridge exactly as taxable
-investments do — and it is **drawn down first**, because spending savings before selling assets is
-what actually happens.
-
-That single change breaks the closed form in [§5](#5-the-requirement-curve--need). `Need(a)` is a
-*single-rate* present value: it assumes every dollar compounds at $r$. Once part of the pot grows at
-$r_c \ne r$, "the balance that lands exactly on zero" is no longer one discounted sum — and the error
-is not symmetric. A cash-heavy household would be handed a date on a pot that then ran dry.
+`Need` above is a *single-rate* present value: it assumes every dollar compounds at $r$. Once cash
+earns $r_c \ne r$, that is no longer the requirement — and the error is not symmetric. A cash-heavy
+household would be handed a date on a pot that then ran dry.
 
 The fix is exact rather than approximate, and it falls out of the draw order. Cash alone carries the
-bill from $t$ until it runs dry at $\tau$, investments compound untouched over that whole stretch,
-and from $\tau$ on it is an ordinary single-rate problem again:
+bill from $t$ until it runs dry at $\tau$, investments compound untouched over that stretch, and from
+$\tau$ on it is an ordinary single-rate problem again:
 
 $$\text{Need}_{\text{total}}(t, C) = C + \frac{\text{Need}(\tau) - \Phi(t,\tau)}{G^{\,\tau - t}}$$
 
-where $\tau$ solves $C\,G_c^{\,\tau-t} = \int_t^\tau E(s)\,G^{\,\tau-s}\,ds$ and $\Phi(t,\tau)$ is the
-future value of everything that flows *into* the non-cash buckets meanwhile — a still-working
-partner's surplus, and their 401k contributions. With $C = 0$ we get $\tau = t$, $\Phi = 0$, and this
-collapses back to $\text{Need}(t)$ exactly, which is what keeps every no-cash invariant intact.
+where $\Phi(t,\tau)$ is the future value of everything flowing *into* the non-cash buckets meanwhile
+— a still-working partner's surplus, and their 401k contributions. With $C = 0$ we get $\tau = t$,
+$\Phi = 0$, and this collapses back to $\text{Need}(t)$ exactly.
 
-The bridge gets the same treatment. Two details make it come out exact rather than close:
+Three details make it exact rather than close:
 
 - The bill is valued at the **portfolio** rate inside the cash recursion, because that is what
-  `spend()` charges over the same stretch. The forward drawdown is this model's ground truth, so the
-  requirement is computed against the arithmetic the drawdown actually uses. Valuing it at the cash
-  rate instead left ~\$6k at the horizon.
+  `spend()` charges over the same stretch. The forward drawdown is this model's ground truth.
 - `spendSpan()` **cuts the year at the instant cash runs dry**, exactly as it already cuts at each
   unlock. A slice that is part cash-funded and part investment-funded charges one bill against two
   growth rates, and no closed form decomposes that.
+- $\Phi$ is not zero whenever income still arrives after you retire. Omitting it left \$1.46M on the
+  table in the partner-keeps-working case.
 
-### 8c. Borrowing
+### 7. The bridge — the age-59½ constraint
+
+`Need` answers *"is there enough money?"*. It does **not** answer *"can you legally touch it?"*.
+
+Each tax-advantaged bucket unlocks at *its own owner's* 59½. Retiring at instant $T$, bucket unlock
+time is $u = \text{access age}$, or $\min(\text{access age},\, T + 5)$ with a Roth conversion ladder.
+
+The **bridge** is what spendable money alone must cover before the locked money opens. With buckets
+sorted by unlock time, each contributes a checkpoint:
+
+$$\text{Bridge}(T) = \max_j \left[\;\Pi\big(T, u_j\big) \;-\; \sum_{k:\,u_k < u_j} B_k \right]$$
+
+where $\Pi$ is the **running maximum** of the partial present value of spending — not the plain
+present value of the whole window.
+
+That distinction is load-bearing. A plain present value nets a late inflow against early spending,
+which is right for the wealth constraint (over the whole horizon a dollar is a dollar, whenever it
+lands) and **wrong** for the liquidity one, because you cannot pay this year's bills out of next
+decade's house sale. Before this, selling a home before 59½ cut the computed bridge so far that the
+model retired you years early, ran the cash account underwater waiting for the proceeds, and reported
+"you never retire" for a plan a later date funds comfortably. It is unchanged whenever spending is
+positive throughout, which is the ordinary case.
+
+This is the **coral dashed curve**.
+
+### 8. Solving for the retirement instant
+
+You may retire only when **both** hold:
+
+$$\underbrace{\text{total}(t) \ge \text{Need}_{\text{total}}(t, C)}_{\text{enough money}}
+\qquad\text{and}\qquad
+\underbrace{\text{spendable}(t) \ge \text{Bridge}(t)}_{\text{reachable in time}}$$
+
+so the binding gap is $g(t) = \min(\text{total} - \text{Need},\ \text{spendable} - \text{Bridge})$,
+and **retirement $T$ is the root $g(T) = 0$** — found by bisection inside the year where $g$ changes
+sign, to a real-valued instant.
+
+Because `Need` is *defined* as the balance that lands on zero at the horizon, retiring exactly at $T$
+makes the terminal balance **zero by construction**. That is the check, not a coincidence:
+
+- If **total wealth** binds → you end at exactly \$0.
+- If **liquidity** binds → you end with a genuine surplus, because the gate *forced* you to
+  over-save.
+
+### 9. Borrowing
 
 The model has always permitted the spendable account to go negative, with the deficit compounding at
 $r$ — an implicit loan. That is now an explicit toggle, **off by default**.
 
 - **Off** — a path that goes underwater is not a fundable plan, so `fireCross` is `null`. The full
-  simulated path is still returned, so the chart can show exactly where and why it broke.
+  simulated path is still returned, so the chart can show exactly where it broke, and
+  `fireCrossIfBorrowed` carries the date it would have found.
 - **On** — the date is reported, with a banner naming the age the borrowing starts.
 
-Note this is a *feasibility* rule, not a penalty: with borrowing on, the debt still compounds at the
+This is a *feasibility* rule, not a penalty: with borrowing on, the debt still compounds at the
 portfolio rate rather than a realistic borrowing rate.
 
-### 9. The partner
+### 10. Phase-relative expenses
 
-Every partner *input* is in the **partner's own age** ("earns until 60" means until *they* are 60).
-The timeline is still your age, so exactly one function bridges the frames:
+An expense may be dated at an absolute age, or as an **offset from retirement** — 0 is the year you
+stop, 5 is five years later, −2 is two years before. That makes the schedule depend on the answer
+while the answer depends on the schedule, so `simulate` resolves it as a fixed point: run with
+nothing anchored, feed the date back in, run again, stop when it settles.
+
+It converges quickly because an expense pushed later has less present value and so pushes the date
+back less. A plan with no retirement-dated expense runs `simulateOnce` exactly once.
+
+### 11. Coast FIRE
+
+"Coast" = stop saving, keep working, let the pot compound untouched until you retire at `coastAge`:
+
+$$\text{Coast}(t) = \frac{\text{Need}(\text{coastAge})}{G^{\,\text{coastAge} - t}}$$
+
+It therefore **meets the `Need` curve exactly at `coastAge`**. Ticking the box without giving an age
+draws nothing — a blank age would otherwise clamp to "coast to next year", a target nobody chose.
+
+### 12. The partner
+
+Every partner *input* is in the **partner's own age**. The timeline is still your age, so exactly one
+function bridges the frames:
 
 $$\text{partnerAge}(a) = a - \Delta, \qquad \Delta = \text{yourAge}_{\text{now}} - \text{partnerAge}_{\text{now}}$$
 
-The partner enters through three channels:
+The partner enters through three channels: their income and their own 401k over their own working
+window; their accounts unlocking at *their* 59½ (an older partner shortens your bridge); and the
+horizon, since the money must outlive the last survivor, so
+$\text{END} = \text{endAge} + \max(0, \Delta)$.
 
-1. **Income + their own 401k**, over their own working window.
-2. **Their accounts unlock at their own 59½** — an older partner shortens your bridge; a younger one
-   lengthens it.
-3. **The horizon.** The money must outlive the *last survivor*, so
-   $\text{END} = \text{endAge} + \max(0, \Delta)$. A partner 8 years younger stretches the horizon
-   8 years past your own end age.
+### 13. Backtesting
 
-### 10. What moves the needle
+Bundled annual US data since 1928 — S&P total return, 10-year Treasury total return, CPI. Returns are
+converted to **real** and re-expressed at the model's own inflation assumption, so spending keeps
+inflating the way the rest of the model believes while the portfolio earns the sequence's real
+return.
 
-`simulate` is pure and costs ~1ms, so instead of offering rules of thumb the app **re-runs the whole
-model once per lever** and reports the change in retirement age. This is a one-at-a-time
-finite-difference sensitivity analysis. Two honest caveats: the step sizes are *not* normalised
-(a \$10k salary bump against a \$100k house price), so ranking across rows is a judgment call rather
-than an elasticity; and it's strictly one-at-a-time, so interactions are invisible.
+Two methods:
+
+- **Historical cycles** — replay each contiguous run of years in the order it occurred, keeping 1929
+  followed by 1930. Few independent samples: a 76-year plan leaves ~20 complete windows in a century
+  of data, and neighbouring windows share all but one year.
+- **Block bootstrap** — stitch random five-year blocks. Unlimited samples, at the cost of sequences
+  that never happened. Drawing single years would destroy the autocorrelation the feature exists to
+  show.
+
+A trial fails if it ends below zero *or* could only continue by borrowing.
+
+> **The number that explains the others.** The demo's assumed return is 3.9% real; an 80/20 mix
+> actually returned about 7.2% real across 1928–2024. Three points compounded over a seventy-year
+> horizon is a hundredfold difference in the terminal balance, which is why the runs finish so far
+> above zero. That gap is a finding about your assumptions, not a bug, and the panel says so.
 
 ---
 
 ## Known limitations
 
-These are all things the model *deliberately* does not do. Each one biases the answer in a known
-direction:
+Each biases the answer in a known direction:
 
 | Limitation | Effect on the answer |
 | --- | --- |
-| **Homes have no equity or resale value** — pure expense | Makes "rent forever" look far better than it is. The biggest gap. |
 | **No taxes anywhere** | Traditional 401k withdrawals are free, so the number is **too low**. Also makes the 529 pointless. |
-| **No Social Security** | Pushes the number **too high**. |
-| **Deterministic returns** — one fixed rate, no sequence risk | The single retirement age is a midpoint, not a promise. |
+| **No Social Security estimate** | You must enter a figure yourself. Nobody knows theirs. |
+| **No healthcare / ACA modelling** | Often the largest single early-retirement expense line. |
+| **Deterministic planning rate** | The single retirement age is a midpoint, not a promise. Backtesting is a separate panel, not the headline. |
 | **Borrowing is opt-in and off by default** | A plan that only balances on an implicit loan gets *no* date. Turning it on reports one, with the debt compounding at $r$ rather than a real borrowing rate. |
-| **Cash earns one flat rate** | No tiering, no rate changes over time. |
-| **Lumps accrue continuously** across their year | Understates a point-in-time down payment by ~3%. Enough to flip a knife-edge buy-vs-finance call. |
+| **One flat rate per bucket** | No asset-allocation glide path, no rate tiering. |
+| **Home appreciation is one flat rate** | No regional variation, no cycles. |
+| **Lumps accrue continuously** across their year | Understates a point-in-time down payment by ~3%. |
+| **US-shaped** | 59½, 401k, 529, Roth ladders. No other tax regime. |
+
+Historical data caveats: index funds did not exist before 1972, so pre-1972 returns were not actually
+attainable at these costs; and this is US data over the century in which the US won, which
+survivorship bias cannot see.
 
 ---
 
 ## Tests
 
 ```bash
-npm test     # 194 tests
+npm test     # 257 tests
 ```
 
-Every test pins either a **real bug that was found** or an **invariant that must not break**.
-Notable ones:
+Every test pins either a **real bug that was found** or an **invariant that must not break**. Notable
+ones:
 
 - The terminal-value **sawtooth** can never return (fine input sweeps, $\Delta \le \$1$).
 - **Age-frame invariance**: shift the whole household 5 years forward and years-to-retirement is
   *identical*.
+- The horizon lands on **exactly zero** at every cash weighting, and with a still-working partner.
+- Cash at exactly the portfolio rate is a **no-op** — the split cannot change the date.
 - The 529 is **exactly wealth-neutral**, and never buys an earlier retirement.
-- The tax-advantaged slice **can never exceed the portfolio it slices** (it used to invent money).
-- An **inverted partner earning window** can never silently pay them nothing.
-- Mortgage P&I matches the **closed-form amortisation**; homes stack independently.
-- On the default inputs a lone earner **never affords the house** — and the model must *say* "never"
-  rather than invent an answer.
-- Cash at exactly the portfolio rate is a **no-op**: the split cannot change the date.
-- The horizon still lands on **exactly zero** with cash present, at every cash weighting, and with a
-  still-working partner — the invariant the two-rate requirement exists to protect.
-- Borrowing off **withholds every figure** resting on the blocked date, not just the age.
-- The empty state returns **the same keys** as a real run, so no consumer can hit `undefined`.
+- Kid costs are charged in **both** phases; a pension is received in **both** phases.
+- An earlier home sale retires you earlier; one past the unlock changes the requirement but not the
+  date.
+- A mid-bridge windfall **cannot** fund the years before it arrives.
+- The Sankey's two sides **balance to the dollar**, every year.
+- Backtesting is **deterministic** for a given plan, and leaves plain `simulate()` untouched.
+- The empty state returns **the same keys** as a real run, so no consumer can hit `undefined` — and
+  the retirement-instant row carries every field the yearly rows do.
