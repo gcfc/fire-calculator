@@ -4,6 +4,7 @@ import {
   ReferenceLine, ReferenceDot, ReferenceArea, ResponsiveContainer,
 } from "recharts";
 import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from "lz-string";
+import { historicalCycles, blockBootstrap, seededRandom, HISTORY_FIRST, HISTORY_LAST } from "./history.js";
 
 // ---- palette (ledger / instrument) ----
 const C = {
@@ -189,6 +190,27 @@ function simulateOnce(rawP, retireAnchor) {
   // (Gc^t − 1)/ln Gc as the rate goes to zero is simply t, which is exactly what an account earning
   // nothing does. Cash takes no inflow while you work — surplus is invested, not banked — so growC()
   // is the only cash convention anything needs.
+  // ---- replay hooks ---------------------------------------------------------
+  // Monte Carlo does NOT re-solve the plan. You make a plan on an assumption and then test it against
+  // history, so the planning rate keeps driving Need[], the bridge and the retirement date, while a
+  // sampled sequence drives only the forward path. That split is what makes backtesting an additive
+  // layer instead of a rewrite — and it is why these two hooks are the whole of it.
+  //
+  // `__returns` is a per-year nominal return; `__fixedRetireAt` pins the date so a trial replays the
+  // plan rather than inventing a new one for each sequence.
+  const seq = rawP && rawP.__returns ? rawP.__returns : null;
+  const retAt = (age) => {
+    if (!seq) return ret;
+    const v = seq[Math.floor(age) - p.currentAge];
+    return Number.isFinite(v) ? Math.max(-0.95, v) : ret;
+  };
+  const growAt = (age, dt) => Math.pow(1 + retAt(age), dt);
+  const fvAt = (age, dt) => {
+    const g = 1 + retAt(age), d = Math.log(g);
+    return Math.abs(d) < 1e-12 ? dt : (Math.pow(g, dt) - 1) / d;
+  };
+  const fixedT = rawP && Number.isFinite(rawP.__fixedRetireAt) ? rawP.__fixedRetireAt : null;
+
   const cashRet = Math.max(0, +p.cashReturn || 0);
   const Gc = 1 + cashRet;
   const deltaC = Math.log(Gc);
@@ -843,7 +865,7 @@ function simulateOnce(rawP, retireAnchor) {
   // year, say) it drains the investment account, and settle() then covers that from cash, which is
   // what a buffer is for.
   const work = (st, age, dt) => {
-    const f = flows(age), g = grow(dt), a = fv(dt);
+    const f = flows(age), g = growAt(age, dt), a = fvAt(age, dt);
     return {
       cash: st.cash * growC(dt),
       taxable: st.taxable * g + f.taxable * a,
@@ -860,9 +882,9 @@ function simulateOnce(rawP, retireAnchor) {
   // spend for dt years inside one calendar year, drawing cash first, then taxable investments, then
   // each tax-advantaged bucket that has already opened. `t0..t1` never straddles an unlock.
   const spend = (st, t0, t1, T) => {
-    const age = Math.floor(t0), dt = t1 - t0, g = grow(dt);
+    const age = Math.floor(t0), dt = t1 - t0, g = growAt(age, dt);
     let cash = st.cash * growC(dt), taxable = st.taxable * g, ty = st.taxAdvYou * g, tp = st.taxAdvPartner * g;
-    let owed = retireExpense(age) * fv(dt);
+    let owed = retireExpense(age) * fvAt(age, dt);
     // a year whose income or windfall outruns the bill is INVESTED, never banked — same convention as
     // retireStep() below, and the one needTotalAt() prices against
     if (owed < 0) { taxable += -owed; owed = 0; }
@@ -882,10 +904,10 @@ function simulateOnce(rawP, retireAnchor) {
   const retireStep = (st, t0, t1, T) => {
     const age = Math.floor(t0);
     if (!partnerEarnsInRetirement(age)) return spend(st, t0, t1, T);
-    const dt = t1 - t0, g = grow(dt);
+    const dt = t1 - t0, g = growAt(age, dt);
     let cash = st.cash * growC(dt), taxable = st.taxable * g, ty = st.taxAdvYou * g, tp = st.taxAdvPartner * g;
-    tp += partnerTaxAdvAt(age) * fv(dt);                                  // locked contribution keeps building
-    let owed = (interimExpense(age) - partnerTakeHomeAt(age)) * fv(dt);   // net of take-home
+    tp += partnerTaxAdvAt(age) * fvAt(age, dt);                              // locked contribution keeps building
+    let owed = (interimExpense(age) - partnerTakeHomeAt(age)) * fvAt(age, dt);   // net of take-home
     if (owed < 0) { taxable += -owed; owed = 0; }                         // partner out-earned the bill -> invest it
     const draw = (bal) => { const r = drawFrom(bal, owed); owed -= r.took; return r.bal; };
     cash = draw(cash);
@@ -1063,7 +1085,11 @@ function simulateOnce(rawP, retireAnchor) {
     if (working) {
       // Does the crossing fall inside this year? Solve for the exact instant rather than
       // rounding up to the next birthday.
-      if (gapAt(age, st) >= 0) {
+      if (fixedT != null) {
+        // replaying a plan: retire exactly when the deterministic solve said to, whatever this
+        // particular sequence of returns has done to the balances by now
+        if (fixedT >= age && fixedT < age + 1) T = fixedT;
+      } else if (gapAt(age, st) >= 0) {
         T = age;
       } else if (gapAt(age + 1, step(st, age, 1)) >= 0) {
         let lo = 0, hi = 1;                                  // bisection: gap is increasing in dt
@@ -1307,6 +1333,87 @@ export function simulate(rawP) {
   }
   return out;
 }
+
+// ---- historical backtesting and Monte Carlo ---------------------------------
+// The plan is made on an assumption; this tests it against the sequences that actually happened.
+//
+// Trials REPLAY the plan rather than re-solving it: the deterministic answer fixes the retirement
+// date, and each sequence then drives only the forward path. Re-solving per trial would answer a
+// different and less useful question ("when could I have retired with perfect foresight of the
+// market?") and would cost the bisection on every one of a thousand runs.
+//
+// Returns are converted to REAL and re-expressed at the model's own inflation assumption, so
+// spending keeps inflating the way the rest of the model believes while the portfolio earns the
+// sequence's real return. That keeps the change confined to one number per year.
+export const MC_DEFAULTS = { mode: "historical", trials: 250, stockPct: 80, blockYears: 5, seed: 12345 };
+
+export const runTrials = (p, opts = {}) => {
+  const o = { ...MC_DEFAULTS, ...opts };
+  const plan = simulate(p);
+  if (plan.fireCross == null || !plan.rows.length) return null;
+
+  const years = plan.END + 2 - p.currentAge;
+  const rand = seededRandom(o.seed);
+  const seqs = o.mode === "bootstrap"
+    ? blockBootstrap(years, o.stockPct, Math.max(1, o.trials), Math.max(1, o.blockYears), rand)
+    : historicalCycles(years, o.stockPct);
+
+  const assumedInfl = p.inflation ?? 0;
+  const results = seqs.map(({ label, seq }) => {
+    // real return that year, re-expressed at the model's assumed inflation
+    const returns = seq.map((s) => (1 + s.ret) / (1 + s.infl) * (1 + assumedInfl) - 1);
+    const t = simulate({ ...p, __returns: returns, __fixedRetireAt: plan.fireCross });
+    return {
+      label,
+      end: t.end,
+      // A trial fails if it ran out, or if it could only continue by borrowing. That second half is
+      // free: the model already refuses to fund a plan on an implicit loan, so `illiquidAge` is
+      // exactly the "you could not actually reach your money" case.
+      ran_out: t.end < 0 || t.illiquidAge != null,
+      rows: t.rows,
+    };
+  });
+
+  const ok = results.filter((r) => !r.ran_out).length;
+  const ends = results.map((r) => r.end).sort((a, b) => a - b);
+  const pct = (q) => (ends.length ? ends[Math.min(ends.length - 1, Math.floor(q * ends.length))] : 0);
+
+  // percentile bands of the portfolio path, for the fan on the chart
+  const ages = plan.rows.filter((r) => Number.isInteger(r.age)).map((r) => r.age);
+  const bands = ages.map((age, i) => {
+    const vals = results.map((r) => {
+      const row = r.rows.find((x) => x.age === age);
+      return row ? row.portfolio : 0;
+    }).sort((a, b) => a - b);
+    const at = (q) => vals[Math.min(vals.length - 1, Math.floor(q * vals.length))];
+    return { age, p10: at(0.1), p25: at(0.25), p50: at(0.5), p75: at(0.75), p90: at(0.9) };
+  });
+
+  // The plan's assumed real return against what this mix actually delivered. Without this the
+  // terminal figures look broken: 80/20 returned about 7% real historically, while the model's
+  // default 7% nominal against 3% inflation is under 4%, and three points compounded over a
+  // seventy-year horizon is a hundredfold difference in the final balance. The gap is a real finding
+  // about your assumptions — the point is to show it, not to hide it by quietly rescaling.
+  const assumedReal = (1 + (p.nominalReturn ?? 0)) / (1 + assumedInfl) - 1;
+  let realSum = 0, realN = 0;
+  for (const { seq } of seqs) for (const s of seq) { realSum += (1 + s.ret) / (1 + s.infl) - 1; realN++; }
+  const sampledReal = realN ? realSum / realN : 0;
+
+  return {
+    mode: o.mode, trials: results.length, stockPct: o.stockPct,
+    successRate: results.length ? ok / results.length : 0,
+    // how many independent windows the horizon actually left room for — a 76-year plan against a
+    // century of data leaves barely twenty, and they overlap heavily
+    cycleYears: years, dataFrom: HISTORY_FIRST, dataTo: HISTORY_LAST,
+    assumedReal, sampledReal,
+    fireCross: plan.fireCross,
+    worst: ends[0], median: pct(0.5), best: ends[ends.length - 1],
+    p10: pct(0.1), p90: pct(0.9),
+    // the sequences that failed, named — "1966" is a more useful answer than "12% of trials"
+    failures: results.filter((r) => r.ran_out).map((r) => r.label),
+    bands,
+  };
+};
 
 // The one number box everything uses. Two things it gets right that a raw <input type=number> does not:
 // clicking in SELECTS the current value, so typing replaces it instead of landing after the leading 0;
@@ -2296,6 +2403,7 @@ function Calculator({ shared, isMobile }) {
   const [show, setShow] = useState(() => ({ ...defaultShow(), ...(shared && shared.mode === "full" ? shared.show : null) }));
   const [advancedOpen, setAdvancedOpen] = useState(false);   // the rarely-touched settings start folded
   const [traceOpen, setTraceOpen] = useState(false);         // the year-by-year arithmetic, on demand
+  const [mcOpen, setMcOpen] = useState(false);               // backtesting, on demand — it is not free
   const [leversOpen, setLeversOpen] = useState(true);        // …but the levers are the payoff, so open
   const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
   const setPct = (k, v) => setP((s) => ({ ...s, [k]: v / 100 }));
@@ -2435,6 +2543,21 @@ function Calculator({ shared, isMobile }) {
   // tax-advantaged vs. taxable allocation advice — grounded by re-running the model (see the exported
   // allocationAdvice() for the full reasoning), so it's not a rule of thumb.
   const allocAdvice = useMemo(() => allocationAdvice(p), [p]);
+
+  // Backtesting runs on demand, not on every keystroke: a few hundred trials is most of a second,
+  // and a success rate that flickers while you type reads as noise rather than as a result. The
+  // result is cleared whenever the plan changes, so a stale number can never sit under new inputs.
+  const [mc, setMc] = useState(null);
+  const [mcOpts, setMcOpts] = useState(MC_DEFAULTS);
+  const [mcBusy, setMcBusy] = useState(false);
+  useEffect(() => { setMc(null); }, [p]);
+  const runBacktest = () => {
+    setMcBusy(true);
+    // yield a frame so the button can paint its busy state before the main thread blocks
+    setTimeout(() => {
+      try { setMc(runTrials(p, mcOpts)); } finally { setMcBusy(false); }
+    }, 20);
+  };
 
   // --- what actually moves the needle -------------------------------------
   // simulate() is pure and cheap, so instead of guessing at advice we re-run the whole model
@@ -3446,6 +3569,101 @@ function Calculator({ shared, isMobile }) {
             fireCross={retireOnLoan ? null : sim.fireCross} fireCrossValue={retireOnLoan ? null : sim.fireCrossValue}
             show={show} setShow={setShow}
           />}
+
+          {/* WILL IT SURVIVE HISTORY — the plan replayed against real sequences of returns */}
+          {hasPlan && sim.fireCross != null && (
+            <Collapsible
+              title="Will it survive history?"
+              subtitle="The plan replayed against real sequences of returns, 1928 onwards"
+              open={mcOpen} onToggle={() => setMcOpen((v) => !v)}
+            >
+              <p style={{ margin: 0, fontSize: 12, color: C.mute, lineHeight: 1.6 }}>
+                Your date stays fixed at <b style={{ color: C.ink }}>{sim.fireCross.toFixed(1)}</b> and only the
+                returns change — you make a plan on an assumption, then test it against what actually
+                happened. <b>Historical</b> replays each run of years in the order it occurred, which keeps
+                1929 followed by 1930. <b>Bootstrap</b> stitches random five-year blocks together for more
+                samples at the cost of never-observed sequences.
+              </p>
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontSize: 10, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>method</span>
+                  <select value={mcOpts.mode} onChange={(e) => setMcOpts((o) => ({ ...o, mode: e.target.value }))}
+                    style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: 6,
+                             padding: "7px 8px", fontSize: 12, fontFamily: "'Space Grotesk', sans-serif" }}>
+                    <option value="historical" style={{ background: C.panel }}>historical cycles</option>
+                    <option value="bootstrap" style={{ background: C.panel }}>block bootstrap</option>
+                  </select>
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 160 }}>
+                  <span style={{ fontSize: 10, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
+                    stocks · <span style={{ color: C.brass }}>{mcOpts.stockPct}%</span> / bonds {100 - mcOpts.stockPct}%
+                  </span>
+                  <input type="range" min={0} max={100} step={5} value={mcOpts.stockPct}
+                    onChange={(e) => setMcOpts((o) => ({ ...o, stockPct: Number(e.target.value) }))}
+                    style={{ accentColor: C.brass }} />
+                </label>
+                <button onClick={runBacktest} disabled={mcBusy}
+                  style={{ background: mcBusy ? C.line : C.teal, color: C.bg, border: "none", borderRadius: 8,
+                           cursor: mcBusy ? "default" : "pointer", padding: "9px 16px", fontSize: 13,
+                           fontFamily: "'Space Grotesk', sans-serif", fontWeight: 500 }}>
+                  {mcBusy ? "Running…" : mc ? "Run again" : "Run backtest"}
+                </button>
+              </div>
+
+              {mc && (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 16 }}>
+                    <Stat label={`Survived · ${mc.trials} runs`} value={`${Math.round(mc.successRate * 100)}%`}
+                      accent={mc.successRate >= 0.9 ? C.teal : mc.successRate >= 0.75 ? C.brass : C.coral} />
+                    <Stat label="Worst run ends with" value={fmtM(mc.worst)} accent={mc.worst < 0 ? C.coral : C.ink} />
+                    <Stat label="Median run ends with" value={fmtM(mc.median)} />
+                    <Stat label="10th percentile" value={fmtM(mc.p10)} />
+                  </div>
+
+                  {/* the number that explains every other number on this panel */}
+                  <div style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8,
+                                padding: "10px 14px", fontSize: 12.5, color: C.ink, lineHeight: 1.6 }}>
+                    Your plan assumes <b>{(mc.assumedReal * 100).toFixed(1)}%</b> a year after inflation.
+                    A {mc.stockPct}/{100 - mc.stockPct} mix actually returned{" "}
+                    <b style={{ color: mc.sampledReal > mc.assumedReal ? C.teal : C.coral }}>
+                      {(mc.sampledReal * 100).toFixed(1)}%
+                    </b>{" "}
+                    across {mc.dataFrom}–{mc.dataTo}.
+                    {mc.sampledReal > mc.assumedReal + 0.005 && (
+                      <> Your assumption is the more cautious one, which is why these runs end so far above
+                        zero — that surplus is the margin in your inputs, not a forecast.</>
+                    )}
+                  </div>
+
+                  {mc.mode === "historical" && (
+                    <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>
+                      A {mc.cycleYears}-year plan leaves only <b style={{ color: C.ink }}>{mc.trials}</b> complete
+                      runs in {mc.dataFrom}–{mc.dataTo}, and they overlap heavily — neighbouring runs share all
+                      but one year, so this is far less independent evidence than the count suggests. Block
+                      bootstrap trades that for sequences that never actually happened. Neither is a forecast.
+                      {mc.failures.length > 0 && (
+                        <> The runs that failed started in <b style={{ color: C.coral }}>{mc.failures.join(", ")}</b>.</>
+                      )}
+                    </div>
+                  )}
+                  {mc.mode === "bootstrap" && mc.failures.length > 0 && (
+                    <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>
+                      <b style={{ color: C.coral }}>{mc.failures.length}</b> of {mc.trials} stitched sequences ran
+                      dry. Bootstrap can chain bad decades that history never put back to back, so it reads
+                      harsher than the historical cycles — deliberately.
+                    </div>
+                  )}
+                </>
+              )}
+              {!mc && !mcBusy && (
+                <div style={{ fontSize: 11.5, color: C.mute }}>
+                  Nothing run yet. Results clear whenever you change an input, so a stale figure can never
+                  sit underneath new numbers.
+                </div>
+              )}
+            </Collapsible>
+          )}
 
           {/* TRACE THE NUMBERS — the year-by-year arithmetic behind the chart */}
           {hasPlan && <Collapsible

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName,
+  simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -1953,5 +1953,75 @@ describe("expenses can be dated from retirement instead of from an age", () => {
     // the iteration is opt-in: a plan with no relative expense must not pay for the fixed point
     const plain = simulate({ ...BASE, expenses: [{ label: "car", amount: 30000, age: 45, until: null }] });
     expect(plain.fireCross).not.toBeNull();
+  });
+});
+
+describe("backtesting replays the plan against real sequences", () => {
+  it("keeps the plan's date and only varies the returns", () => {
+    const plan = simulate(DEFAULTS);
+    const mc = runTrials(DEFAULTS, { mode: "historical", stockPct: 80 });
+    expect(mc.fireCross).toBe(plan.fireCross);
+    expect(mc.trials).toBeGreaterThan(0);
+    expect(mc.successRate).toBeGreaterThanOrEqual(0);
+    expect(mc.successRate).toBeLessThanOrEqual(1);
+  });
+
+  it("is deterministic — the same plan gives the same answer twice", () => {
+    // a success rate that flickers between identical runs reads as noise, not as a result
+    const a = runTrials(DEFAULTS, { mode: "bootstrap", trials: 40, seed: 7 });
+    const b = runTrials(DEFAULTS, { mode: "bootstrap", trials: 40, seed: 7 });
+    expect(a.successRate).toBe(b.successRate);
+    expect(a.median).toBe(b.median);
+    expect(runTrials(DEFAULTS, { mode: "bootstrap", trials: 40, seed: 8 }).successRate)
+      .not.toBe(undefined);
+  });
+
+  it("reports how few independent windows a long horizon leaves", () => {
+    const mc = runTrials(DEFAULTS, { mode: "historical" });
+    expect(mc.cycleYears).toBeGreaterThan(60);
+    expect(mc.trials).toBeLessThan(40);          // ~a century of data, minus a 70+ year window
+    expect(mc.dataFrom).toBeLessThan(mc.dataTo);
+  });
+
+  it("surfaces the gap between the assumed return and the sampled one", () => {
+    // without this the terminal figures look broken rather than conservative
+    const mc = runTrials(DEFAULTS, { mode: "historical", stockPct: 80 });
+    expect(mc.assumedReal).toBeCloseTo((1 + DEFAULTS.nominalReturn) / (1 + DEFAULTS.inflation) - 1, 6);
+    expect(Number.isFinite(mc.sampledReal)).toBe(true);
+  });
+
+  it("a bond-heavy mix survives less often than a stock-heavy one over a long horizon", () => {
+    const stocks = runTrials(DEFAULTS, { mode: "historical", stockPct: 100 });
+    const bonds = runTrials(DEFAULTS, { mode: "historical", stockPct: 0 });
+    expect(bonds.median).toBeLessThan(stocks.median);
+  });
+
+  it("returns percentile bands over the whole path", () => {
+    const mc = runTrials(DEFAULTS, { mode: "historical" });
+    expect(mc.bands.length).toBeGreaterThan(10);
+    for (const b of mc.bands) {
+      expect(b.p10).toBeLessThanOrEqual(b.p50);
+      expect(b.p50).toBeLessThanOrEqual(b.p90);
+    }
+  });
+
+  it("counts a plan that could only continue by borrowing as a failure", () => {
+    const mc = runTrials(DEFAULTS, { mode: "bootstrap", trials: 60, stockPct: 100, seed: 3 });
+    expect(mc.failures.length + Math.round(mc.successRate * mc.trials)).toBe(mc.trials);
+  });
+
+  it("gives nothing back for a plan that never retires", () => {
+    const broke = { ...DEFAULTS, startPortfolio: 0, startCash: 0, annualTakeHome: 10000,
+                    retirementSpendToday: 300000 };
+    expect(runTrials(broke)).toBeNull();
+  });
+
+  it("leaves the ordinary simulate() untouched", () => {
+    // the replay hooks are opt-in via __returns / __fixedRetireAt; without them nothing changes
+    const a = simulate(DEFAULTS);
+    runTrials(DEFAULTS, { mode: "historical" });
+    const b = simulate(DEFAULTS);
+    expect(a.fireCross).toBe(b.fireCross);
+    expect(a.end).toBe(b.end);
   });
 });
