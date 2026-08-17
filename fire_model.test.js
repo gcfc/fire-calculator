@@ -1607,3 +1607,47 @@ describe("coast FIRE needs a target before it draws anything", () => {
     expect(s.coastTarget).toBeNull();
   });
 });
+
+describe("guaranteed income counts in every year it runs", () => {
+  // THE BUG: retireExpense() subtracts incomeAt(), and working years never call retireExpense() —
+  // so a pension or Social Security claimed while still employed was invisible. A $40k/yr stream
+  // running five working years moved the balances, and the date, by exactly nothing.
+  const BASE = {
+    ...DEFAULTS, partnerEnabled: false, homes: [], kids: [], currentAge: 55,
+    startPortfolio: 200000, startPortfolioTaxAdv: 0, startCash: 20000,
+    annualTakeHome: 90000, annualTaxAdv: 0, nonHousingLiving: 80000,
+    retirementSpendToday: 80000, rentAnnual: 0,
+  };
+  const PENSION = [{ label: "pension", amount: 40000, startAge: 56, whose: "you", cola: true, until: 60 }];
+
+  it("a pension drawn entirely while working still helps", () => {
+    const without = simulate(BASE);
+    const with_ = simulate({ ...BASE, incomes: PENSION });
+    expect(with_.fireCross).toBeLessThan(without.fireCross);
+    const bal = (s, age) => s.trace.find((t) => t.age === age).endTotal;
+    expect(bal(with_, 58)).toBeGreaterThan(bal(without, 58));
+  });
+
+  it("shows it in the other-income column, not folded into salary", () => {
+    const s = simulate({ ...BASE, incomes: PENSION });
+    const yr = s.trace.find((t) => t.age === 57);
+    expect(yr.phase).toBe("working");
+    expect(yr.otherIncome).toBeGreaterThan(0);
+    expect(yr.takeHome).toBeCloseTo(s.trace.find((t) => t.age === 61).takeHome, -2);  // salary unchanged
+  });
+
+  it("does not double-count it across the retirement transition", () => {
+    // the year you retire is part working, part retired; the stream must be paid once, not twice
+    const s = simulate({ ...BASE, incomes: [{ label: "SS", amount: 30000, startAge: 56, whose: "you", cola: true }] });
+    const at = Math.floor(s.fireCross);
+    const yr = s.trace.find((t) => t.age === at);
+    const infl = Math.pow(1 + BASE.inflation, at - BASE.currentAge);
+    expect(yr.otherIncome).toBeLessThanOrEqual(Math.round(30000 * 1.02) + 1);
+  });
+
+  it("still lands the horizon on zero with a stream spanning both phases", () => {
+    const s = simulate({ ...BASE, rothLadder: true, enforceAccess: false,
+      incomes: [{ label: "SS", amount: 25000, startAge: 58, whose: "you", cola: true }] });
+    expect(Math.abs(s.end)).toBeLessThan(5);
+  });
+});

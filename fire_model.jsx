@@ -678,7 +678,11 @@ export function simulate(rawP) {
     // the working window is stated in the partner's own age, so translate before comparing
     const pAge = partnerAgeAt(age);
     const partnerOn = hasPartner && pAge >= earnFrom && pAge <= earnTo;
-    const takeHome = takeHomeNet * infl + (partnerOn ? partnerIncomeNet * infl : 0);
+    // Guaranteed income counts in EVERY year it runs, not only after you retire. retireExpense()
+    // subtracts incomeAt(); working years never call it, so a pension or Social Security claimed
+    // while still employed used to vanish entirely — $40k/yr for five working years changed the
+    // balances, and the retirement date, by exactly nothing.
+    const takeHome = takeHomeNet * infl + (partnerOn ? partnerIncomeNet * infl : 0) + incomeAt(age);
     const taxAdvYou = p.annualTaxAdv * infl;
     const taxAdvPartner = partnerOn ? p.partnerTaxAdv * infl : 0;
     const living = p.nonHousingLiving * infl;
@@ -1006,8 +1010,13 @@ export function simulate(rawP) {
       const rFrac = 1 - wFrac;
       const retiredLiving = (partnerWorks ? interimLiving : p.retirementSpendToday) * infl;
       const retiredLumps = downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age);
-      const takeHomeFV   = f.takeHome * wFrac * yearFV;
-      const otherIncFV   = (incomeAt(age) + partnerTakeHomeAt(age)) * rFrac * yearFV;
+      // Salary in the "pay" column, guaranteed income in "other" — in BOTH phases. flows() now folds
+      // the pension into take-home so working years actually receive it, but the trace should still
+      // show it for what it is. The two columns are only ever added together downstream, so moving a
+      // figure between them cannot disturb the row's reconciliation.
+      const pension = incomeAt(age);
+      const takeHomeFV   = (f.takeHome - pension) * wFrac * yearFV;
+      const otherIncFV   = (pension + partnerTakeHomeAt(age) * rFrac) * yearFV;
       const livingFV     = (f.living * wFrac + retiredLiving * rFrac) * yearFV;
       const housingFV    = housingAt(age) * yearFV;                 // charged whether you work or not
       const kidsFV       = f.kidCost * wFrac * yearFV;              // the retirement budget covers the household
