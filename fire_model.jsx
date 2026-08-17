@@ -49,6 +49,13 @@ const yearAt = (age, refAge) =>
 // These pure helpers convert between how a value is SHOWN in a field and the ANNUAL value we store, so
 // a field can offer /yr⇄/mo, $-of-income⇄%, or gross⇄net without the model ever knowing. Exported so
 // the conversions can be unit-tested directly. `toAnnual` and `toShown` are exact inverses.
+// A kid's display name: whatever was typed, else "Kid N". Exported so the model, the chart markers
+// and the UI all label the same child the same way.
+export const kidName = (kid, i) => {
+  const n = (kid && typeof kid.name === "string" ? kid.name : "").trim();
+  return n || `Kid ${i + 1}`;
+};
+
 export const toAnnual = (shown, unit) => (unit === "mo" ? shown * 12 : shown);      // /mo → /yr
 export const toShown = (annual, unit) => (unit === "mo" ? annual / 12 : annual);    // /yr → /mo
 // a contribution can be entered as "% of income" instead of dollars; base is the income it's a % of
@@ -291,7 +298,7 @@ export function simulate(rawP) {
   // "my kid is 4 now", so accept `ageNow` too and convert (birthAge = your age − their age). birthAge
   // stays the one canonical field everything downstream reads.
   const kids = (p.kids || [])
-    .map((k) => ({ ...k, birthAge: (k.ageNow != null && k.ageNow !== "") ? p.currentAge - (+k.ageNow) : (+k.birthAge) }))
+    .map((k, idx) => ({ ...k, idx, birthAge: (k.ageNow != null && k.ageNow !== "") ? p.currentAge - (+k.ageNow) : (+k.birthAge) }))
     .filter((k) => k.birthAge > 0);
   const kidsCount = kids.length;
   const cap529 = kidsCount * 19000;                       // gift-tax-free annual max, single donor, today's $
@@ -921,7 +928,10 @@ export function simulate(rawP) {
 
     const events = [];
     if (homes.some((h) => h.purchaseAge === age)) events.push("home");
-    if (kids.some((k) => k.birthAge === age)) events.push("kid");
+    const bornThisYear = kids.filter((k) => k.birthAge === age);
+    if (bornThisYear.length) events.push("kid");
+    // only NAMED children get a chart label — an unnamed one would just add "Kid 1" as clutter
+    const bornNames = bornThisYear.filter((k) => (k.name || "").trim()).map((k) => kidName(k, k.idx));
     if (collegeGrossToday(age) > 0) events.push("college");
 
     const reqReal = needTotalAt(age, st.cash) / infl;
@@ -941,7 +951,7 @@ export function simulate(rawP) {
       neededRetirement: Math.max(0, Math.round(reqReal) - Math.round(bridgeReal)),
       coast: coastReal == null ? null : Math.round(coastReal),
       save: Math.round(realSave),
-      events,
+      events, bornNames,
     });
 
     const stBefore = st;                                 // balances entering the year, for the trace
@@ -1927,7 +1937,12 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
           {show.taxable ? <Line type="monotone" dataKey="taxable" stroke={C.liquid} strokeWidth={1.5} dot={false} /> : null}
           {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
           {show.home ? homeRows.map((h) => <ReferenceDot key={h.age} x={h.age} y={h.portfolio} r={5} fill={C.brass} stroke={C.bg} />) : null}
-          {show.kids ? kidRows.map((k) => <ReferenceDot key={k.age} x={k.age} y={k.portfolio} r={4} fill={C.ink} stroke={C.bg} />) : null}
+          {show.kids ? kidRows.map((k) => (
+            <ReferenceDot key={k.age} x={k.age} y={k.portfolio} r={4} fill={C.ink} stroke={C.bg}
+              label={k.bornNames && k.bornNames.length
+                ? { value: k.bornNames.join(", "), fill: C.ink, fontSize: 10, position: "top" }
+                : undefined} />
+          )) : null}
           {/* a one-off is a cost or income depending on its sign; they get their own colour AND their
               own legend chip, so a teal dot on the chart has something to point back to */}
           {expenseMarks ? expenseMarks.map((m, i) => {
@@ -2674,20 +2689,24 @@ function Calculator({ shared, isMobile }) {
               const birthAge = (rawBirth === "" || rawBirth == null) ? "" : +rawBirth;
               const showNow = k.entry === "now";
               const yearsAway = birthAge - p.currentAge;
+              // a name, when given, replaces "Kid N" everywhere that number appears
+              const who = kidName(k, i);
               return (
                 <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  <TextField label={`Kid ${i + 1} — name (optional)`} value={k.name || ""}
+                    placeholder={`Kid ${i + 1}`} onChange={(v) => setKid(i, { name: v })} />
                   <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                     <div style={{ flex: 1 }}>
                       {showNow
-                        ? <Num label={`Kid ${i + 1} — age now`} value={p.currentAge - birthAge} step={1} min={-120}
+                        ? <Num label={`${who} — age now`} value={p.currentAge - birthAge} step={1} min={-120}
                             onChange={(v) => setKid(i, { birthAge: p.currentAge - v, ageNow: undefined })} />
-                        : <Num label={`Kid ${i + 1} — your age at birth`} value={birthAge} yearRef={p.currentAge}
+                        : <Num label={`${who} — your age at birth`} value={birthAge} yearRef={p.currentAge}
                             onChange={(v) => setKid(i, { birthAge: v, ageNow: undefined })} />}
                     </div>
                     <DropButton onClick={() => dropKid(i)} />
                   </div>
                   <select
-                    value={showNow ? "now" : "birth"} aria-label={`how to enter kid ${i + 1}'s age`}
+                    value={showNow ? "now" : "birth"} aria-label={`how to enter ${who}'s age`}
                     onChange={(ev) => setKid(i, { entry: ev.target.value, birthAge, ageNow: undefined })}
                     style={{
                       background: C.bg, border: `1px solid ${C.line}`, color: C.teal, borderRadius: 5,
@@ -2698,7 +2717,9 @@ function Calculator({ shared, isMobile }) {
                     <option value="now" style={{ background: C.panel, color: C.ink }}>entering age now</option>
                   </select>
                   {showNow && yearsAway > 0 && (
-                    <span style={{ fontSize: 10, color: C.mute }}>Not born yet — arrives in {yearsAway} year{yearsAway !== 1 ? "s" : ""}.</span>
+                    <span style={{ fontSize: 10, color: C.mute }}>
+                      {k.name ? `${k.name} isn't born yet` : "Not born yet"} — arrives in {yearsAway} year{yearsAway !== 1 ? "s" : ""}.
+                    </span>
                   )}
                 </div>
               );

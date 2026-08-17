@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  simulate, DEFAULTS, EMPTY, isRunnable, planReadiness,
+  simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -1709,5 +1709,41 @@ describe("kids cost the same whether or not you have a job", () => {
   it("still lands the horizon on zero with kids spanning the retirement date", () => {
     const s = simulate({ ...DEFAULTS, kids: [{ birthAge: 38 }], rothLadder: true, enforceAccess: false });
     expect(Math.abs(s.end)).toBeLessThan(5);
+  });
+});
+
+describe("kids can carry names", () => {
+  it("falls back to Kid N, numbered as authored", () => {
+    expect(kidName({}, 0)).toBe("Kid 1");
+    expect(kidName({ name: "" }, 2)).toBe("Kid 3");
+    expect(kidName({ name: "   " }, 1)).toBe("Kid 2");
+    expect(kidName(undefined, 0)).toBe("Kid 1");
+  });
+
+  it("uses the name when given, trimmed", () => {
+    expect(kidName({ name: "Ada" }, 0)).toBe("Ada");
+    expect(kidName({ name: "  Ada  " }, 4)).toBe("Ada");
+  });
+
+  it("puts named children on the birth-year row and leaves unnamed ones off", () => {
+    const s = simulate({ ...DEFAULTS, kids: [{ birthAge: 30, name: "Ada" }, { birthAge: 32 }] });
+    const born30 = s.rows.find((r) => r.age === 30);
+    const born32 = s.rows.find((r) => r.age === 32);
+    expect(born30.events).toContain("kid");
+    expect(born30.bornNames).toEqual(["Ada"]);
+    expect(born32.events).toContain("kid");
+    expect(born32.bornNames).toEqual([]);     // unnamed ⇒ no chart label, no "Kid 2" clutter
+  });
+
+  it("numbers a named child by its authoring position, not its position among named ones", () => {
+    const s = simulate({ ...DEFAULTS, kids: [{ birthAge: 30 }, { birthAge: 32, name: "Bo" }] });
+    expect(s.rows.find((r) => r.age === 32).bornNames).toEqual(["Bo"]);
+  });
+
+  it("a name never changes the numbers", () => {
+    const named = simulate({ ...DEFAULTS, kids: [{ birthAge: 30, name: "Ada" }, { birthAge: 32, name: "Bo" }] });
+    const plain = simulate({ ...DEFAULTS, kids: [{ birthAge: 30 }, { birthAge: 32 }] });
+    expect(named.fireCross).toBe(plain.fireCross);
+    expect(named.fireCrossValue).toBe(plain.fireCrossValue);
   });
 });
