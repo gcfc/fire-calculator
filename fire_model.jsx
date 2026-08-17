@@ -1334,6 +1334,68 @@ export function simulate(rawP) {
   return out;
 }
 
+// ---- Sankey ----------------------------------------------------------------
+// One year's flows: sources on the left, sinks on the right, ribbon width proportional to dollars.
+//
+// Three decisions make the scrubbing work:
+//   1. FIXED NODE IDENTITY. Every node exists in every year; one that does not apply gets height
+//      zero. Interpolating four y-values per ribbon is then trivial, and nothing pops in or out.
+//   2. ABSOLUTE SCALE. Heights are measured against the largest year in the plan rather than filling
+//      the panel each year. Normalising would make composition easier to read and would destroy the
+//      best moment in the whole interaction — watching total flow collapse the year you retire.
+//   3. NO RE-SIMULATION. sim.trace already holds every year, and it reconciles by construction
+//      (start + in − out + growth = end), which is what makes the diagram honest rather than
+//      decorative. Scrubbing is a lookup.
+export const sankeyYear = (t) => {
+  if (!t) return null;
+  // The trace reconciles by construction, and the Sankey is that identity drawn:
+  //     Δtaxable = takeHome + otherIncome − cashOut + cashGrowth
+  //     ΔtaxAdv  = contributions − withdrawn + advGrowth
+  //     cashOut + withdrawn = living + housing + kids + lumps
+  // Adding those gives sources = spending + Δtaxable + ΔtaxAdv exactly, which is why the two sides
+  // balance to the dollar rather than approximately.
+  const dCash = t.endTaxable - t.startTaxable;
+  const dAdv = t.endTaxAdv - t.startTaxAdv;
+
+  // A signed flow lands on whichever side its sign puts it: money into an account is a sink, money
+  // out of one is a source, and the same holds for growth, which goes negative in a bad real year.
+  const sources = [], sinks = [];
+  const signed = (key, inLabel, outLabel, value, color, extra = {}) => {
+    if (Math.abs(value) < 1) return;
+    (value > 0 ? sinks : sources).push({
+      key, label: value > 0 ? inLabel : outLabel, value: Math.abs(value), color, ...extra,
+    });
+  };
+  const plain = (list, key, label, value, color, extra = {}) => {
+    if (value > 1) list.push({ key, label, value, color, ...extra });
+  };
+
+  plain(sources, "pay", "Take-home pay", t.takeHome, C.teal);
+  plain(sources, "other", "Pension / other income", t.otherIncome, C.teal);
+  plain(sources, "contrib", "Pre-tax contributions", t.contributions, C.locked);
+  // growth is return, not cash flow — flagged so the UI can draw it differently. Watching it outgrow
+  // your own saving is one of the few genuinely satisfying moments in a plan like this.
+  signed("cashGrowth", "Lost on savings", "Growth on savings", -t.cashGrowth, C.brass, { isGrowth: true });
+  signed("advGrowth", "Lost in retirement accounts", "Growth in retirement accounts", -t.advGrowth, C.brass, { isGrowth: true });
+
+  plain(sinks, "housing", "Housing", t.housing, C.brass);
+  plain(sinks, "kids", "Children", t.kids, C.coral);
+  plain(sinks, "living", "Living", t.living, C.ink);
+  plain(sinks, "lumps", "One-offs", t.lumps, C.coast);
+  signed("cashBal", "→ into savings", "Drawn from savings", dCash, C.liquid);
+  signed("advBal", "→ into retirement accounts", "Drawn from retirement accounts", dAdv, C.locked);
+
+  // The model permits a negative spendable balance, so the two sides can genuinely fail to balance.
+  // Give the gap its own node rather than letting it hide: a Sankey that quietly does not add up is
+  // worse than no Sankey, and an implicit loan is exactly what a reader should see.
+  const sum = (l) => l.reduce((s, n) => s + n.value, 0);
+  const gap = sum(sinks) - sum(sources);
+  if (gap > 1) sources.push({ key: "borrowed", label: "Borrowed", value: gap, color: C.coral, isDebt: true });
+  else if (gap < -1) sinks.push({ key: "unspent", label: "→ unspent", value: -gap, color: C.mute });
+
+  return { age: t.age, phase: t.phase, locked: t.locked, sources, sinks, total: Math.max(sum(sources), sum(sinks)) };
+};
+
 // ---- historical backtesting and Monte Carlo ---------------------------------
 // The plan is made on an assumption; this tests it against the sequences that actually happened.
 //
@@ -1967,6 +2029,132 @@ const SERIES = [
 // a series' default visibility changes (which is exactly how the share-link test broke)
 export const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
 
+// ---- the Sankey panel -------------------------------------------------------
+function SankeyPanel({ trace, fireCross, isMobile }) {
+  const years = trace.map((t) => t.age);
+  const [age, setAge] = useState(() => (fireCross != null ? Math.floor(fireCross) : years[0]));
+  const clamped = Math.min(years[years.length - 1], Math.max(years[0], age));
+  const t = trace.find((x) => x.age === clamped) || trace[0];
+  const d = useMemo(() => sankeyYear(t), [t]);
+  // Absolute scale, so the diagram shrinks when the money does — the collapse in total flow the year
+  // the salary stops is the whole reason to have a scrubber, and normalising per year would throw it
+  // away. But the reference is the 90th percentile of years, not the maximum: one lumpy year (a
+  // house closing is half a million on its own) otherwise sets the scale for the whole plan and
+  // squashes every ordinary year to a sliver. Years above the reference simply draw taller rather
+  // than being clipped, which keeps every year measured in the same dollars-per-pixel.
+  const scale = useMemo(() => {
+    const totals = trace.map((x) => (sankeyYear(x) || { total: 0 }).total).sort((a, b) => a - b);
+    const ref = Math.max(1, totals[Math.floor(totals.length * 0.9)] || totals[totals.length - 1] || 1);
+    return 260 / ref;
+  }, [trace]);
+  if (!d) return null;
+
+  const W = isMobile ? 340 : 760, NODE = 12, PAD = 6;
+  const stack = (list) => {
+    let y = 20;
+    return list.map((n) => {
+      const h = Math.max(n.value * scale, n.value > 0 ? 1 : 0);
+      const seg = { ...n, y0: y, y1: y + h, h };
+      y += h + PAD;
+      return seg;
+    });
+  };
+  const src = stack(d.sources), snk = stack(d.sinks);
+  const bottom = Math.max(20, ...src.map((n) => n.y1), ...snk.map((n) => n.y1));
+  const H = Math.max(180, bottom + 20);
+  const xL = 4, xR = W - NODE - 4, xm = W / 2;
+
+  // Ribbons run source-stack to sink-stack in order: each side is drawn as one continuous column, so
+  // the ribbon between them is the intersection of two running offsets. Keeps the drawing free of any
+  // per-flow attribution the model does not actually claim.
+  const ribbons = [];
+  {
+    const srcQ = src.map((n) => ({ ...n, left: n.h })), snkQ = snk.map((n) => ({ ...n, left: n.h }));
+    let i = 0, j = 0, sy = src.length ? src[0].y0 : 20, ty = snk.length ? snk[0].y0 : 20;
+    let guard = 0;
+    while (i < srcQ.length && j < snkQ.length && guard++ < 500) {
+      const take = Math.min(srcQ[i].left, snkQ[j].left);
+      if (take > 0.4) {
+        ribbons.push({
+          key: `${srcQ[i].key}-${snkQ[j].key}`,
+          a0: sy, a1: sy + take, b0: ty, b1: ty + take,
+          color: srcQ[i].isGrowth ? C.brass : srcQ[i].isDebt ? C.coral : snkQ[j].color,
+          dim: !!srcQ[i].isGrowth,
+        });
+      }
+      srcQ[i].left -= take; snkQ[j].left -= take; sy += take; ty += take;
+      if (srcQ[i].left <= 0.4) { i++; if (i < srcQ.length) sy = src[i].y0; }
+      if (snkQ[j].left <= 0.4) { j++; if (j < snkQ.length) ty = snk[j].y0; }
+    }
+  }
+
+  const path = (r) =>
+    `M${xL + NODE},${r.a0} C${xm},${r.a0} ${xm},${r.b0} ${xR},${r.b0} L${xR},${r.b1} C${xm},${r.b1} ${xm},${r.a1} ${xL + NODE},${r.a1} Z`;
+
+  const phaseLabel = d.phase === "working" ? "still working" : d.phase === "retires" ? "the year you retire" : "retired";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ fontSize: 13, color: C.ink }}>
+          Age <b style={{ color: C.brass, fontFamily: "'JetBrains Mono', monospace" }}>{d.age}</b>
+          <span style={{ color: C.mute }}> · {phaseLabel}</span>
+          {d.locked && d.phase !== "working" && (
+            <span style={{ color: C.locked }}> · retirement accounts still sealed</span>
+          )}
+        </div>
+        <div style={{ fontSize: 11, color: C.mute, fontFamily: "'JetBrains Mono', monospace" }}>
+          {fmt(d.total)} through the household
+        </div>
+      </div>
+
+      <input type="range" min={years[0]} max={years[years.length - 1]} step={1} value={clamped}
+        onChange={(e) => setAge(Number(e.target.value))}
+        aria-label="year to show cash flows for"
+        style={{ accentColor: C.brass, width: "100%" }} />
+
+      <div style={{ overflowX: "auto" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: isMobile ? 320 : 620 }} role="img"
+          aria-label={`Cash flows at age ${d.age}`}>
+          {ribbons.map((r) => (
+            <path key={r.key} d={path(r)} fill={r.color} opacity={r.dim ? 0.16 : 0.3} />
+          ))}
+          {src.map((n) => (
+            <g key={n.key}>
+              <rect x={xL} y={n.y0} width={NODE} height={n.h} fill={n.color} opacity={n.isGrowth ? 0.5 : 1} />
+              <text x={xL + NODE + 6} y={n.y0 + n.h / 2 - 1} fontSize={10} fill={C.ink}
+                fontFamily="'Space Grotesk', sans-serif" dominantBaseline="middle">{n.label}</text>
+              <text x={xL + NODE + 6} y={n.y0 + n.h / 2 + 10} fontSize={9} fill={C.mute}
+                fontFamily="'JetBrains Mono', monospace" dominantBaseline="middle">{fmt(n.value)}</text>
+            </g>
+          ))}
+          {snk.map((n) => (
+            <g key={n.key}>
+              <rect x={xR} y={n.y0} width={NODE} height={n.h} fill={n.color} />
+              <text x={xR - 6} y={n.y0 + n.h / 2 - 1} fontSize={10} fill={C.ink} textAnchor="end"
+                fontFamily="'Space Grotesk', sans-serif" dominantBaseline="middle">{n.label}</text>
+              <text x={xR - 6} y={n.y0 + n.h / 2 + 10} fontSize={9} fill={C.mute} textAnchor="end"
+                fontFamily="'JetBrains Mono', monospace" dominantBaseline="middle">{fmt(n.value)}</text>
+            </g>
+          ))}
+        </svg>
+      </div>
+
+      {d.sources.some((n) => n.isDebt) && (
+        <div style={{ fontSize: 11.5, color: C.coral, lineHeight: 1.6 }}>
+          This year does not balance out of your own money — the coral <b>Borrowed</b> band is the gap,
+          and it compounds as debt from here.
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: C.mute, lineHeight: 1.6 }}>
+        Everything in today's dollars, straight from the year-by-year trace, so the two sides balance
+        to the dollar. Growth is drawn faded because it is return rather than cash — the year it
+        outgrows your own saving is worth finding.
+      </div>
+    </div>
+  );
+}
+
 // ---- share links -----------------------------------------------------------
 // The site is static (no backend), so all shared state rides in the URL hash. Two shapes:
 //   full — the sharer's inputs, so the recipient gets the whole calculator, pre-filled and editable
@@ -2404,6 +2592,7 @@ function Calculator({ shared, isMobile }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);   // the rarely-touched settings start folded
   const [traceOpen, setTraceOpen] = useState(false);         // the year-by-year arithmetic, on demand
   const [mcOpen, setMcOpen] = useState(false);               // backtesting, on demand — it is not free
+  const [sankeyOpen, setSankeyOpen] = useState(false);       // the year-by-year flow diagram
   const [leversOpen, setLeversOpen] = useState(true);        // …but the levers are the payoff, so open
   const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
   const setPct = (k, v) => setP((s) => ({ ...s, [k]: v / 100 }));
@@ -3569,6 +3758,17 @@ function Calculator({ shared, isMobile }) {
             fireCross={retireOnLoan ? null : sim.fireCross} fireCrossValue={retireOnLoan ? null : sim.fireCrossValue}
             show={show} setShow={setShow}
           />}
+
+          {/* WHERE THE MONEY GOES — one year's flows, scrubbable across the plan */}
+          {hasPlan && sim.trace.length > 0 && (
+            <Collapsible
+              title="Where the money goes"
+              subtitle="One year of flows, end to end — drag across the plan to watch it change"
+              open={sankeyOpen} onToggle={() => setSankeyOpen((v) => !v)}
+            >
+              <SankeyPanel trace={sim.trace} fireCross={sim.fireCross} isMobile={isMobile} />
+            </Collapsible>
+          )}
 
           {/* WILL IT SURVIVE HISTORY — the plan replayed against real sequences of returns */}
           {hasPlan && sim.fireCross != null && (

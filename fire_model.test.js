@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials,
+  simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -2023,5 +2023,58 @@ describe("backtesting replays the plan against real sequences", () => {
     const b = simulate(DEFAULTS);
     expect(a.fireCross).toBe(b.fireCross);
     expect(a.end).toBe(b.end);
+  });
+});
+
+describe("the Sankey balances, because the trace does", () => {
+  const yearOf = (s, age) => sankeyYear(s.trace.find((t) => t.age === age));
+
+  it("sums to the same total on both sides, every year", () => {
+    const s = simulate(DEFAULTS);
+    for (const t of s.trace) {
+      const d = sankeyYear(t);
+      const sum = (l) => l.reduce((a, n) => a + n.value, 0);
+      expect(Math.abs(sum(d.sources) - sum(d.sinks)), `age ${t.age}`).toBeLessThan(2);
+    }
+  });
+
+  it("shows salary while working and a drawdown after", () => {
+    const s = simulate(DEFAULTS);
+    const at = Math.floor(s.fireCross);
+    const working = yearOf(s, at - 3), retired = yearOf(s, at + 3);
+    expect(working.sources.some((n) => n.key === "pay")).toBe(true);
+    expect(retired.sources.some((n) => n.key === "pay")).toBe(false);
+    expect(retired.sources.some((n) => n.key === "cashBal" || n.key === "advBal")).toBe(true);
+  });
+
+  it("puts the locked account's growth on the diagram while it is sealed", () => {
+    // the year the pot climbs while you spend is the one people report as a bug
+    const s = simulate(DEFAULTS);
+    const at = Math.floor(s.fireCross) + 4;
+    const d = yearOf(s, at);
+    expect(d.locked).toBe(true);
+    expect(d.sources.some((n) => n.isGrowth)).toBe(true);
+  });
+
+  it("gives a borrowing year its own coral band rather than silently not adding up", () => {
+    const loan = { ...DEFAULTS, partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0,
+                   partnerPortfolio: 0, partnerPortfolioTaxAdv: 0, partnerCash: 0, allowBorrowing: true };
+    const s = simulate(loan);
+    expect(s.illiquidAge).not.toBeNull();
+    const d = yearOf(s, s.illiquidAge + 1);
+    const sum = (l) => l.reduce((a, n) => a + n.value, 0);
+    expect(Math.abs(sum(d.sources) - sum(d.sinks))).toBeLessThan(2);
+  });
+
+  it("scales absolutely, so the year you retire is visibly smaller", () => {
+    const s = simulate(DEFAULTS);
+    const at = Math.floor(s.fireCross);
+    expect(yearOf(s, at + 5).total).toBeLessThan(yearOf(s, at - 5).total);
+  });
+
+  it("is a pure lookup — no re-simulation to scrub", () => {
+    const s = simulate(DEFAULTS);
+    expect(sankeyYear(s.trace[0]).age).toBe(s.trace[0].age);
+    expect(sankeyYear(null)).toBeNull();
   });
 });
