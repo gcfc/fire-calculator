@@ -2240,6 +2240,20 @@ function Calculator({ shared, isMobile }) {
   const retireOnLoan = retiresOnLoan(sim);
   const kidsCount = p.kids.length;
   const cap529 = kidsCount * 19000;
+  // Which child-cost phases are still ahead of at least one kid. A phase entirely in the past can
+  // never be charged, so the field for it is noise. `collegeSpread` stretches college to 21.
+  const kidPhases = useMemo(() => {
+    const collegeEnd = p.collegeSpread ? 21 : 18;
+    const ages = p.kids
+      .map((k) => (k.ageNow != null && k.ageNow !== "" ? +k.ageNow : +p.currentAge - +k.birthAge))
+      .filter((a) => Number.isFinite(a));
+    const anyBefore = (end) => ages.some((a) => a <= end);   // still ahead of, or inside, the phase
+    return {
+      daycare: ages.length === 0 || anyBefore(5),
+      ongoing: ages.length === 0 || anyBefore(17),
+      college: ages.length === 0 || anyBefore(collegeEnd),
+    };
+  }, [p.kids, p.currentAge, p.collegeSpread]);
 
   // The mirror image of "never retire": you're already there. The crossing is clamped at today because
   // the household is over-funded on day one, so the solver can't move it any earlier to bleed off the
@@ -2691,9 +2705,19 @@ function Calculator({ shared, isMobile }) {
             })}
             {kidsCount > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 2 }}>
-                {field("Daycare / kid / yr (ages 0–5)", "daycarePerKid", p.daycarePerKid, set, { step: 1000 })}
-                {field("Ongoing / kid / yr (ages 6–17)", "ongoingPerKid", p.ongoingPerKid, set, { step: 1000 })}
-                {field("College / kid (today's $)", "collegePerKid", p.collegePerKid, set, { step: 10000 })}
+                {/* Only ask for a cost you can still incur. A phase every child has already aged out
+                    of will never be charged — kidCostAt() keys off each kid's own age — so asking a
+                    parent of teenagers for a daycare figure is asking for a number that cannot
+                    affect the answer. Ages are measured from today, since the past is already in
+                    your current balances. */}
+                {kidPhases.daycare && field("Daycare / kid / yr (ages 0–5)", "daycarePerKid", p.daycarePerKid, set, { step: 1000 })}
+                {kidPhases.ongoing && field("Ongoing / kid / yr (ages 6–17)", "ongoingPerKid", p.ongoingPerKid, set, { step: 1000 })}
+                {kidPhases.college && field("College / kid (today's $)", "collegePerKid", p.collegePerKid, set, { step: 10000 })}
+                {!kidPhases.daycare && !kidPhases.ongoing && !kidPhases.college && (
+                  <div style={{ fontSize: 10, color: C.mute, lineHeight: 1.6 }}>
+                    Everyone's grown — no daycare, school or college costs left to plan for.
+                  </div>
+                )}
               </div>
             )}
           </div>
