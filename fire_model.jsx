@@ -62,7 +62,91 @@ export const grossFromNet = (net, effRatePct) => {
 };
 
 // exported so the model can be exercised headlessly, without mounting the UI
-export function simulate(p) {
+// Every top-level numeric input, and the handful that are meaningfully "unset" rather than zero.
+// The app now starts EMPTY — every box blank — so simulate() is called with "" in most of these on
+// the very first render, and `"" + 5` is the string "5". Coercing once, up front, is what keeps a
+// blank form from silently producing string arithmetic deep inside the model.
+const NUMERIC_PARAMS = [
+  "currentAge", "startPortfolio", "startPortfolioTaxAdv", "startCash",
+  "annualTakeHome", "annualTaxAdv", "nonHousingLiving", "rentAnnual",
+  "inflation", "nominalReturn", "cashReturn", "swr",
+  "daycarePerKid", "ongoingPerKid", "collegePerKid", "annual529",
+  "partnerAge", "partnerIncome", "partnerTaxAdv", "partnerPortfolio", "partnerPortfolioTaxAdv",
+  "partnerCash", "partnerStart", "partnerEnd",
+  "retirementSpendToday", "endAge", "coastAge", "effTaxRate", "ladderYears", "accessAge",
+];
+// these read through `??`, so a blank box has to stay null rather than collapsing to 0
+const NULLABLE_PARAMS = ["interimLivingToday"];
+
+export const normalizeParams = (p) => {
+  const out = { ...p };
+  for (const k of NUMERIC_PARAMS) {
+    const v = out[k];
+    if (v === null || v === undefined || v === "") { out[k] = 0; continue; }
+    const n = +v;
+    out[k] = Number.isFinite(n) ? n : 0;
+  }
+  for (const k of NULLABLE_PARAMS) {
+    const v = out[k];
+    out[k] = v === null || v === undefined || v === "" || !Number.isFinite(+v) ? null : +v;
+  }
+  return out;
+};
+
+// A plan needs, at minimum, an age to start from and a horizon past it. Below that there is no
+// timeline to project along and every downstream number would be noise, so the model says so instead
+// of inventing one. This is what lets the app open with an empty form and an empty chart.
+export const isRunnable = (p) => {
+  const q = normalizeParams(p);
+  return q.currentAge > 0 && q.endAge > q.currentAge && q.nominalReturn > -1;
+};
+
+// isRunnable() is the guard against NaN. This is the stronger question: are there enough figures for
+// the ANSWER to mean anything?
+//
+// The case that forced it: with no retirement budget, retireExpense() is zero every year, so Need[]
+// is identically zero, so any portfolio at all clears the bar and the model reports "you could stop
+// working today" — on a form where only the age has been typed. That is arithmetically correct and
+// completely useless. Worse, it makes every working-year input inert: if you retire in year one you
+// never work a year, so living costs and savings rate cannot move the answer, which reads as the
+// inputs being broken.
+//
+// So: something going out, something to fund it with, and a timeline to put them on.
+export const planReadiness = (p) => {
+  const q = normalizeParams(p);
+  const withPartner = q.partnerAge > 0 && p.partnerEnabled !== false;
+  const savings = q.startCash + q.startPortfolio + (withPartner ? q.partnerCash + q.partnerPortfolio : 0);
+  const income = q.annualTakeHome + (withPartner ? q.partnerIncome : 0)
+    + (p.incomes || []).reduce((s, i) => s + Math.abs(+i.amount || 0), 0);
+  const checks = [
+    { key: "age", label: "Your age", ok: q.currentAge > 0 && q.endAge > q.currentAge },
+    { key: "spend", label: "Retirement spending — what a year costs once you stop", ok: q.retirementSpendToday > 0 },
+    { key: "resources", label: "Income, or savings to live on", ok: income > 0 || savings > 0 },
+  ];
+  return { ready: checks.every((c) => c.ok), checks };
+};
+
+// The same shape simulate() always returns, with nothing in it. Kept exhaustive on purpose — a test
+// pins its key set against a real run, so a new output can't be added to one and forgotten in the other.
+const emptyResult = (p) => ({
+  naiveNumber: 0, fireAge: null, fireCross: null, fireCrossIfBorrowed: null,
+  allowBorrowing: p.allowBorrowing === true, borrowingBlocked: false,
+  fireCrossValue: null, fireReq: null,
+  homes: [], lastPayoff: null, mortgageAtFire: 0,
+  minSave: 0, minSaveAge: null, end: 0, rows: [], trace: [], END: 0,
+  accessYou: p.accessAge || 59.5, accessPartner: p.accessAge || 59.5, partnerOffset: 0, hasPartner: false,
+  expenseMarks: [], debtPayoffs: [], incomePV: 0, incomeStartMarks: [], incomeAtFire: 0,
+  partnerStopsAtAge: null, unlockYouAtFire: null,
+  fireTaxable: null, fireLocked: null, fireBridge: null, lockedShare: 0, illiquidAge: null,
+  underwaterCause: null,
+  useCoast: p.useCoast !== false, coastSpecified: false, coastTarget: null, coastCross: null, coastCrossValue: null,
+  coastToday: null, coastShortfall: null,
+  partnerAgeAtFire: null, partnerAgeAtEnd: null,
+});
+
+export function simulate(rawP) {
+  const p = normalizeParams(rawP);
+  if (!isRunnable(p)) return emptyResult(p);
   const ret = p.nominalReturn;
 
   // Income can be entered as take-home (default) or as GROSS salary; if gross, net it down by a flat
@@ -89,6 +173,23 @@ export function simulate(p) {
   const fv = (dt) => (grow(dt) - 1) / delta;            // future value of $1/yr flowing for dt years
   const pvFlow = (dt) => (1 - Math.pow(G, -dt)) / delta; // present value of the same
   const inflAt = (age) => Math.pow(1 + p.inflation, age - p.currentAge);   // today's $ -> nominal at age
+
+  // Cash is its own bucket earning its own (usually lower) rate, so it needs its own growth factor.
+  // A 0% cash rate makes ln(Gc) = 0 and the closed forms above divide by zero; the limit of
+  // (Gc^t − 1)/ln Gc as the rate goes to zero is simply t, which is exactly what an account earning
+  // nothing does. Cash takes no inflow while you work — surplus is invested, not banked — so growC()
+  // is the only cash convention anything needs.
+  const cashRet = Math.max(0, +p.cashReturn || 0);
+  const Gc = 1 + cashRet;
+  const deltaC = Math.log(Gc);
+  const growC = (dt) => Math.pow(Gc, dt);
+  const fvC = (dt) => (deltaC === 0 ? dt : (growC(dt) - 1) / deltaC);
+  const pvFlowC = (dt) => (deltaC === 0 ? dt : (1 - Math.pow(Gc, -dt)) / deltaC);
+
+  // Borrowing is off by default: a plan that only balances by running the spendable account negative
+  // is an implicit loan, not a plan. When off, the model still SIMULATES the negative path (so the
+  // chart can show exactly where and why it breaks) but refuses to hand back a retirement date.
+  const allowBorrowing = p.allowBorrowing === true;
 
   // --- homes: any number of them, each with its own loan ---------------------
   // Every home is an independent stream of cash: a lump at closing, level P&I until its own
@@ -385,6 +486,101 @@ export function simulate(p) {
     return (Need[A + 1] + retireNet(A) * fv(rest)) / grow(rest);
   };
 
+  // --- two rates, one requirement -------------------------------------------
+  // Need[] above is a single-rate present value: it assumes every dollar compounds at the portfolio
+  // rate. Cash doesn't — it earns `cashReturn` — so once there is a cash bucket, "the balance that
+  // lands exactly on zero" is no longer one discounted sum. Getting this wrong is not a rounding
+  // matter: a cash-heavy household would be told to retire on a pot that then runs dry early.
+  //
+  // The split is exact rather than approximate, because the drawdown spends cash FIRST. So cash
+  // alone carries the bill from `t` until it runs dry at `tau`, investments compound untouched at
+  // the portfolio rate over that whole stretch, and from `tau` on it is an ordinary single-rate
+  // problem again:
+  //
+  //     required(t, C) = C + Need(tau) / G^(tau − t)
+  //
+  // With C = 0, tau = t and this collapses back to needAt(t) exactly — which is what keeps every
+  // no-cash invariant (the terminal balance landing on zero) untouched.
+
+  // The instant a cash balance C, compounding at the cash rate while paying `bill`, hits zero.
+  //
+  // The bill is valued with fv() — the PORTFOLIO rate — not fvC(), and that is deliberate: it is
+  // exactly what spend() charges over the same stretch. The forward drawdown is this model's ground
+  // truth, so the requirement has to be computed against the arithmetic the drawdown actually uses.
+  // Valuing it at the cash rate here instead left ~$6k on the table at the horizon — the size of one
+  // year's bill times the gap between the two rates.
+  const cashDryAt = (t, C, bill, stop) => {
+    if (!(C > 0)) return t;
+    let bal = C, s = t;
+    while (s < stop) {
+      const yr = Math.floor(s), s1 = Math.min(stop, yr + 1), dt = s1 - s;
+      const e = Math.max(0, bill(yr));          // a surplus year goes to INVESTMENTS, never to cash
+      const endBal = bal * growC(dt) - e * fv(dt);
+      if (endBal <= 0) {
+        let lo = 0, hi = dt;                       // solve for the exact instant inside the year
+        for (let i = 0; i < 40; i++) {
+          const mid = (lo + hi) / 2;
+          if (bal * growC(mid) - e * fv(mid) <= 0) hi = mid; else lo = mid;
+        }
+        return s + hi;
+      }
+      bal = endBal; s = s1;
+    }
+    return stop;
+  };
+
+  // minimum CASH that covers `t..u` on its own, under the same arithmetic — cash compounding at the
+  // cash rate against a bill valued at the portfolio rate
+  const cashReqFor = (t, u, bill) => {
+    const stop = Math.min(u, END + 1);
+    if (stop <= t) return 0;
+    const slices = [];
+    for (let s = t; s < stop; ) {
+      const yr = Math.floor(s), s1 = Math.min(stop, yr + 1);
+      slices.push([s1 - s, yr]); s = s1;
+    }
+    let req = 0;
+    for (let i = slices.length - 1; i >= 0; i--) {
+      const [dt, yr] = slices[i];
+      req = (req + Math.max(0, bill(yr)) * fv(dt)) / growC(dt);
+    }
+    return req;
+  };
+
+  // Value at `tau` of everything that flows into the non-cash buckets between `t` and `tau`, while
+  // cash is the one paying the liquid bill. It is NOT zero whenever the household still has income
+  // arriving after you retire:
+  //   • a still-working partner's surplus lands in investments, not in cash
+  //   • their 401k contribution lands in the locked bucket even in a year cash covers the bills
+  // Both mean the investments held at `t` can be smaller than the untouched-compounding view implies.
+  // Omitting this left $1.46M on the table at the horizon in the partner-keeps-working case.
+  const investFlowFV = (t, tau) => {
+    let acc = 0, s = t;
+    while (s < tau) {
+      const yr = Math.floor(s), s1 = Math.min(tau, yr + 1), dt = s1 - s;
+      const flow = Math.max(0, retireNetLiquid(yr)) - retireNet(yr);
+      acc = acc * grow(dt) + flow * fv(dt);
+      s = s1;
+    }
+    return acc;
+  };
+
+  // Total balance required at instant `t` when `C` of it is cash.
+  //
+  // The cash trajectory is driven by retireNetLiquid — the bill cash is actually asked to pay. That
+  // differs from retireNet (which Need[] uses) by a still-working partner's 401k contribution, and
+  // that contribution lands in the LOCKED bucket, never in cash.
+  const needTotalAt = (t, C) => {
+    if (!(C > 0)) return needAt(t);
+    const tau = cashDryAt(t, C, retireNetLiquid, END + 1);
+    // Cash was never exhausted — either income covers the bill outright, or the pile outlasts the
+    // horizon. Either way cash never binds, so the requirement is the ordinary single-rate one and
+    // whatever cash is left over is genuine surplus. Returning C here instead would report "you need
+    // your own cash balance", which is both trivially true and not the constraint.
+    if (tau >= END + 1 - 1e-9) return needAt(t);
+    return C + (needAt(tau) - investFlowFV(t, tau)) / grow(tau - t);
+  };
+
   // --- the liquidity (age-59.5) machinery ----------------------------------
   // Need[] answers "is there enough money?". It does NOT answer "can you legally touch it?".
   // A 401k/IRA/HSA dollar cannot pay a bill before 59.5 without a 10% penalty, so a retirement
@@ -392,16 +588,33 @@ export function simulate(p) {
 
   // present value, at instant `t`, of the SPENDABLE bill between `t` and `u` (net of a working
   // partner's take-home, which is liquid; their 401k contribution is handled separately, below)
-  const pvSpend = (t, u) => {
+  // `atCashRate` discounts at the cash rate instead — the minimum CASH that bridges a window, which
+  // is what's required when cash alone covers it
+  const pvSpend = (t, u, atCashRate = false) => {
+    const pvf = atCashRate ? pvFlowC : pvFlow, base = atCashRate ? Gc : G;
     let acc = 0, disc = 1, s = t;
     const stop = Math.min(u, END + 1);
     while (s < stop) {
       const yr = Math.floor(s), s1 = Math.min(stop, yr + 1), dt = s1 - s;
-      acc += disc * retireNetLiquid(yr) * pvFlow(dt);
-      disc *= Math.pow(G, -dt);
+      acc += disc * retireNetLiquid(yr) * pvf(dt);
+      disc *= Math.pow(base, -dt);
       s = s1;
     }
     return acc;
+  };
+
+  // Minimum SPENDABLE balance at `T` to cover `T..u`, given that `C` of it is cash and cash is spent
+  // first. Same two-rate split as needTotalAt(): cash carries the window until it runs dry, then
+  // investments take over at the portfolio rate.
+  const spendReq = (T, u, C) => {
+    const stop = Math.min(u, END + 1);
+    if (stop <= T) return 0;
+    if (!(C > 0)) return pvSpend(T, u);
+    const tau = cashDryAt(T, C, retireNetLiquid, stop);
+    // cash alone spans the whole window — the requirement is then just the cash that exactly does it
+    // (never more than C, so a fatter cash pile is never penalised for being large)
+    if (tau >= stop - 1e-9) return cashReqFor(T, stop, retireNetLiquid);
+    return C + pvSpend(tau, u) / grow(tau - T);
   };
 
   // present value, at instant `t`, of a working partner's 401k contributions between `t` and `u` —
@@ -426,7 +639,7 @@ export function simulate(p) {
 
   // Minimum TAXABLE balance at instant T to stay liquid through the locked years. Each bucket adds
   // a checkpoint: taxable (plus whatever unlocked earlier) must cover all spending up to its opening.
-  const bridgeAt = (T, balYou, balPartner) => {
+  const bridgeAt = (T, C, balYou, balPartner) => {
     if (!p.enforceAccess) return 0;
     const uPartner = unlockAt(accessPartner, T);
     // a partner still working past T keeps funding their 401k, so more is locked-and-waiting by the
@@ -437,7 +650,7 @@ export function simulate(p) {
     ].filter((b) => b.bal > 0).sort((x, y) => x.u - y.u);
     let need = 0, unlocked = 0;
     for (const b of buckets) {
-      need = Math.max(need, pvSpend(T, b.u) - unlocked);
+      need = Math.max(need, spendReq(T, b.u, C) - unlocked);
       unlocked += b.bal;
     }
     return Math.max(0, need);
@@ -451,8 +664,13 @@ export function simulate(p) {
   // Coast is opt-in: when it's off nothing here is computed and every coast output is null, so the
   // chart, legend and stats have nothing to draw rather than being merely hidden.
   const useCoast = p.useCoast !== false;
-  const coastTarget = useCoast ? Math.min(Math.max(p.coastAge, p.currentAge + 1), END) : null;
-  const coastAt = (t) => (useCoast ? needAt(coastTarget) / grow(coastTarget - t) : null);
+  // A coast age you have not typed is not a target. Blank normalises to 0, and the clamp below would
+  // quietly turn that into "coast to next year" — a whole curve drawn off a number nobody chose.
+  // Ticking the box asks the question; it does not answer it, so there is no curve until the age is
+  // given. `useCoast` still reports the checkbox, so the UI can tell "off" from "asked, unanswered".
+  const coastSpecified = useCoast && p.coastAge > 0;
+  const coastTarget = coastSpecified ? Math.min(Math.max(p.coastAge, p.currentAge + 1), END) : null;
+  const coastAt = (t) => (coastTarget != null ? needAt(coastTarget) / grow(coastTarget - t) : null);
 
   // --- annual flow RATES (nominal $/yr) during a working year ---------------
   const flows = (age) => {
@@ -492,29 +710,42 @@ export function simulate(p) {
     };
   };
 
-  // work for dt years: balances compound while the year's flows stream in
+  // work for dt years: balances compound while the year's flows stream in. Cash earns its own rate
+  // and takes no inflow — the annual surplus is invested. When the surplus is NEGATIVE (a down-payment
+  // year, say) it drains the investment account, and settle() then covers that from cash, which is
+  // what a buffer is for.
   const work = (st, age, dt) => {
     const f = flows(age), g = grow(dt), a = fv(dt);
     return {
+      cash: st.cash * growC(dt),
       taxable: st.taxable * g + f.taxable * a,
       taxAdvYou: st.taxAdvYou * g + f.taxAdvYou * a,
       taxAdvPartner: st.taxAdvPartner * g + f.taxAdvPartner * a,
     };
   };
 
-  // spend for dt years inside one calendar year, drawing taxable first and then each
-  // tax-advantaged bucket that has already opened. `t0..t1` never straddles an unlock.
+  // Draw `owed` down from a balance. A bucket already in deficit is skipped rather than "drawn" —
+  // without the guard, Math.min(negative, owed) returns the negative balance, which would zero the
+  // deficit and ADD it to the amount still owed.
+  const drawFrom = (bal, take) => (bal <= 0 ? { bal, took: 0 } : { bal: bal - Math.min(bal, take), took: Math.min(bal, take) });
+
+  // spend for dt years inside one calendar year, drawing cash first, then taxable investments, then
+  // each tax-advantaged bucket that has already opened. `t0..t1` never straddles an unlock.
   const spend = (st, t0, t1, T) => {
     const age = Math.floor(t0), dt = t1 - t0, g = grow(dt);
-    let taxable = st.taxable * g, ty = st.taxAdvYou * g, tp = st.taxAdvPartner * g;
+    let cash = st.cash * growC(dt), taxable = st.taxable * g, ty = st.taxAdvYou * g, tp = st.taxAdvPartner * g;
     let owed = retireExpense(age) * fv(dt);
-    const draw = (bal) => { const x = Math.min(bal, owed); owed -= x; return bal - x; };
+    // a year whose income or windfall outruns the bill is INVESTED, never banked — same convention as
+    // retireStep() below, and the one needTotalAt() prices against
+    if (owed < 0) { taxable += -owed; owed = 0; }
+    const draw = (bal) => { const r = drawFrom(bal, owed); owed -= r.took; return r.bal; };
+    cash = draw(cash);                                        // spend savings before selling anything
     taxable = draw(taxable);
     if (t0 >= unlockAt(accessYou, T) - 1e-9) ty = draw(ty);
     if (t0 >= unlockAt(accessPartner, T) - 1e-9) tp = draw(tp);
     let short = false;
-    if (owed > 1) { taxable -= owed; short = true; }          // illiquid: money exists, can't be reached
-    return { st: { taxable, taxAdvYou: ty, taxAdvPartner: tp }, short };
+    if (owed > 1) { cash -= owed; short = true; }             // illiquid: money exists, can't be reached
+    return { st: { cash, taxable, taxAdvYou: ty, taxAdvPartner: tp }, short };
   };
 
   // one retired sub-year. When the partner is still earning their take-home offsets the bill (a
@@ -524,17 +755,18 @@ export function simulate(p) {
     const age = Math.floor(t0);
     if (!partnerEarnsInRetirement(age)) return spend(st, t0, t1, T);
     const dt = t1 - t0, g = grow(dt);
-    let taxable = st.taxable * g, ty = st.taxAdvYou * g, tp = st.taxAdvPartner * g;
+    let cash = st.cash * growC(dt), taxable = st.taxable * g, ty = st.taxAdvYou * g, tp = st.taxAdvPartner * g;
     tp += partnerTaxAdvAt(age) * fv(dt);                                  // locked contribution keeps building
     let owed = (interimExpense(age) - partnerTakeHomeAt(age)) * fv(dt);   // net of take-home
-    if (owed < 0) { taxable += -owed; owed = 0; }                         // partner out-earned the bill -> save it
-    const draw = (bal) => { const x = Math.min(bal, owed); owed -= x; return bal - x; };
+    if (owed < 0) { taxable += -owed; owed = 0; }                         // partner out-earned the bill -> invest it
+    const draw = (bal) => { const r = drawFrom(bal, owed); owed -= r.took; return r.bal; };
+    cash = draw(cash);
     taxable = draw(taxable);
     if (t0 >= unlockAt(accessYou, T) - 1e-9) ty = draw(ty);
     if (t0 >= unlockAt(accessPartner, T) - 1e-9) tp = draw(tp);
     let short = false;
-    if (owed > 1) { taxable -= owed; short = true; }
-    return { st: { taxable, taxAdvYou: ty, taxAdvPartner: tp }, short };
+    if (owed > 1) { cash -= owed; short = true; }
+    return { st: { cash, taxable, taxAdvYou: ty, taxAdvPartner: tp }, short };
   };
 
   // spend from t0 to t1, splitting at any unlock instant that falls inside
@@ -543,6 +775,12 @@ export function simulate(p) {
     [unlockAt(accessYou, T), unlockAt(accessPartner, T)].forEach((u) => {
       if (u > t0 && u < t1) cuts.push(u);
     });
+    // …and cut where cash runs dry, for the same reason the unlocks are cuts: a slice that is part
+    // cash-funded and part investment-funded charges one bill against two different growth rates, and
+    // no closed form can decompose that. Splitting at the instant means every slice is funded by one
+    // regime, which is exactly what needTotalAt() assumes — and what lands the horizon back on zero.
+    const dry = cashDryAt(t0, st.cash, retireNetLiquid, t1);
+    if (dry > t0 + 1e-9 && dry < t1 - 1e-9) cuts.push(dry);
     cuts.sort((a, b) => a - b);
     let s = st, short = false;
     for (let i = 0; i < cuts.length - 1; i++) {
@@ -558,19 +796,32 @@ export function simulate(p) {
   // bills are actually paid from, instead of the shortfall compounding forever as taxable "debt".
   // While still working the statutory 59.5 is the only key that turns; the Roth-ladder shortcut only
   // exists once you have retired and started converting, which spend()/spendSpan() already handle.
-  const settle = (st, t) => {
-    const openYou = !p.enforceAccess || t >= accessYou - 1e-9;
-    const openPartner = !p.enforceAccess || t >= accessPartner - 1e-9;
-    let { taxable, taxAdvYou, taxAdvPartner } = st;
+  // `T` is the retirement instant when one is known: after retiring, a Roth ladder can open the pipe
+  // before the statutory age, so the sweep has to use the same key spend() does. While still working
+  // there is no ladder to season, so the statutory age is the only key that turns.
+  const settle = (st, t, T = null) => {
+    const uYou = T != null ? unlockAt(accessYou, T) : accessYou;
+    const uPartner = T != null ? unlockAt(accessPartner, T) : accessPartner;
+    const openYou = !p.enforceAccess || t >= uYou - 1e-9;
+    const openPartner = !p.enforceAccess || t >= uPartner - 1e-9;
+    let { cash, taxable, taxAdvYou, taxAdvPartner } = st;
+    // Cash is the buffer, so it absorbs an investment account driven negative before anything else is
+    // touched. Both are spendable, so this moves nothing in net worth — it just stops the model
+    // reporting "investments went negative" while a positive savings balance sat next to it.
+    if (taxable < 0 && cash > 0) {
+      const move = Math.min(cash, -taxable);
+      cash -= move; taxable += move;
+    }
     const pull = (bal, open) => {
-      if (!open || taxable >= 0 || bal <= 0) return bal;
-      const move = Math.min(bal, -taxable);       // only enough to bring the cash account back to $0
+      const deficit = -(cash + taxable);          // the SPENDABLE shortfall, cash and investments together
+      if (!open || deficit <= 0 || bal <= 0) return bal;
+      const move = Math.min(bal, deficit);        // only enough to bring spendable back to $0
       taxable += move;
       return bal - move;
     };
     taxAdvYou = pull(taxAdvYou, openYou);
     taxAdvPartner = pull(taxAdvPartner, openPartner);
-    return { taxable, taxAdvYou, taxAdvPartner };
+    return { cash, taxable, taxAdvYou, taxAdvPartner };
   };
   // advance a working stretch, then sweep any now-reachable account against a cash shortfall
   const step = (st, age, dt) => settle(work(st, age, dt), age + dt);
@@ -586,17 +837,32 @@ export function simulate(p) {
   // only ever meant to belong to someone who isn't in the plan.
   const partnerPortfolio = hasPartner ? p.partnerPortfolio : 0;
   const lockedPartner = hasPartner ? Math.min(p.partnerPortfolioTaxAdv, p.partnerPortfolio) : 0;
+  // `startPortfolio` / `partnerPortfolio` are INVESTED assets; cash is its own bucket alongside them,
+  // earning its own rate. Cash is spendable at any age, so it counts toward the bridge exactly as
+  // taxable investments do — it is simply the slice that doesn't compound at the market rate.
+  const startCash = Math.max(0, +p.startCash || 0) + (hasPartner ? Math.max(0, +p.partnerCash || 0) : 0);
   let st = {
+    cash: startCash,
     taxable: (p.startPortfolio - lockedYou) + (partnerPortfolio - lockedPartner),
     taxAdvYou: lockedYou,
     taxAdvPartner: lockedPartner,
   };
 
+  // spendable = cash + taxable investments; both pay bills at any age, neither waits for 59.5
+  const spendableOf = (s) => s.cash + s.taxable;
+  const totalOf = (s) => s.cash + s.taxable + s.taxAdvYou + s.taxAdvPartner;
+
   // You may retire only when BOTH hold: enough money in total, and enough of it reachable before
   // 59.5. The binding one is whichever gap is smaller — and it is zero exactly at retirement.
+  //
+  // The bridge is a present value discounted at the PORTFOLIO rate, while part of what funds it is
+  // cash earning less. That makes the screening test very slightly optimistic for a cash-heavy
+  // household. It is not load-bearing: the forward drawdown below is the ground truth, it draws cash
+  // first and grows each bucket at its own rate, and any resulting shortfall shows up as a negative
+  // spendable balance — which, with borrowing off, invalidates the date rather than hiding it.
   const gapAt = (t, s) => Math.min(
-    (s.taxable + s.taxAdvYou + s.taxAdvPartner) - needAt(t),
-    s.taxable - bridgeAt(t, s.taxAdvYou, s.taxAdvPartner),
+    totalOf(s) - needTotalAt(t, s.cash),
+    spendableOf(s) - bridgeAt(t, s.cash, s.taxAdvYou, s.taxAdvPartner),
   );
 
   let T = null;                                   // the retirement instant, a real number
@@ -608,10 +874,10 @@ export function simulate(p) {
 
   for (let age = p.currentAge; age <= END; age++) {
     const infl = Math.pow(1 + p.inflation, age - p.currentAge);
-    const total = st.taxable + st.taxAdvYou + st.taxAdvPartner;
+    const total = totalOf(st);
     const startReal = total / infl;
     const working = T === null;
-    const coastReal = useCoast && age <= coastTarget ? coastAt(age) / infl : null;
+    const coastReal = coastTarget != null && age <= coastTarget ? coastAt(age) / infl : null;
 
     // hitting the coast bar means you could stop saving today and still retire on time
     const coastGap = coastReal == null ? null : startReal - coastReal;
@@ -637,12 +903,15 @@ export function simulate(p) {
     if (kids.some((k) => k.birthAge === age)) events.push("kid");
     if (collegeGrossToday(age) > 0) events.push("college");
 
-    const reqReal = needAt(age) / infl;
-    const bridgeReal = bridgeAt(age, st.taxAdvYou, st.taxAdvPartner) / infl;
+    const reqReal = needTotalAt(age, st.cash) / infl;
+    const bridgeReal = bridgeAt(age, st.cash, st.taxAdvYou, st.taxAdvPartner) / infl;
     rows.push({
       age,
       portfolio: Math.round(startReal),
-      taxable: Math.round(st.taxable / infl),
+      // `taxable` is the SPENDABLE line — cash plus taxable investments — because that is what the
+      // bridge is measured against. `cash` breaks out the slice of it that isn't invested.
+      taxable: Math.round(spendableOf(st) / infl),
+      cash: Math.round(st.cash / infl),
       retirement: Math.round((st.taxAdvYou + st.taxAdvPartner) / infl),   // 401k/IRA/HSA buckets
       required: Math.round(reqReal),
       bridge: Math.round(bridgeReal),
@@ -673,30 +942,34 @@ export function simulate(p) {
       if (T !== null) {
         const inflT = Math.pow(1 + p.inflation, T - p.currentAge);
         const sT = T === age ? st : step(st, age, T - age);   // balances at the retirement instant
-        fireCrossValue = (sT.taxable + sT.taxAdvYou + sT.taxAdvPartner) / inflT;
-        fireReq = needAt(T) / inflT;
-        fireTaxable = sT.taxable / inflT;
-        fireBridge = bridgeAt(T, sT.taxAdvYou, sT.taxAdvPartner) / inflT;
+        fireCrossValue = totalOf(sT) / inflT;
+        fireReq = needTotalAt(T, sT.cash) / inflT;
+        fireTaxable = spendableOf(sT) / inflT;
+        fireBridge = bridgeAt(T, sT.cash, sT.taxAdvYou, sT.taxAdvPartner) / inflT;
         if (T > age) {
           rows.push({
             age: T, portfolio: Math.round(fireCrossValue), required: Math.round(fireReq),
-            taxable: Math.round(fireTaxable), retirement: Math.round((sT.taxAdvYou + sT.taxAdvPartner) / inflT),
+            taxable: Math.round(fireTaxable), cash: Math.round(sT.cash / inflT),
+            retirement: Math.round((sT.taxAdvYou + sT.taxAdvPartner) / inflT),
             bridge: Math.round(fireBridge),
             neededRetirement: Math.max(0, Math.round(fireReq) - Math.round(fireBridge)),
-            coast: useCoast && T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
+            coast: coastTarget != null && T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
             save: 0, events: [],
           });
         }
         const r = spendSpan(sT, T, age + 1, T);               // retired for the rest of the year
-        st = r.st;
+        // sweep any now-reachable account against a spendable shortfall, exactly as a working year
+        // does — a deficit left sitting in the cash account would otherwise compound forever as debt
+        // even after the 401k has legally opened and could simply pay it off.
+        st = settle(r.st, age + 1, T);
         if (r.short && illiquidAge === null) illiquidAge = Math.floor(T);
       } else {
         st = step(st, age, 1);
-        if (st.taxable < 0 && illiquidAge === null) illiquidAge = age;
+        if (spendableOf(st) < 0 && illiquidAge === null) illiquidAge = age;
       }
     } else {
       const r = spendSpan(st, age, age + 1, T);
-      st = r.st;
+      st = settle(r.st, age + 1, T);
       if (r.short && illiquidAge === null) illiquidAge = age;
     }
 
@@ -754,7 +1027,9 @@ export function simulate(p) {
       // Deriving growth from the displayed numbers makes every printed row add up exactly, and the
       // figure it yields is the REAL (inflation-adjusted) return, which is what a today's-dollars
       // table should be showing anyway.
-      const startTaxableR = Math.round(stBefore.taxable / infl), endTaxableR = Math.round(r2(st.taxable));
+      // the cash-account columns track SPENDABLE money (cash + taxable investments), which is the
+      // account the bills are actually paid from; the cash slice is broken out separately below
+      const startTaxableR = Math.round(spendableOf(stBefore) / infl), endTaxableR = Math.round(r2(spendableOf(st)));
       const startTaxAdvR  = Math.round(startTaxAdv / infl),      endTaxAdvR  = Math.round(r2(endTaxAdv));
       const takeHomeR = Math.round(r2(takeHomeFV)),  otherIncR = Math.round(r2(otherIncFV));
       const cashOutR  = Math.round(r2(cashOutFV));
@@ -768,7 +1043,8 @@ export function simulate(p) {
         // balances (today's dollars)
         startTaxable: startTaxableR, endTaxable: endTaxableR,
         startTaxAdv: startTaxAdvR,   endTaxAdv: endTaxAdvR,
-        startTotal: Math.round(startReal), endTotal: Math.round(r2(st.taxable + endTaxAdv)),
+        startCash: Math.round(stBefore.cash / infl), endCash: Math.round(r2(st.cash)),
+        startTotal: Math.round(startReal), endTotal: Math.round(r2(spendableOf(st) + endTaxAdv)),
         // cash account: money in, the bill it covered, and the real interest that closes the row
         takeHome: takeHomeR, otherIncome: otherIncR,
         living: Math.round(r2(livingFV)), housing: Math.round(r2(housingFV)),
@@ -787,12 +1063,26 @@ export function simulate(p) {
 
   // terminal balance, AFTER the final year is spent — zero by construction when total wealth binds
   const inflEnd = Math.pow(1 + p.inflation, END + 1 - p.currentAge);
-  const end = (st.taxable + st.taxAdvYou + st.taxAdvPartner) / inflEnd;
+  const end = totalOf(st) / inflEnd;
   const fireLocked = fireCrossValue == null ? null : fireCrossValue - fireTaxable;
   const lockedShare = fireCrossValue > 0 ? fireLocked / fireCrossValue : 0;
+
+  // --- the borrowing rule ----------------------------------------------------
+  // With borrowing off (the default) a path that only balances by running the spendable account
+  // negative is not a fundable plan, so the model withholds the date rather than reporting one it
+  // reached with an implicit loan. The simulated path is still returned in full — the chart has to be
+  // able to show exactly where and why it broke — and the date it WOULD have found is kept separately,
+  // so the UI can say "you'd retire at 44.2, but only by borrowing from age 50".
+  const borrowingBlocked = !allowBorrowing && illiquidAge != null;
+  const T2 = borrowingBlocked ? null : T;
+  const nb = (v) => (borrowingBlocked ? null : v);   // withhold a figure that rests on a blocked date
+
   return {
-    naiveNumber, fireAge: T == null ? null : Math.ceil(T), fireCross: T,
-    fireCrossValue, fireReq,
+    naiveNumber, fireAge: T2 == null ? null : Math.ceil(T2), fireCross: T2,
+    allowBorrowing, borrowingBlocked,
+    // the crossing the solver actually found, borrowing rule aside — null when there was none at all
+    fireCrossIfBorrowed: T,
+    fireCrossValue: nb(fireCrossValue), fireReq: nb(fireReq),
     // per-home derived numbers, so the UI can show what each one actually costs
     homes: homes.map((h) => ({
       price: h.price ?? 0, purchaseAge: h.purchaseAge, payoff: h.payoff,
@@ -813,7 +1103,8 @@ export function simulate(p) {
     // the age YOUR accounts actually become spendable given when you retire — with a Roth ladder this
     // is retire+5 (capped at 59.5), i.e. the real liquidity wall, which can sit well before 59.5
     unlockYouAtFire: T == null ? null : unlockAt(accessYou, T),
-    fireTaxable, fireLocked, fireBridge, lockedShare, illiquidAge,
+    fireTaxable: nb(fireTaxable), fireLocked: nb(fireLocked), fireBridge: nb(fireBridge),
+    lockedShare, illiquidAge,
     // the arithmetic behind an underwater cash account: the flows in the year it broke, plus the year
     // before (usually the year the trouble actually started), both in today's dollars
     underwaterCause: illiquidAge == null ? null : {
@@ -822,9 +1113,9 @@ export function simulate(p) {
       // the cash balance going into the year that broke, so the shortfall can be put in context
       taxableAtStart: (rows.find((r) => r.age === illiquidAge) || {}).taxable ?? null,
     },
-    useCoast, coastTarget, coastCross, coastCrossValue, coastToday: useCoast ? coastAt(p.currentAge) : null,
+    useCoast, coastSpecified, coastTarget, coastCross, coastCrossValue, coastToday: coastAt(p.currentAge),
     // when coast is ON but never reached: what you'd need vs. what you'd have at the coast target
-    coastShortfall: !useCoast || coastCross != null ? null : (() => {
+    coastShortfall: !coastSpecified || coastCross != null ? null : (() => {
       const row = rows.find((r) => r.age === coastTarget) || rows[rows.length - 1];
       const bar = coastAt(row.age) / inflAt(row.age);
       return { age: row.age, have: Math.round(row.portfolio), need: Math.round(bar), gap: Math.round(bar - row.portfolio) };
@@ -1257,7 +1548,10 @@ const MONEY_LABEL = { yr: "per year", mo: "per month", pct: "% of income" };
 function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr", "mo"], base = 0 }) {
   const [mode, setMode] = useState(modes[0]);
   const usablePct = mode === "pct" && base > 0;
-  const shown = mode === "mo" ? toShown(value, "mo") : usablePct ? pctFromDollars(value, base) : value;
+  // an unfilled box stays unfilled: the app opens with every figure blank, and converting "" through
+  // the unit helpers would land on 0 and put a figure the user never typed in front of them
+  const blank = value === "" || value === null || value === undefined;
+  const shown = blank ? "" : mode === "mo" ? toShown(value, "mo") : usablePct ? pctFromDollars(value, base) : value;
   const commit = (v) => onChange(mode === "mo" ? toAnnual(v, "mo") : usablePct ? Math.round(dollarsFromPct(v, base)) : v);
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -1269,7 +1563,7 @@ function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr
       <span style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
         <span style={{ flex: "1 1 90px", minWidth: 0 }}>
           <NumberInput
-            value={Number.isFinite(shown) ? Math.round(shown * 100) / 100 : 0}
+            value={blank ? "" : Number.isFinite(shown) ? Math.round(shown * 100) / 100 : 0}
             step={mode === "mo" ? Math.max(1, Math.round(step / 12)) : usablePct ? 1 : step}
             min={min}
             onCommit={commit}
@@ -1287,7 +1581,7 @@ function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr
           </select>
         )}
       </span>
-      {usablePct && (
+      {usablePct && !blank && (
         <span style={{ fontSize: 10, color: C.mute }}>≈ {fmt(Math.round(value))}/yr of {fmt(Math.round(base))} income</span>
       )}
     </label>
@@ -1304,8 +1598,11 @@ const Warn = ({ children }) => (
   </div>
 );
 
+// The demo household. The app itself now opens on EMPTY (below) and loads this only when the
+// "Load demo" button is pressed — but it is still the canonical parameter set the tests run against.
+// `startPortfolio` is INVESTED assets; cash is its own bucket beside it, earning `cashReturn`.
 export const DEFAULTS = {
-  currentAge: 27, startPortfolio: 600000, startPortfolioTaxAdv: 200000,
+  currentAge: 27, startPortfolio: 560000, startPortfolioTaxAdv: 200000, startCash: 40000,
   annualTakeHome: 144000, annualTaxAdv: 36000,
   nonHousingLiving: 36000, rentAnnual: 36000, inflation: 0.03, nominalReturn: 0.07,
   // add or drop as many as you like; each home carries its own loan and each kid its own clock
@@ -1318,7 +1615,7 @@ export const DEFAULTS = {
   expenses: [], debts: [], incomes: [],
 
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
-  partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000,
+  partnerPortfolio: 135000, partnerPortfolioTaxAdv: 100000, partnerCash: 15000,
   partnerStart: 26, partnerEnd: 60, partnerEnabled: true,
   partnerWorksAfterRetire: false, interimLivingToday: null,
   // EXCLUDES housing — every home now prices its own carry, mortgage and closing costs, so
@@ -1328,6 +1625,29 @@ export const DEFAULTS = {
   incomeMode: "net", effTaxRate: 25,
   collegeSpread: true, use529: false, annual529: 0,
   enforceAccess: true, rothLadder: false, ladderYears: 5, accessAge: 59.5,
+  // cash earns its own (lower) rate; borrowing to fund the plan is off unless you opt in
+  cashReturn: 0.04, allowBorrowing: false,
+};
+
+// What the app opens on: every box you'd type a figure into is blank, and there is no home, no kid
+// and no partner until you add one. The chart has nothing to draw and says so, rather than showing a
+// stranger's projection you then have to overwrite field by field.
+//
+// The assumption sliders (return, inflation, withdrawal rate, horizon, access age) keep their values:
+// a range input has no empty state, and these are the inputs a first-time visitor is least equipped
+// to supply. They are visible and editable under Advanced settings.
+export const EMPTY = {
+  ...DEFAULTS,
+  currentAge: "", startPortfolio: "", startPortfolioTaxAdv: "", startCash: "",
+  annualTakeHome: "", annualTaxAdv: "", nonHousingLiving: "", rentAnnual: "",
+  homes: [], kids: [], expenses: [], debts: [], incomes: [],
+  daycarePerKid: "", ongoingPerKid: "", collegePerKid: "",
+  partnerEnabled: false,
+  partnerAge: "", partnerIncome: "", partnerTaxAdv: "",
+  partnerPortfolio: "", partnerPortfolioTaxAdv: "", partnerCash: "",
+  partnerStart: "", partnerEnd: "",
+  retirementSpendToday: "", coastAge: "", useCoast: false,
+  interimLivingToday: null,
 };
 
 // every mark on the chart, switchable. `on` is the default visibility: start with the
@@ -1395,7 +1715,10 @@ const diffFrom = (obj, ref) => {
 // an implicit loan (or a 10% early-withdrawal penalty on locked money) — not a fundable plan. `illiquidAge`
 // is the model's own flag for "cash went underwater / a bill couldn't be reached". When it's set alongside
 // a retirement instant, the date isn't real, so we don't present it as a FIRE number.
-export const retiresOnLoan = (sim) => sim.fireCross != null && sim.illiquidAge != null;
+// "the only way this balances is by borrowing". With borrowing off (the default) simulate() has
+// already withheld the date, so the flag it set is the answer; with borrowing ON the user has opted
+// in, so a date is reported and this stays false — the UI warns instead of refusing.
+export const retiresOnLoan = (sim) => sim.borrowingBlocked === true;
 
 // the compact, columnar snapshot of everything the chart draws — carries NO inputs
 export const snapshotFromSim = (sim, show, enforceAccess) => {
@@ -1773,8 +2096,10 @@ export default function FireModel() {
 }
 
 function Calculator({ shared, isMobile }) {
-  // a "full details" link pre-fills the whole calculator; anything not in the link falls back to defaults
-  const [p, setP] = useState(() => (shared && shared.mode === "full" ? { ...DEFAULTS, ...shared.p } : DEFAULTS));
+  // A "full details" link pre-fills the whole calculator; anything not in the link falls back to the
+  // demo values. With no link we open EMPTY — blank boxes, no chart — so nobody has to overwrite a
+  // stranger's household field by field before the numbers mean anything.
+  const [p, setP] = useState(() => (shared && shared.mode === "full" ? { ...DEFAULTS, ...shared.p } : EMPTY));
   const [show, setShow] = useState(() => ({ ...defaultShow(), ...(shared && shared.mode === "full" ? shared.show : null) }));
   const [advancedOpen, setAdvancedOpen] = useState(false);   // the rarely-touched settings start folded
   const [traceOpen, setTraceOpen] = useState(false);         // the year-by-year arithmetic, on demand
@@ -1806,10 +2131,30 @@ function Calculator({ shared, isMobile }) {
     setP((s) => ({ ...s, homes: s.homes.map((h, j) => (j === i ? { ...h, ...patch } : h)) }));
   const setKid = (i, patch) =>
     setP((s) => ({ ...s, kids: s.kids.map((k, j) => (j === i ? { ...k, ...patch } : k)) }));
+  // Adding a kid seeds the three per-kid cost fields, because a kid with blank costs is a kid that
+  // costs nothing — the one thing we know is false. Only blanks are filled: a figure you have already
+  // typed (including a deliberate 0) survives adding a second kid untouched.
   const addKid = () =>
     setP((s) => {
       const last = s.kids[s.kids.length - 1];
-      return { ...s, kids: [...s.kids, { birthAge: last ? last.birthAge + 2 : s.currentAge + 2 }] };
+      const blank = (v) => v === "" || v === null || v === undefined;
+      const seed = (k) => (blank(s[k]) ? DEFAULTS[k] : s[k]);
+      // A new kid lands two years after the last one, or two years from now for the first. With no
+      // age to count from there is no sensible answer, so leave it blank for the user rather than
+      // inventing one: `"" + 2` is the string "2", which rendered as a birth age of two and, once a
+      // real age was typed, as a birth year decades in the past.
+      const usable = (v) => Number.isFinite(+v) && +v > 0;
+      // count from the last kid, or from your age when there is no last kid — or when that kid's own
+      // birth age is still blank, which is what happens if kids were added before the age was typed
+      const prev = last && usable(last.birthAge) ? +last.birthAge : +s.currentAge;
+      const birthAge = usable(prev) ? prev + 2 : "";
+      return {
+        ...s,
+        kids: [...s.kids, { birthAge }],
+        daycarePerKid: seed("daycarePerKid"),
+        ongoingPerKid: seed("ongoingPerKid"),
+        collegePerKid: seed("collegePerKid"),
+      };
     });
   const dropKid = (i) => setP((s) => ({ ...s, kids: s.kids.filter((_, j) => j !== i) }));
 
@@ -1846,7 +2191,14 @@ function Calculator({ shared, isMobile }) {
   // met with debt / an early-withdrawal penalty, not real cash. Drives the shaded band on the chart.
   // Same helper the shared-plot view uses, so both read "underwater" identically.
   const underwaterSpans = useMemo(() => underwaterOf(sim.rows, sim.END), [sim]);
-  const neverRetire = sim.fireCross == null;
+  // Until the inputs make the question well posed there is no answer to show — which is NOT the same
+  // as "you never retire", nor as "you can retire today". Every panel below is gated on this, because
+  // a half-filled form otherwise produces confident nonsense in both directions: an untouched form
+  // reads as a failed plan, and an age-only form reads as "stop working today" (Need is zero when no
+  // spending has been entered, so any balance clears it).
+  const readiness = useMemo(() => planReadiness(p), [p]);
+  const hasPlan = readiness.ready && sim.rows.length > 0;
+  const neverRetire = hasPlan && sim.fireCross == null;
   // WHY you're stuck — three genuinely different failures, and the fix differs for each:
   //  • bridge     — enough in total AND enough liquid; only the 59.5 wall blocks you (gate-off retires)
   //  • insolvent  — total wealth does reach the requirement, but spendable cash is underwater, so you'd
@@ -1881,7 +2233,10 @@ function Calculator({ shared, isMobile }) {
   // simulate() is pure and cheap, so instead of guessing at advice we re-run the whole model
   // once per lever and report what each one is really worth, in years of retirement.
   const levers = useMemo(() => {
-    if (sim.fireCross == null) return [];
+    // `ready` as well as a date: on a half-filled form the model still returns a crossing (at your
+    // current age, because Need is zero), and every lever then re-runs to the same 0.0y — a table of
+    // nothing, eight simulations per keystroke to produce it.
+    if (!readiness.ready || sim.fireCross == null) return [];
     // Only levers you can actually pull. Market return and inflation used to be listed (flagged "not
     // your choice") and would usually top the table — which is true but useless as advice, and it
     // squashed the bars for every decision you can really make. They're gone: this table is now
@@ -1969,10 +2324,24 @@ function Calculator({ shared, isMobile }) {
               The number that actually lasts — and that you can actually touch
             </h1>
           </div>
-          <ShareMenu p={p} show={show} sim={sim} />
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexShrink: 0 }}>
+            <button
+              onClick={() => { setP(DEFAULTS); setShow(defaultShow()); }}
+              title="Fill every field with a worked example you can then edit"
+              style={{
+                background: hasPlan ? "transparent" : C.brass, color: hasPlan ? C.brass : C.bg,
+                border: `1px solid ${C.brass}`, borderRadius: 8, cursor: "pointer",
+                padding: "8px 14px", fontFamily: "'Space Grotesk', sans-serif", fontSize: 13,
+                fontWeight: 500, whiteSpace: "nowrap",
+              }}>
+              ▶ Load demo
+            </button>
+            <ShareMenu p={p} show={show} sim={sim} />
+          </div>
         </div>
         <p style={{ margin: "8px 0 0", color: C.mute, fontSize: 14, maxWidth: 680 }}>
-          Age {p.currentAge} to {sim.END}, all in <em>today's dollars</em>. Retiring takes <b>two</b> things, and the
+          {hasPlan ? <>Age {p.currentAge} to {sim.END}, all in <em>today's dollars</em>. </> : null}
+          Retiring takes <b>two</b> things, and the
           model makes you clear both. The dashed brass curve is the total you'd need for the money to survive the
           horizon. The dashed coral curve is the <em>bridge</em>: the slice that must sit in a taxable account, because
           401k/IRA dollars are locked until 59.5. You retire where the pale line clears coral <em>and</em> teal clears
@@ -1986,8 +2355,9 @@ function Calculator({ shared, isMobile }) {
           {[
             ["You", [
               ["Age", "currentAge", {}],
-              ["Total portfolio", "startPortfolio", { step: 10000 }],
-              ["Portion of Total Portfolio in Tax-advantaged Accounts (401k / IRA / HSA)", "startPortfolioTaxAdv", { step: 10000, max: p.startPortfolio }],
+              ["Cash (savings / checking)", "startCash", { step: 5000 }],
+              ["Investments", "startPortfolio", { step: 10000 }],
+              ["Portion of investments in tax-advantaged accounts (401k / IRA / HSA)", "startPortfolioTaxAdv", { step: 10000, max: p.startPortfolio }],
               [gross ? "Gross salary" : "Take-home Pay (after contributions)", "annualTakeHome", { step: 1000, money: true }],
               ["Tax-advantaged contribution", "annualTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.annualTakeHome }],
               ["Non-housing expense", "nonHousingLiving", { step: 1000, money: true }],
@@ -1995,8 +2365,9 @@ function Calculator({ shared, isMobile }) {
             ]],
             ["Partner", [
               ["Age (0 = single)", "partnerAge", {}],
-              ["Total portfolio", "partnerPortfolio", { step: 10000 }],
-              ["Portion of Total Portfolio in Tax-advantaged Accounts (401k / IRA / HSA)", "partnerPortfolioTaxAdv", { step: 10000, max: p.partnerPortfolio }],
+              ["Cash (savings / checking)", "partnerCash", { step: 5000 }],
+              ["Investments", "partnerPortfolio", { step: 10000 }],
+              ["Portion of investments in tax-advantaged accounts (401k / IRA / HSA)", "partnerPortfolioTaxAdv", { step: 10000, max: p.partnerPortfolio }],
               [gross ? "Partner gross salary" : "Take-home Pay (after contributions)", "partnerIncome", { step: 5000, money: true }],
               ["Tax-advantaged contribution", "partnerTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.partnerIncome }],
               ["Partner earns from their age", "partnerStart", { min: p.partnerAge }],
@@ -2060,6 +2431,14 @@ function Calculator({ shared, isMobile }) {
                       : field(l, k, p[k], set, o)}
                     {/* the gross/net switch belongs beside the salary it reinterprets, not in a
                         separate block further down the column */}
+                    {/* ticking the box adds this field but no curve — say why, rather than leaving
+                        the chart looking broken */}
+                    {k === "coastAge" && !(p.coastAge > 0) && (
+                      <div style={{ fontSize: 10, color: C.mute, marginTop: -6, lineHeight: 1.6 }}>
+                        Enter the age you'd fully retire and the coast curve appears — it's the pot that,
+                        left alone from today with no further saving, still gets you there.
+                      </div>
+                    )}
                     {k === "annualTakeHome" && (
                       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: -4 }}>
                         <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 11, color: C.ink }}>
@@ -2103,17 +2482,17 @@ function Calculator({ shared, isMobile }) {
                   portfolio is later lowered beneath a 401k figure that was already valid */}
               {group === "You" && p.startPortfolioTaxAdv > p.startPortfolio && (
                 <Warn>
-                  Your 401k/IRA (<b>{fmt(p.startPortfolioTaxAdv)}</b>) is more than your whole portfolio
-                  (<b>{fmt(p.startPortfolio)}</b>). The model caps it at the portfolio, so all of it counts as
-                  locked and <b>nothing is taxable</b> — which will strand your bridge. Raise the portfolio or
-                  lower the 401k figure.
+                  Your 401k/IRA (<b>{fmt(p.startPortfolioTaxAdv)}</b>) is more than your total investments
+                  (<b>{fmt(p.startPortfolio)}</b>). The model caps it there, so every invested dollar counts as
+                  locked and <b>only your cash is spendable</b> — which will strand your bridge. Raise investments
+                  or lower the 401k figure.
                 </Warn>
               )}
               {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && p.partnerPortfolioTaxAdv > p.partnerPortfolio && (
                 <Warn>
-                  Your partner's 401k/IRA (<b>{fmt(p.partnerPortfolioTaxAdv)}</b>) is more than their whole
-                  portfolio (<b>{fmt(p.partnerPortfolio)}</b>). The model caps it at the portfolio — all locked,
-                  none taxable.
+                  Your partner's 401k/IRA (<b>{fmt(p.partnerPortfolioTaxAdv)}</b>) is more than their total
+                  investments (<b>{fmt(p.partnerPortfolio)}</b>). The model caps it there — all locked, none
+                  taxable.
                 </Warn>
               )}
               {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && p.partnerStart < p.partnerAge && (
@@ -2247,7 +2626,10 @@ function Calculator({ shared, isMobile }) {
                 removes that class of bug entirely. */}
             {p.kids.map((k, i) => {
               // legacy share links may still carry `ageNow`; fold it into the canonical field for display
-              const birthAge = (k.ageNow != null && k.ageNow !== "") ? p.currentAge - (+k.ageNow) : (+k.birthAge);
+              // preserve a blank birth age as blank — coercing it with `+` turns "" into 0, which
+              // shows a typed-looking zero in a box the user has not filled in yet
+              const rawBirth = (k.ageNow != null && k.ageNow !== "") ? p.currentAge - (+k.ageNow) : k.birthAge;
+              const birthAge = (rawBirth === "" || rawBirth == null) ? "" : +rawBirth;
               const showNow = k.entry === "now";
               const yearsAway = birthAge - p.currentAge;
               return (
@@ -2486,36 +2868,54 @@ function Calculator({ shared, isMobile }) {
               )}
             </SubSection>
 
+            <SubSection title="Borrowing">
+              <Toggle on={!!p.allowBorrowing} onClick={() => set("allowBorrowing", !p.allowBorrowing)}
+                label="Allow the plan to borrow"
+                sub={p.allowBorrowing
+                  ? "on — spendable cash may go negative, and the shortfall compounds as debt"
+                  : "off — a plan that only balances on an implicit loan gets no FIRE date"} />
+              <div style={{ fontSize: 10, color: C.mute, lineHeight: 1.6 }}>
+                With this off, a year where the bills exceed everything you can legally reach makes the
+                whole plan unfundable, and the model says so instead of quietly financing it. Turning it
+                on reports the date anyway — useful for seeing <em>how far</em> underwater you'd be, but
+                the gap is a real loan you'd have to actually get.
+              </div>
+            </SubSection>
+
             <SubSection title="Assumptions">
               {[
-                ["Annual portfolio return %", "nominalReturn"],
-                ["Inflation %", "inflation"],
-                ["Safe withdrawal rate %", "swr"],
-              ].map(([l, k]) => (
+                ["Annual portfolio return %", "nominalReturn", 3, 10],
+                ["Cash return % (savings account)", "cashReturn", 0, 6],
+                ["Inflation %", "inflation", 1, 6],
+                ["Safe withdrawal rate %", "swr", 2.5, 5],
+              ].map(([l, k, lo, hi]) => (
                 <label key={k} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
-                    {l} · <span style={{ color: C.brass }}>{(p[k] * 100).toFixed(1)}</span>
+                    {l} · <span style={{ color: C.brass }}>{((p[k] || 0) * 100).toFixed(1)}</span>
                   </span>
-                  <input type="range" min={k === "swr" ? 2.5 : k === "inflation" ? 1 : 3}
-                    max={k === "swr" ? 5 : k === "inflation" ? 6 : 10} step={0.1}
-                    value={p[k] * 100} onChange={(e) => setPct(k, Number(e.target.value))}
+                  <input type="range" min={lo} max={hi} step={0.1}
+                    value={(p[k] || 0) * 100} onChange={(e) => setPct(k, Number(e.target.value))}
                     style={{ accentColor: C.brass }} />
                 </label>
               ))}
+              <div style={{ fontSize: 10, color: C.mute, lineHeight: 1.6 }}>
+                Cash is spendable at any age — it counts toward the pre-59.5 bridge — but it compounds at
+                its own rate and is drawn down first. Set it to 0 for a checking account.
+              </div>
             </SubSection>
           </Collapsible>
         </div>
 
         {/* OUTPUT */}
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
+          {hasPlan && <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8, padding: 18, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 18 }}>
             <Stat label={`FIRE number · lasts to ${sim.END}`} value={retireOnLoan || !sim.fireCrossValue ? "—" : fmtM(sim.fireCrossValue)} accent={neverRetire || retireOnLoan ? C.coral : C.brass} />
             <Stat label="FIRE age" value={retireOnLoan ? "—" : sim.fireCross ? sim.fireCross.toFixed(1) : "never"} accent={neverRetire || retireOnLoan ? C.coral : sim.fireCross <= 47 ? C.teal : C.ink}
               sub={retireOnLoan || !sim.fireCross ? null : `${(sim.fireCross - p.currentAge).toFixed(1)} years from now`} />
-            {sim.useCoast && (
+            {sim.coastTarget != null && (
               <Stat label={`Coast FIRE number today · retire at ${sim.coastTarget}`} value={fmtM(sim.coastToday)} accent={C.coast} />
             )}
-            {sim.useCoast && (
+            {sim.coastTarget != null && (
               <Stat label="Coast FIRE age" value={sim.coastCross ? sim.coastCross.toFixed(1) : "—"} accent={C.coast}
                 sub={sim.coastCross ? `${(sim.coastCross - p.currentAge).toFixed(1)} years from now` : null} />
             )}
@@ -2524,8 +2924,14 @@ function Calculator({ shared, isMobile }) {
               label={sim.homes.length > 1 ? "Last mortgage clear at" : "Mortgage clear at"}
               value={sim.lastPayoff ? `age ${sim.lastPayoff}` : "—"}
             />
-          </div>
+          </div>}
 
+          {/* Every banner below reads the simulation, and the simulation happily answers a
+              half-filled form — Need is zero when no spending has been entered, so an age-only
+              form genuinely does clear the bar. Gating the whole block in one place is what keeps
+              a new banner from being added without its guard, which is exactly how "you could stop
+              working today" ended up greeting people who had typed nothing but their age. */}
+          {hasPlan && (<>
           {neverRetire && (
             <div style={{ background: `${C.coral}1A`, border: `2px solid ${C.coral}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, alignItems: "flex-start" }}>
               <span style={{ fontSize: 22, lineHeight: 1.1 }} aria-hidden>🚫</span>
@@ -2557,6 +2963,16 @@ function Calculator({ shared, isMobile }) {
             </div>
           )}
 
+          {p.allowBorrowing && sim.illiquidAge != null && sim.fireCross != null && (
+            <div style={{ background: `${C.coral}14`, border: `1px solid ${C.coral}`, borderRadius: 8, padding: "12px 14px", fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
+              <b style={{ color: C.coral }}>This date is bought with borrowing.</b> You allowed the plan to
+              borrow, so the model reported a FIRE age — but it only balances by running your spendable
+              cash negative from <b>age {sim.illiquidAge}</b>, and that shortfall compounds as debt for
+              the rest of the projection. Switch <b>“Allow the plan to borrow”</b> back off in Advanced
+              settings to see the date you can actually fund.
+            </div>
+          )}
+
           {retireOnLoan && (
             <div style={{ background: `${C.coral}1A`, border: `2px solid ${C.coral}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, alignItems: "flex-start" }}>
               <span style={{ fontSize: 22, lineHeight: 1.1 }} aria-hidden>🚫</span>
@@ -2565,9 +2981,12 @@ function Calculator({ shared, isMobile }) {
                   This retirement can't be funded without borrowing
                 </div>
                 <div style={{ fontSize: 13, color: C.ink, lineHeight: 1.55 }}>
-                  The only way the model balances the books here is by letting your <b>spendable (taxable) cash go
+                  The only way the model balances the books here is by letting your <b>spendable cash go
                   negative from age {sim.illiquidAge}</b> — an implicit loan, or a 10% early-withdrawal penalty on money
                   locked until 59.5. That isn't a real, fundable plan, so <b>we don't show a FIRE number for it</b>.
+                  {sim.fireCrossIfBorrowed != null && <> For reference, the crossing it found that way was{" "}
+                  <b>age {sim.fireCrossIfBorrowed.toFixed(1)}</b> — turn on <b>“Allow the plan to borrow”</b> in
+                  Advanced settings to explore it.</>}
                   {allocAdvice?.dir === "toTaxable" ? (
                     <> The fix below — moving saving from your 401k/IRA into a taxable account — is exactly what closes
                       the cash gap.</>
@@ -2682,8 +3101,44 @@ function Calculator({ shared, isMobile }) {
               sits above the naive {fmtM(sim.naiveNumber)}.
             </div>
           )}
+          </>)}
 
-          <ChartPanel
+          {!hasPlan && (
+            <div style={{
+              background: C.panel, border: `1px dashed ${C.line}`, borderRadius: 8,
+              minHeight: 320, display: "flex", flexDirection: "column", alignItems: "center",
+              justifyContent: "center", gap: 10, padding: 24, textAlign: "center",
+            }}>
+              <div style={{ fontSize: 15, color: C.ink, fontWeight: 500 }}>Nothing to plot yet</div>
+              <div style={{ fontSize: 13, color: C.mute, maxWidth: 440, lineHeight: 1.6 }}>
+                Three figures make the question answerable. Everything else — homes, kids, a partner,
+                debts, pensions — is optional detail you can layer on afterwards.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 7, margin: "6px 0 2px", textAlign: "left" }}>
+                {readiness.checks.map((c) => (
+                  <div key={c.key} style={{ display: "flex", gap: 9, alignItems: "baseline", fontSize: 13 }}>
+                    <span style={{ color: c.ok ? C.teal : C.mute, fontSize: 13, lineHeight: 1.3 }} aria-hidden>
+                      {c.ok ? "◉" : "○"}
+                    </span>
+                    <span style={{ color: c.ok ? C.mute : C.ink, textDecoration: c.ok ? "line-through" : "none" }}>
+                      {c.label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => { setP(DEFAULTS); setShow(defaultShow()); }}
+                style={{
+                  marginTop: 4, background: C.brass, color: C.bg, border: "none", borderRadius: 8,
+                  cursor: "pointer", padding: "9px 16px", fontFamily: "'Space Grotesk', sans-serif",
+                  fontSize: 13, fontWeight: 500,
+                }}>
+                ▶ Load the demo household instead
+              </button>
+            </div>
+          )}
+
+          {hasPlan && <ChartPanel
             rows={sim.rows} xStart={p.currentAge} END={sim.END} ticks={ticks} underwaterSpans={underwaterSpans}
             accessYou={sim.accessYou} enforceAccess={p.enforceAccess} unlockAtFire={sim.unlockYouAtFire}
             partnerStopsAtAge={sim.partnerStopsAtAge} expenseMarks={sim.expenseMarks} coastTarget={sim.coastTarget}
@@ -2691,10 +3146,10 @@ function Calculator({ shared, isMobile }) {
             coastCross={sim.coastCross} coastCrossValue={sim.coastCrossValue}
             fireCross={retireOnLoan ? null : sim.fireCross} fireCrossValue={retireOnLoan ? null : sim.fireCrossValue}
             show={show} setShow={setShow}
-          />
+          />}
 
           {/* TRACE THE NUMBERS — the year-by-year arithmetic behind the chart */}
-          <Collapsible
+          {hasPlan && <Collapsible
             title="Trace the numbers"
             subtitle="Year-by-year: what came in, what went out, and what each bucket did"
             open={traceOpen} onToggle={() => setTraceOpen((v) => !v)}
@@ -2711,7 +3166,7 @@ function Calculator({ shared, isMobile }) {
               </div>
             )}
             <TraceTable trace={sim.trace} accessAge={sim.accessYou} fireCross={sim.fireCross} />
-          </Collapsible>
+          </Collapsible>}
 
           {/* WHAT MOVES THE NEEDLE — each row is a full re-run of the model, not a rule of thumb */}
           {levers.length > 0 && (

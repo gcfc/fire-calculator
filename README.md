@@ -41,7 +41,7 @@ Other commands:
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Dev server with hot reload. |
-| `npm test` | Runs the model's test suite (98 tests, ~1s). |
+| `npm test` | Runs the model's test suite (194 tests, ~5s). |
 | `npm run test:watch` | Same, in watch mode. |
 | `npm run build` | Emits `dist/index.html` — a **single self-contained file** (React and Recharts inlined). Double-click it, email it, or drop it on any static host. |
 | `npm run preview` | Serves the built `dist/` to sanity-check the bundle. |
@@ -50,7 +50,7 @@ Other commands:
 
 ```
 fire_model.jsx        the whole thing: the model (simulate) + the UI (FireModel)
-fire_model.test.js    98 tests — every one pins a real bug or an invariant
+fire_model.test.js    194 tests — every one pins a real bug or an invariant
 index.html            page shell that Vite serves
 src/main.jsx          mounts <FireModel/> into #root
 vite.config.js        React plugin + single-file build
@@ -63,17 +63,24 @@ mounting the UI:
 import { simulate, DEFAULTS } from "./fire_model.jsx";
 
 const s = simulate({ ...DEFAULTS, annualTakeHome: 160000 });
-console.log(s.fireCross);        // 42.97   <- retire at this age
-console.log(s.fireCrossValue);   // 4265553 <- the number you need at that moment
-console.log(s.fireBridge);       //  949904 <- how much of it must be in a taxable account
+console.log(s.fireCross);        // 43.13   <- retire at this age
+console.log(s.fireCrossValue);   // 4561475 <- the number you need at that moment
+console.log(s.fireBridge);       // 2711760 <- how much of it must be reachable before 59.5
 ```
 
 `fireCross` is `null` when the inputs never permit retirement — the model says "never" rather than
-inventing an answer.
+inventing an answer. It is *also* null when the only path to a date runs the spendable account
+negative and `allowBorrowing` is off (the default); `fireCrossIfBorrowed` still carries the raw
+crossing in that case, so the UI can say "you'd retire at 44.2, but only on a loan".
 
 ---
 
 ## How to use it
+
+**The app opens empty.** Every box is blank, there is no home, kid or partner, and the chart says so
+rather than showing a stranger's projection. Press **Load demo** for a fully worked household you can
+then edit. (The horizon, return, inflation and withdrawal-rate assumptions keep their defaults — a
+slider has no empty state, and they are the figures a first-time visitor is least able to supply.)
 
 **Fill in the left column with your real figures.** Homes and kids are `+`-addable lists — each
 home carries its own price, purchase age, down payment, rate, term, closing costs, property tax and
@@ -249,6 +256,51 @@ $$\text{Coast}(t) = \frac{\text{Need}(\text{coastAge})}{G^{\,\text{coastAge} - t
 It therefore **meets the `Need` curve exactly at `coastAge`** — which is both what makes the two
 curves readable together, and how the tests verify it.
 
+### 8b. Cash, and why it forces a two-rate requirement
+
+The portfolio is split into **cash** (savings/checking, earning `cashReturn`) and **investments**
+(earning $r$). Cash is spendable at any age — it counts toward the bridge exactly as taxable
+investments do — and it is **drawn down first**, because spending savings before selling assets is
+what actually happens.
+
+That single change breaks the closed form in [§5](#5-the-requirement-curve--need). `Need(a)` is a
+*single-rate* present value: it assumes every dollar compounds at $r$. Once part of the pot grows at
+$r_c \ne r$, "the balance that lands exactly on zero" is no longer one discounted sum — and the error
+is not symmetric. A cash-heavy household would be handed a date on a pot that then ran dry.
+
+The fix is exact rather than approximate, and it falls out of the draw order. Cash alone carries the
+bill from $t$ until it runs dry at $\tau$, investments compound untouched over that whole stretch,
+and from $\tau$ on it is an ordinary single-rate problem again:
+
+$$\text{Need}_{\text{total}}(t, C) = C + \frac{\text{Need}(\tau) - \Phi(t,\tau)}{G^{\,\tau - t}}$$
+
+where $\tau$ solves $C\,G_c^{\,\tau-t} = \int_t^\tau E(s)\,G^{\,\tau-s}\,ds$ and $\Phi(t,\tau)$ is the
+future value of everything that flows *into* the non-cash buckets meanwhile — a still-working
+partner's surplus, and their 401k contributions. With $C = 0$ we get $\tau = t$, $\Phi = 0$, and this
+collapses back to $\text{Need}(t)$ exactly, which is what keeps every no-cash invariant intact.
+
+The bridge gets the same treatment. Two details make it come out exact rather than close:
+
+- The bill is valued at the **portfolio** rate inside the cash recursion, because that is what
+  `spend()` charges over the same stretch. The forward drawdown is this model's ground truth, so the
+  requirement is computed against the arithmetic the drawdown actually uses. Valuing it at the cash
+  rate instead left ~\$6k at the horizon.
+- `spendSpan()` **cuts the year at the instant cash runs dry**, exactly as it already cuts at each
+  unlock. A slice that is part cash-funded and part investment-funded charges one bill against two
+  growth rates, and no closed form decomposes that.
+
+### 8c. Borrowing
+
+The model has always permitted the spendable account to go negative, with the deficit compounding at
+$r$ — an implicit loan. That is now an explicit toggle, **off by default**.
+
+- **Off** — a path that goes underwater is not a fundable plan, so `fireCross` is `null`. The full
+  simulated path is still returned, so the chart can show exactly where and why it broke.
+- **On** — the date is reported, with a banner naming the age the borrowing starts.
+
+Note this is a *feasibility* rule, not a penalty: with borrowing on, the debt still compounds at the
+portfolio rate rather than a realistic borrowing rate.
+
 ### 9. The partner
 
 Every partner *input* is in the **partner's own age** ("earns until 60" means until *they* are 60).
@@ -286,7 +338,8 @@ direction:
 | **No taxes anywhere** | Traditional 401k withdrawals are free, so the number is **too low**. Also makes the 529 pointless. |
 | **No Social Security** | Pushes the number **too high**. |
 | **Deterministic returns** — one fixed rate, no sequence risk | The single retirement age is a midpoint, not a promise. |
-| **Negative taxable is allowed** and compounds at $r$ | Implicit borrowing. The UI flags the year loudly instead of charging a penalty. |
+| **Borrowing is opt-in and off by default** | A plan that only balances on an implicit loan gets *no* date. Turning it on reports one, with the debt compounding at $r$ rather than a real borrowing rate. |
+| **Cash earns one flat rate** | No tiering, no rate changes over time. |
 | **Lumps accrue continuously** across their year | Understates a point-in-time down payment by ~3%. Enough to flip a knife-edge buy-vs-finance call. |
 
 ---
@@ -294,7 +347,7 @@ direction:
 ## Tests
 
 ```bash
-npm test     # 98 tests
+npm test     # 194 tests
 ```
 
 Every test pins either a **real bug that was found** or an **invariant that must not break**.
@@ -309,3 +362,8 @@ Notable ones:
 - Mortgage P&I matches the **closed-form amortisation**; homes stack independently.
 - On the default inputs a lone earner **never affords the house** — and the model must *say* "never"
   rather than invent an answer.
+- Cash at exactly the portfolio rate is a **no-op**: the split cannot change the date.
+- The horizon still lands on **exactly zero** with cash present, at every cash weighting, and with a
+  still-working partner — the invariant the two-rate requirement exists to protect.
+- Borrowing off **withholds every figure** resting on the blocked date, not just the age.
+- The empty state returns **the same keys** as a real run, so no consumer can hit `undefined`.

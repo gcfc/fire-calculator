@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  simulate, DEFAULTS,
+  simulate, DEFAULTS, EMPTY, isRunnable, planReadiness,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -154,7 +154,8 @@ describe("age frames — partner inputs are in the PARTNER's own age", () => {
     const single = run({ partnerAge: 0, partnerPortfolio: 250000, partnerPortfolioTaxAdv: 100000 });
     const explicitZero = run({ partnerAge: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0 });
     expect(single.rows[0].portfolio).toBe(explicitZero.rows[0].portfolio);
-    expect(single.rows[0].portfolio).toBe(DEFAULTS.startPortfolio);   // only YOUR money is left
+    // portfolio = invested + cash, and a dropped partner takes their cash with them
+    expect(single.rows[0].portfolio).toBe(DEFAULTS.startPortfolio + DEFAULTS.startCash);
     // …but a real partner's portfolio still counts
     expect(run({ partnerPortfolio: 250000 }).rows[0].portfolio)
       .toBeGreaterThan(run({ partnerPortfolio: 0 }).rows[0].portfolio);
@@ -211,7 +212,7 @@ describe("the 59.5 rule — money you cannot legally touch", () => {
     // a lone earner carrying a big house runs the taxable account underwater for years. Before this
     // rule the shortfall compounded forever and retirement never came; now, once the 401k unlocks at
     // 59.5, the shortfall is paid from it — so retirement lands past the statutory age, pot to zero.
-    const s = run({ ...SINGLE });
+    const s = run({ ...SINGLE, allowBorrowing: true });
     expect(s.fireCross).toBeGreaterThan(DEFAULTS.accessAge);
     expect(s.fireCrossValue).toBeGreaterThanOrEqual(s.fireReq - 1);   // clears the total bar
     expect(s.end).toBeLessThanOrEqual(1);                             // drawn down, no phantom growth
@@ -383,7 +384,9 @@ describe("kids — any number, each on their own clock", () => {
   it("never makes retirement EARLIER (the model has no tax benefit to give it)", () => {
     for (const annual529 of [10000, 25000, 38000]) {
       expect(run({ use529: true, annual529 }).fireCross)
-        .toBeGreaterThanOrEqual(run({ use529: false }).fireCross - 1e-6);
+        // tolerance is 1e-3 years (~9 hours) rather than 1e-6: spendSpan now also cuts at the
+        // instant cash runs dry, and a 529 shifts that instant by a hair
+        .toBeGreaterThanOrEqual(run({ use529: false }).fireCross - 1e-3);
     }
   });
 });
@@ -393,7 +396,9 @@ describe("core invariants (must hold for every scenario)", () => {
     default: {},
     // a lone earner carrying the house runs the cash account underwater for years, but once the
     // 401k unlocks at 59.5 it covers the shortfall — so retirement lands late rather than never
-    "single earner carrying the house": { ...SINGLE },
+    // a lone earner carrying this house runs the spendable account underwater for years, so it only
+    // reaches a crossing at all with borrowing switched on
+    "single earner carrying the house": { ...SINGLE, allowBorrowing: true },
     "single, renting": { ...SINGLE, homes: [] },
     "no kids, no home": { kids: [], homes: [] },
     "three homes": { homes: [HOME(), HOME({ price: 700000, purchaseAge: 40 }), HOME({ price: 500000, purchaseAge: 45 })] },
@@ -451,12 +456,12 @@ describe("the tax-advantaged slice can never exceed the portfolio it slices", ()
     const sane = run({ startPortfolio: 400000, startPortfolioTaxAdv: 400000 });
     const silly = run({ startPortfolio: 400000, startPortfolioTaxAdv: 900000 });
     expect(startingTotal(silly)).toBe(startingTotal(sane));
-    expect(startingTotal(silly)).toBe(400000 + DEFAULTS.partnerPortfolio);
+    expect(startingTotal(silly)).toBe(400000 + DEFAULTS.partnerPortfolio + DEFAULTS.startCash + DEFAULTS.partnerCash);
   });
 
   it("does the same for the partner", () => {
     const silly = run({ partnerPortfolio: 150000, partnerPortfolioTaxAdv: 900000 });
-    expect(startingTotal(silly)).toBe(DEFAULTS.startPortfolio + 150000);
+    expect(startingTotal(silly)).toBe(DEFAULTS.startPortfolio + 150000 + DEFAULTS.startCash + DEFAULTS.partnerCash);
   });
 
   it("treats an over-large figure as 'all locked, nothing taxable'", () => {
@@ -464,7 +469,10 @@ describe("the tax-advantaged slice can never exceed the portfolio it slices", ()
       startPortfolio: 400000, startPortfolioTaxAdv: 900000,
       partnerPortfolio: 150000, partnerPortfolioTaxAdv: 900000,
     });
-    expect(s.rows[0].taxable).toBe(0);
+    // `taxable` is now the spendable line — cash plus taxable investments. The clamp zeroes the
+    // INVESTED slice of it; the cash bucket is untouched by a bad 401k figure.
+    expect(s.rows[0].taxable - s.rows[0].cash).toBe(0);
+    expect(s.rows[0].cash).toBe(DEFAULTS.startCash + DEFAULTS.partnerCash);
   });
 
   it("never lets an over-large figure retire you EARLIER than the honest cap", () => {
@@ -731,8 +739,8 @@ describe("a partner who keeps working after you retire (opt-in)", () => {
     const inherit = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true });
     const explicit = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, interimLivingToday: DEFAULTS.nonHousingLiving });
     expect(inherit.fireCross).toBe(explicit.fireCross);                     // null == nonHousingLiving
-    const lean = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, interimLivingToday: 20000 });
-    const rich = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, interimLivingToday: 80000 });
+    const lean = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, interimLivingToday: 20000, allowBorrowing: true });
+    const rich = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, interimLivingToday: 80000, allowBorrowing: true });
     expect(lean.fireCross).toBeLessThan(rich.fireCross);                    // spend more in between -> retire later
   });
 
@@ -753,7 +761,7 @@ describe("a partner who keeps working after you retire (opt-in)", () => {
     // turn the intentional surplus into a $0-terminal "fix".
     const p = {
       ...DEFAULTS,
-      currentAge: 26, startPortfolio: 35000, startPortfolioTaxAdv: 3500,
+      currentAge: 26, startPortfolio: 35000, startPortfolioTaxAdv: 3500, startCash: 0, partnerCash: 0,
       annualTakeHome: 60000, annualTaxAdv: 7000, nonHousingLiving: 18000, rentAnnual: 18000,
       homes: [{ price: 200000, purchaseAge: 30, downPct: 0.3, rate: 0.065, term: 15, closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }],
       kids: [{ birthAge: 35 }, { birthAge: 37 }],
@@ -1055,8 +1063,9 @@ describe("entry conveniences — enter what you actually know", () => {
 
   it("gross netting touches only take-home, not pre-tax 401k contributions", () => {
     // raising the effective rate must lower spendable income (retire later) but leave the tax-adv flow alone
-    const base = simulate({ ...DEFAULTS, incomeMode: "gross", effTaxRate: 20 });
-    const higher = simulate({ ...DEFAULTS, incomeMode: "gross", effTaxRate: 35 });
+    // netting this hard drives the spendable account underwater, so both runs need borrowing on
+    const base = simulate({ ...DEFAULTS, incomeMode: "gross", effTaxRate: 20, allowBorrowing: true });
+    const higher = simulate({ ...DEFAULTS, incomeMode: "gross", effTaxRate: 35, allowBorrowing: true });
     expect(higher.fireCross).toBeGreaterThan(base.fireCross);
   });
 
@@ -1097,9 +1106,10 @@ describe("a retirement that only works on a loan is not a FIRE number", () => {
 
   it("retiresOnLoan flags a crossing reached only by going underwater, and clears when the path is solvent", () => {
     const loan = simulate(LOAN_CASE);
-    expect(loan.fireCross).not.toBeNull();       // a crossing DOES exist…
-    expect(loan.illiquidAge).not.toBeNull();     // …but the cash account went underwater to get there
+    expect(loan.fireCrossIfBorrowed).not.toBeNull();   // a crossing DOES exist…
+    expect(loan.illiquidAge).not.toBeNull();           // …but the cash account went underwater to get there
     expect(retiresOnLoan(loan)).toBe(true);
+    expect(loan.fireCross).toBeNull();                 // …so with borrowing off, no date is reported
 
     const clean = simulate({ ...DEFAULTS });     // the default two-earner path never goes underwater
     expect(clean.illiquidAge).toBeNull();
@@ -1120,7 +1130,7 @@ describe("a retirement that only works on a loan is not a FIRE number", () => {
     // downstream code (levers, allocation advice) still needs the underlying number; suppression is a
     // UI/snapshot concern, so simulate() must keep reporting it
     const loan = simulate(LOAN_CASE);
-    expect(typeof loan.fireCross).toBe("number");
+    expect(typeof loan.fireCrossIfBorrowed).toBe("number");
   });
 });
 
@@ -1358,5 +1368,242 @@ describe("a one-off's sign is its direction (the UI enters a positive magnitude)
     expect(asExpense.expenseMarks[0].amount).toBe(50000);
     expect(asIncome.expenseMarks[0].amount).toBe(-50000);
     expect(asExpense.expenseMarks[0].age).toBe(asIncome.expenseMarks[0].age);
+  });
+});
+
+describe("cash is its own bucket, earning its own rate", () => {
+  // THE POINT: splitting the portfolio into cash + investments is only meaningful if cash compounds
+  // differently. That breaks the single-rate closed form Need[] is built on, so the requirement had
+  // to learn the two-rate split. These pin that it learned it exactly, not approximately.
+
+  it("is a no-op when cash earns exactly the portfolio rate", () => {
+    // the strongest available equivalence: at the same rate the split cannot matter, so a household
+    // holding 55k in cash must land on the identical date as one holding it in taxable investments
+    const split = simulate({ ...DEFAULTS, cashReturn: DEFAULTS.nominalReturn });
+    const merged = simulate({
+      ...DEFAULTS, cashReturn: DEFAULTS.nominalReturn,
+      startCash: 0, partnerCash: 0,
+      startPortfolio: DEFAULTS.startPortfolio + DEFAULTS.startCash,
+      partnerPortfolio: DEFAULTS.partnerPortfolio + DEFAULTS.partnerCash,
+    });
+    expect(split.fireCross).toBeCloseTo(merged.fireCross, 6);
+    expect(split.fireCrossValue).toBeCloseTo(merged.fireCrossValue, 2);
+  });
+
+  it("still lands the horizon on exactly zero when total wealth binds", () => {
+    // The invariant the whole two-rate split exists to protect. A single-rate Need[] against a
+    // slower-growing cash bucket left $8.4k at the horizon, and for a cash-HEAVY household it would
+    // have erred the other way — retiring you on a pot that then ran dry.
+    for (const startCash of [0, 40000, 200000, 400000]) {
+      const s = simulate({ ...DEFAULTS, startCash, rothLadder: true });
+      expect(Math.abs(s.end), `startCash=${startCash}`).toBeLessThan(1);
+    }
+  });
+
+  it("holds that invariant with a still-working partner too", () => {
+    // the partner's surplus lands in INVESTMENTS while cash pays the bills, so the investments at
+    // retirement are smaller than untouched compounding implies — worth $1.46M when unmodelled
+    const s = simulate({ ...DEFAULTS, partnerWorksAfterRetire: true, enforceAccess: false, startCash: 150000 });
+    expect(Math.abs(s.end)).toBeLessThan(5);
+  });
+
+  it("makes you retire later the more of the pot sits in cash, once cash yields less", () => {
+    const lean = simulate({ ...DEFAULTS, startPortfolio: 500000, startCash: 100000 });
+    const heavy = simulate({ ...DEFAULTS, startPortfolio: 200000, startCash: 400000 });
+    expect(heavy.fireCross).toBeGreaterThan(lean.fireCross);
+  });
+
+  it("counts cash toward the pre-59.5 bridge — it is spendable at any age", () => {
+    // a household with the same total but more of it in cash is no LESS liquid, so moving invested
+    // taxable money into cash must never strand the bridge
+    const s = simulate({ ...DEFAULTS, startCash: 300000, startPortfolio: 300000 });
+    expect(s.rows[0].taxable).toBe(s.rows[0].cash + (300000 - DEFAULTS.startPortfolioTaxAdv)
+      + (DEFAULTS.partnerPortfolio - DEFAULTS.partnerPortfolioTaxAdv));
+  });
+
+  it("erodes against inflation at a 0% cash rate", () => {
+    const zero = simulate({ ...DEFAULTS, cashReturn: 0, startCash: 200000 });
+    const yielding = simulate({ ...DEFAULTS, cashReturn: 0.04, startCash: 200000 });
+    expect(zero.fireCross).toBeGreaterThan(yielding.fireCross);
+    expect(zero.rows.every((r) => Number.isFinite(r.portfolio))).toBe(true);   // no divide-by-ln(1)
+  });
+
+  it("drops a partner's cash along with the rest of their money", () => {
+    const single = simulate({ ...DEFAULTS, partnerAge: 0 });
+    expect(single.rows[0].cash).toBe(DEFAULTS.startCash);
+  });
+});
+
+describe("borrowing is opt-in", () => {
+  // A plan that only balances by running the spendable account negative is an implicit loan. The UI
+  // always refused to PRESENT it; the model now refuses to produce it unless you ask.
+  const LOAN = { ...DEFAULTS, partnerAge: 0, partnerIncome: 0, partnerTaxAdv: 0,
+                 partnerPortfolio: 0, partnerPortfolioTaxAdv: 0, partnerCash: 0 };
+
+  it("withholds the date by default, and hands it back when borrowing is allowed", () => {
+    const off = simulate(LOAN);
+    const on = simulate({ ...LOAN, allowBorrowing: true });
+    expect(off.illiquidAge).not.toBeNull();
+    expect(off.fireCross).toBeNull();
+    expect(off.borrowingBlocked).toBe(true);
+    expect(on.fireCross).not.toBeNull();
+    expect(on.borrowingBlocked).toBe(false);
+    // the underlying crossing is the same either way — only whether it is reported changes
+    expect(off.fireCrossIfBorrowed).toBeCloseTo(on.fireCross, 9);
+  });
+
+  it("withholds every figure that rests on the blocked date, not just the age", () => {
+    const off = simulate(LOAN);
+    for (const k of ["fireCross", "fireCrossValue", "fireReq", "fireTaxable", "fireBridge", "fireLocked"]) {
+      expect(off[k], k).toBeNull();
+    }
+    expect(off.fireAge).toBeNull();
+  });
+
+  it("still returns the full path, so the chart can show where it broke", () => {
+    const off = simulate(LOAN);
+    expect(off.rows.length).toBeGreaterThan(0);
+    expect(off.trace.length).toBeGreaterThan(0);
+    expect(off.underwaterCause).not.toBeNull();
+  });
+
+  it("is inert on a solvent plan", () => {
+    const off = simulate({ ...DEFAULTS });
+    const on = simulate({ ...DEFAULTS, allowBorrowing: true });
+    expect(off.illiquidAge).toBeNull();
+    expect(off.fireCross).toBe(on.fireCross);
+    expect(off.borrowingBlocked).toBe(false);
+  });
+});
+
+describe("the app opens empty", () => {
+  it("returns a well-formed empty result rather than NaN soup", () => {
+    const s = simulate(EMPTY);
+    expect(s.rows).toEqual([]);
+    expect(s.trace).toEqual([]);
+    expect(s.fireCross).toBeNull();
+    expect(s.END).toBe(0);
+    expect(s.hasPartner).toBe(false);
+  });
+
+  it("returns exactly the same keys as a real run, so no consumer hits undefined", () => {
+    // an empty-state field that simulate() forgot would read as `undefined` in the UI and render as
+    // "NaN" or crash a chart; pinning the key sets makes that impossible to introduce
+    expect(Object.keys(simulate(EMPTY)).sort()).toEqual(Object.keys(simulate(DEFAULTS)).sort());
+  });
+
+  it("treats a blank box as blank, not as a string", () => {
+    // "" + 5 is "5"; without the normalise pass a half-filled form produced string arithmetic
+    const half = simulate({ ...EMPTY, currentAge: 30, endAge: 90, retirementSpendToday: 50000 });
+    expect(half.rows.length).toBeGreaterThan(0);
+    expect(half.rows.every((r) => Number.isFinite(r.portfolio) && Number.isFinite(r.required))).toBe(true);
+  });
+
+  it("starts projecting as soon as there is an age and a horizon", () => {
+    expect(isRunnable(EMPTY)).toBe(false);
+    expect(isRunnable({ ...EMPTY, currentAge: 30 })).toBe(true);   // endAge keeps its default
+    expect(isRunnable({ ...EMPTY, currentAge: 30, endAge: 25 })).toBe(false);
+  });
+
+  it("loading the demo fills every blank", () => {
+    const demo = simulate(DEFAULTS);
+    expect(demo.fireCross).not.toBeNull();
+    expect(demo.rows.length).toBeGreaterThan(0);
+  });
+});
+
+describe("a half-filled form has no answer to give", () => {
+  // THE BUG: with no retirement budget entered, retireExpense() is zero every year, so Need[] is
+  // identically zero, so ANY balance clears the bar. An age-only form reported "you could stop
+  // working today" — and because you retire in year one, every working-year input became inert:
+  // sweeping non-housing living costs moved neither the date nor the terminal value by a cent.
+  const PARTIAL = {
+    ...EMPTY, currentAge: 30, startCash: 10000, startPortfolio: 500000,
+    startPortfolioTaxAdv: 200000, annualTakeHome: 144000, annualTaxAdv: 30000,
+  };
+
+  it("reproduces the inert sweep it exists to prevent", () => {
+    const dates = [0, 20000, 40000, 80000].map((nonHousingLiving) =>
+      simulate({ ...PARTIAL, nonHousingLiving }).fireCross);
+    expect(new Set(dates).size).toBe(1);         // nothing moves…
+    expect(dates[0]).toBe(PARTIAL.currentAge);   // …because you "retire" on day one
+    expect(planReadiness(PARTIAL).ready).toBe(false);
+  });
+
+  it("moves again the moment a retirement budget exists", () => {
+    const withBudget = { ...PARTIAL, retirementSpendToday: 60000 };
+    expect(planReadiness(withBudget).ready).toBe(true);
+    const dates = [0, 20000, 40000, 80000].map((nonHousingLiving) =>
+      simulate({ ...withBudget, nonHousingLiving }).fireCross);
+    expect(new Set(dates).size).toBe(4);
+    for (let i = 1; i < dates.length; i++) expect(dates[i]).toBeGreaterThan(dates[i - 1]);
+  });
+
+  it("asks for an age, a retirement budget, and something to fund it with", () => {
+    const keysMissing = (p) => planReadiness(p).checks.filter((c) => !c.ok).map((c) => c.key);
+    expect(keysMissing(EMPTY)).toEqual(["age", "spend", "resources"]);
+    expect(keysMissing({ ...EMPTY, currentAge: 30 })).toEqual(["spend", "resources"]);
+    expect(keysMissing({ ...EMPTY, currentAge: 30, retirementSpendToday: 60000 })).toEqual(["resources"]);
+    expect(keysMissing({ ...EMPTY, currentAge: 30, retirementSpendToday: 60000, annualTakeHome: 90000 })).toEqual([]);
+  });
+
+  it("counts savings alone as enough to fund it — someone already retired has no income", () => {
+    const retiree = { ...EMPTY, currentAge: 67, retirementSpendToday: 50000, startPortfolio: 1200000 };
+    expect(planReadiness(retiree).ready).toBe(true);
+  });
+
+  it("counts a pension alone, too", () => {
+    const p = { ...EMPTY, currentAge: 67, retirementSpendToday: 50000,
+                incomes: [{ label: "SS", amount: 30000, startAge: 67, whose: "you", cola: true }] };
+    expect(planReadiness(p).ready).toBe(true);
+  });
+
+  it("ignores a partner's money while the partner is switched off", () => {
+    const p = { ...EMPTY, currentAge: 30, retirementSpendToday: 60000,
+                partnerEnabled: false, partnerAge: 30, partnerPortfolio: 900000 };
+    expect(planReadiness(p).ready).toBe(false);
+    expect(planReadiness({ ...p, partnerEnabled: true }).ready).toBe(true);
+  });
+
+  it("the demo is ready by construction", () => {
+    expect(planReadiness(DEFAULTS).ready).toBe(true);
+  });
+});
+
+describe("coast FIRE needs a target before it draws anything", () => {
+  // THE BUG: a blank coast age normalises to 0, and the clamp turned that into currentAge + 1 — so
+  // ticking the checkbox drew a full coast curve against "retire next year", a target nobody chose.
+  const READY = { ...EMPTY, currentAge: 30, retirementSpendToday: 60000, annualTakeHome: 120000,
+                  startPortfolio: 400000 };
+
+  it("draws no curve while the coast age is blank", () => {
+    const s = simulate({ ...READY, useCoast: true, coastAge: "" });
+    expect(s.useCoast).toBe(true);            // the box is ticked…
+    expect(s.coastSpecified).toBe(false);     // …but the question is unanswered
+    expect(s.coastTarget).toBeNull();
+    expect(s.coastToday).toBeNull();
+    expect(s.coastCross).toBeNull();
+    expect(s.coastShortfall).toBeNull();
+    expect(s.rows.every((r) => r.coast == null)).toBe(true);
+  });
+
+  it("never invents a target one year out", () => {
+    const s = simulate({ ...READY, useCoast: true, coastAge: "" });
+    expect(s.coastTarget).not.toBe(READY.currentAge + 1);
+  });
+
+  it("draws it as soon as an age is given", () => {
+    const s = simulate({ ...READY, useCoast: true, coastAge: 50 });
+    expect(s.coastSpecified).toBe(true);
+    expect(s.coastTarget).toBe(50);
+    expect(s.coastToday).toBeGreaterThan(0);
+    expect(s.rows.some((r) => r.coast != null)).toBe(true);
+  });
+
+  it("is still fully off when the box is unticked", () => {
+    const s = simulate({ ...READY, useCoast: false, coastAge: 50 });
+    expect(s.useCoast).toBe(false);
+    expect(s.coastSpecified).toBe(false);
+    expect(s.coastTarget).toBeNull();
   });
 });
