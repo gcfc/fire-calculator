@@ -1884,3 +1884,74 @@ describe("a home is an asset, not just a hole", () => {
     expect(r.portfolio).toBeCloseTo(r.taxable + r.retirement, -1);   // the house is not in the pot
   });
 });
+
+describe("expenses can be dated from retirement instead of from an age", () => {
+  // The model SOLVES for the retirement instant, so "the first ten years of retirement" is not
+  // expressible as a fixed age until you already know the answer. The schedule depends on the date
+  // and the date depends on the schedule; simulate() resolves it by iteration.
+  const BASE = { ...DEFAULTS, partnerEnabled: false, homes: [], kids: [], currentAge: 35,
+                 annualTakeHome: 150000, nonHousingLiving: 45000, retirementSpendToday: 60000,
+                 startPortfolio: 700000, startPortfolioTaxAdv: 200000, startCash: 30000, rentAnnual: 24000 };
+  const rel = (o) => ({ label: "travel", amount: 25000, anchor: "retirement", age: 0, until: 9, ...o });
+
+  it("lands the expense on the date it solves for, not on a guess", () => {
+    const s = simulate({ ...BASE, expenses: [rel()] });
+    expect(s.fireCross).not.toBeNull();
+    const at = Math.round(s.fireCross);
+    // the marker the chart draws sits at the resolved age
+    expect(s.expenseMarks[0].age).toBe(at);
+    // …and the money is actually charged across the window
+    const inWindow = s.trace.filter((t) => t.age >= at && t.age <= at + 9);
+    expect(inWindow.every((t) => t.lumps > 0)).toBe(true);
+    const after = s.trace.find((t) => t.age === at + 11);
+    expect(after.lumps).toBe(0);
+  });
+
+  it("costs money — a retirement-dated expense pushes the date out", () => {
+    const without = simulate({ ...BASE });
+    const with_ = simulate({ ...BASE, expenses: [rel()] });
+    expect(with_.fireCross).toBeGreaterThan(without.fireCross);
+  });
+
+  it("settles on a fixed point: the window really does start at the answer", () => {
+    const s = simulate({ ...BASE, expenses: [rel({ amount: 40000, until: 14 })] });
+    const at = s.fireCross;
+    // re-running with the answer already known must not move it again
+    const again = simulate({ ...BASE, expenses: [rel({ amount: 40000, until: 14 })] });
+    expect(again.fireCross).toBeCloseTo(at, 6);
+  });
+
+  it("negative offsets put money before the date", () => {
+    const s = simulate({ ...BASE, expenses: [rel({ label: "sabbatical", age: -3, until: -1 })] });
+    const at = Math.round(s.fireCross);
+    expect(s.trace.find((t) => t.age === at - 2).lumps).toBeGreaterThan(0);
+  });
+
+  it("a windfall dated from retirement brings the date in", () => {
+    const s = simulate({ ...BASE, expenses: [rel({ label: "inheritance", amount: -200000, age: 2, until: null })] });
+    const plain = simulate({ ...BASE });
+    expect(s.fireCross).toBeLessThan(plain.fireCross);
+  });
+
+  it("is inert when the household never retires", () => {
+    const broke = { ...BASE, startPortfolio: 0, startCash: 0, annualTakeHome: 20000,
+                    retirementSpendToday: 200000 };
+    const s = simulate({ ...broke, expenses: [rel()] });
+    expect(s.fireCross).toBeNull();
+    expect(s.expenseMarks).toEqual([]);      // nothing to anchor to ⇒ nothing to draw
+  });
+
+  it("leaves absolute-age expenses exactly as they were", () => {
+    const abs = [{ label: "roof", amount: 30000, age: 50, until: null }];
+    const a = simulate({ ...BASE, expenses: abs });
+    const b = simulate({ ...BASE, expenses: abs });
+    expect(a.fireCross).toBe(b.fireCross);
+    expect(a.expenseMarks[0].age).toBe(50);
+  });
+
+  it("runs the model once when nothing is retirement-dated", () => {
+    // the iteration is opt-in: a plan with no relative expense must not pay for the fixed point
+    const plain = simulate({ ...BASE, expenses: [{ label: "car", amount: 30000, age: 45, until: null }] });
+    expect(plain.fireCross).not.toBeNull();
+  });
+});

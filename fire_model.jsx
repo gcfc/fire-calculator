@@ -151,7 +151,10 @@ const emptyResult = (p) => ({
   partnerAgeAtFire: null, partnerAgeAtEnd: null,
 });
 
-export function simulate(rawP) {
+// One pass of the model. `retireAnchor` is the retirement instant that phase-relative expenses hang
+// off; it is null on the first pass, because nothing knows the date yet. simulate() below turns this
+// into a fixed point.
+function simulateOnce(rawP, retireAnchor) {
   const p = normalizeParams(rawP);
   if (!isRunnable(p)) return emptyResult(p);
   const ret = p.nominalReturn;
@@ -419,11 +422,27 @@ export function simulate(rawP) {
   // monthly payment you actually make — amortised to a payoff age, then billed as a level annual P&I
   // stream (a mortgage without the house). Both are just extra outflows, so they net into the
   // requirement, the bridge, and the drawdown for free.
+  // An expense may be dated in one of two frames. "At your age" is an absolute age, as before. "From
+  // retirement" reads `age` and `until` as OFFSETS from the retirement instant — 0 is the year you
+  // stop, 5 is five years later, -2 is two years before — which is how you express "travel hard for
+  // the first decade" or "long-term care from 20 years in" without first knowing your own date.
+  //
+  // On the first pass there is no date to hang them off, so they are skipped; simulate() feeds the
+  // resulting date back in and runs again.
+  const relAnchor = (e) => (e && e.anchor === "retirement");
   const extraLump = {};
   for (const e of (p.expenses || [])) {
     const amt = (e && +e.amount) || 0;
     if (!amt) continue;
-    const a0 = Math.round(e.age), a1 = e.until ? Math.max(a0, Math.round(e.until)) : a0;
+    let a0, a1;
+    if (relAnchor(e)) {
+      if (retireAnchor == null) continue;                       // no date yet — resolved on a later pass
+      a0 = Math.round(retireAnchor + (+e.age || 0));
+      a1 = e.until === "" || e.until == null ? a0 : Math.max(a0, Math.round(retireAnchor + (+e.until || 0)));
+    } else {
+      a0 = Math.round(e.age);
+      a1 = e.until ? Math.max(a0, Math.round(e.until)) : a0;
+    }
     for (let y = a0; y <= a1; y++) extraLump[y] = (extraLump[y] || 0) + amt * inflAt(y);
   }
   const debts = (p.debts || []).map((d) => {
@@ -1227,7 +1246,12 @@ export function simulate(rawP) {
     minSave: Math.round(minSave), minSaveAge, end, rows, trace, END,
     accessYou, accessPartner, partnerOffset, hasPartner,
     // one-off expense/windfall markers for the chart, and each debt's derived payoff age for its card
-    expenseMarks: (p.expenses || []).filter((e) => (+e.amount) || 0).map((e) => ({ age: Math.round(e.age), amount: +e.amount })),
+    expenseMarks: (p.expenses || []).filter((e) => (+e.amount) || 0)
+      .map((e) => ({
+        age: Math.round(relAnchor(e) ? (retireAnchor ?? NaN) + (+e.age || 0) : e.age),
+        amount: +e.amount,
+      }))
+      .filter((m) => Number.isFinite(m.age)),
     debtPayoffs: debts.map((d) => (d.neverPays || d.annual <= 0 ? null : d.payoff)),
     // guaranteed-income stream: its present value today (the "lump-sum equivalent") and where it starts
     incomePV, incomeStartMarks,
@@ -1258,6 +1282,30 @@ export function simulate(rawP) {
     partnerAgeAtFire: hasPartner && T != null ? partnerAgeAt(T) : null,
     partnerAgeAtEnd: hasPartner ? partnerAgeAt(END) : null,
   };
+}
+
+// Phase-relative expenses are dated off an instant the model SOLVES for, so the schedule depends on
+// the answer and the answer depends on the schedule. Resolve it by iteration: run with nothing
+// anchored, feed the date back in, run again, and stop once it settles.
+//
+// It converges quickly because each pass moves the date by less than the last — an expense pushed
+// later has less present value, which pushes the date back less. The cap is there for the pathological
+// case rather than the normal one; if a plan genuinely oscillates, the final iterate is still a
+// coherent world, just not a fixed point. Scenarios with no phase-relative expense take the first
+// branch and run exactly once, so nothing that worked before pays for this.
+export function simulate(rawP) {
+  const hasRelative = (rawP && rawP.expenses || []).some((e) => e && e.anchor === "retirement" && (+e.amount || 0));
+  if (!hasRelative) return simulateOnce(rawP, null);
+
+  let out = simulateOnce(rawP, null), anchor = out.fireCross;
+  for (let i = 0; i < 6 && anchor != null; i++) {
+    const next = simulateOnce(rawP, anchor);
+    const moved = next.fireCross == null ? Infinity : Math.abs(next.fireCross - anchor);
+    out = next;
+    if (moved < 0.01) break;
+    anchor = next.fireCross;
+  }
+  return out;
 }
 
 // The one number box everything uses. Two things it gets right that a raw <input type=number> does not:
@@ -2912,10 +2960,59 @@ function Calculator({ shared, isMobile }) {
                   </label>
                   <Num label="amount (today's $)" value={Math.abs(+e.amount || 0)} step={1000} min={0}
                     onChange={(v) => setExpense(i, "amount", Math.abs(v) * ((+e.amount || 0) < 0 ? -1 : 1))} />
-                  <Num label="at your age" value={e.age} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "age", v)} />
-                  <Num label="until age (blank=one-off)" value={e.until ?? ""} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "until", v || null)} />
+                  {e.anchor === "retirement" ? (
+                    <>
+                      <Num label="years from retirement" value={e.age} step={1} min={-60}
+                        onChange={(v) => setExpense(i, "age", v)} />
+                      <Num label="until (blank=one-off)" value={e.until ?? ""} step={1} min={-60}
+                        onChange={(v) => setExpense(i, "until", v === "" ? null : v)} />
+                    </>
+                  ) : (
+                    <>
+                      <Num label="at your age" value={e.age} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "age", v)} />
+                      <Num label="until age (blank=one-off)" value={e.until ?? ""} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "until", v || null)} />
+                    </>
+                  )}
                 </div>
+                {/* Dating an expense off retirement rather than off an age: the model solves for the
+                    date, so "the first ten years of retirement" is not something you can express as a
+                    fixed age until you already know the answer. */}
+                <select
+                  value={e.anchor === "retirement" ? "retirement" : "age"}
+                  aria-label={`what ${e.label || "this expense"} is dated from`}
+                  onChange={(ev) => {
+                    const toRel = ev.target.value === "retirement";
+                    // carry the value across frames so the field doesn't read as a wild age/offset
+                    const at = Math.round(sim.fireCross ?? p.currentAge);
+                    setExpense(i, "anchor", toRel ? "retirement" : "age");
+                    setP((s) => ({ ...s, expenses: s.expenses.map((x, j) => j !== i ? x : {
+                      ...x, anchor: toRel ? "retirement" : "age",
+                      age: toRel ? Math.round((+x.age || 0) - at) : Math.round((+x.age || 0) + at),
+                      until: x.until == null || x.until === "" ? x.until
+                        : toRel ? Math.round((+x.until || 0) - at) : Math.round((+x.until || 0) + at),
+                    }) }));
+                  }}
+                  style={{
+                    background: C.bg, border: `1px solid ${C.line}`, color: C.teal, borderRadius: 5,
+                    padding: "3px 5px", cursor: "pointer", fontSize: 10, alignSelf: "flex-start",
+                    fontFamily: "'Space Grotesk', sans-serif",
+                  }}>
+                  <option value="age" style={{ background: C.panel, color: C.ink }}>dated at an age</option>
+                  <option value="retirement" style={{ background: C.panel, color: C.ink }}>dated from retirement</option>
+                </select>
                 {(() => {
+                  if (e.anchor === "retirement") {
+                    const o0 = Math.round(+e.age || 0), o1 = e.until == null || e.until === "" ? o0 : Math.round(+e.until);
+                    const when = (o) => o === 0 ? "the year you retire" : o > 0 ? `${o}y after retiring` : `${-o}y before retiring`;
+                    return (
+                      <div style={{ fontSize: 10, color: C.mute }}>
+                        {fmt(Math.abs(e.amount))} {e.amount < 0 ? "in" : "out"}
+                        {o1 > o0 ? <> each year from {when(o0)} to {when(o1)}</> : <> at {when(o0)}</>}
+                        {sim.fireCross != null && <> — on the current answer, your age {Math.round(sim.fireCross + o0)}
+                          {o1 > o0 ? `–${Math.round(sim.fireCross + o1)}` : ""}.</>}
+                      </div>
+                    );
+                  }
                   const a0 = Math.round(e.age), a1 = e.until ? Math.round(e.until) : a0;
                   const win = e.until && a1 > a0;
                   const pastStart = a0 < p.currentAge;
