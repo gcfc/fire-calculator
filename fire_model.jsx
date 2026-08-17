@@ -76,7 +76,7 @@ export const grossFromNet = (net, effRatePct) => {
 const NUMERIC_PARAMS = [
   "currentAge", "startPortfolio", "startPortfolioTaxAdv", "startCash",
   "annualTakeHome", "annualTaxAdv", "nonHousingLiving", "rentAnnual",
-  "inflation", "nominalReturn", "cashReturn", "swr",
+  "inflation", "nominalReturn", "cashReturn", "swr", "homeGrowth",
   "daycarePerKid", "ongoingPerKid", "collegePerKid", "annual529",
   "partnerAge", "partnerIncome", "partnerTaxAdv", "partnerPortfolio", "partnerPortfolioTaxAdv",
   "partnerCash", "partnerStart", "partnerEnd",
@@ -206,18 +206,41 @@ export function simulate(rawP) {
   // artifacts — the monthly P&I and how many years are left — so we take those directly and skip the
   // reverse-engineering. Carry (property tax + insurance/upkeep) is likewise either a % of price or, for
   // an owner reading it straight off the bills, a dollar figure.
+  // A home appreciates at `homeGrowth` (nominal). Until this existed a home was pure expense with no
+  // resale value, which made "rent forever" win by construction — the single biggest distortion the
+  // README admitted to. A home may now be SOLD, which pays off whatever principal is left, deducts a
+  // selling cost, and drops the net proceeds into the taxable account.
+  const homeGrowth = Math.max(0, +p.homeGrowth || 0);
+  const Gh = 1 + homeGrowth;
   const homes = (p.homes || []).filter((h) => (h.owned ? true : h.price > 0)).map((h) => {
     const carryMode = h.owned || h.carryMode === "dollar" ? "dollar" : "pct";
     const propTaxAnnual = Math.max(0, +h.propTaxAnnual || 0);
     const insMaintAnnual = Math.max(0, +h.insMaintAnnual || 0);
+    // a sale age only counts once you own the place, and selling the year you buy is a no-op
+    const rawSell = h.sellAge === "" || h.sellAge == null ? null : +h.sellAge;
+    // test the RAW field for "unset" before coercing: `+undefined` is NaN, and NaN === undefined is
+    // false, so coercing first meant the default was never reached and the whole sale went NaN.
+    const rawPct = h.sellCostPct;
+    const sellPct = Math.max(0, Math.min(100,
+      rawPct == null || rawPct === "" || !Number.isFinite(+rawPct) ? 6 : +rawPct)) / 100;
     if (h.owned) {
       // you know the payment and the years remaining, not price/rate/term. Owned as of today, so there
       // is no closing cash and P&I simply runs for the years that are left.
       const mPI = Math.max(0, +h.monthlyPI || 0) * 12;
       const yearsLeft = Math.max(0, +h.yearsLeft || 0);
+      // `price` is today's market value for a home you already own; `owedNow` is what's left on the loan
+      const value0 = Math.max(0, +h.price || 0);
+      const rate = Math.max(0, +h.rate || 0);
+      // principal outstanding implied by the payment and the years left (level amortisation, run backwards)
+      const i = rate / 12, n = yearsLeft * 12;
+      const owed0 = mPI <= 0 || n <= 0 ? 0
+        : i > 0 ? (mPI / 12) * (1 - Math.pow(1 + i, -n)) / i
+                : (mPI / 12) * n;
+      const sellAge = rawSell != null && rawSell > p.currentAge ? rawSell : null;
       return {
-        ...h, owned: true, carryMode, propTaxAnnual, insMaintAnnual, loan: 0, mPI,
+        ...h, owned: true, carryMode, propTaxAnnual, insMaintAnnual, loan: owed0, mPI,
         purchaseAge: p.currentAge, payoff: p.currentAge + yearsLeft, down: 0,
+        value0, rate, term: yearsLeft, sellAge, sellPct,
       };
     }
     const loan = h.price * (1 - h.downPct);
@@ -226,16 +249,45 @@ export function simulate(rawP) {
     const mPI = loan <= 0 ? 0
       : i > 0 ? (loan * i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1) * 12
               : loan / Math.max(1, h.term);
+    const sellAge = rawSell != null && rawSell > h.purchaseAge ? rawSell : null;
     return {
       ...h, owned: false, carryMode, propTaxAnnual, insMaintAnnual, loan, mPI,
       payoff: h.purchaseAge + h.term,                  // the year P&I stops
       down: (h.downPct + h.closingPct) * h.price,      // cash you must have at closing
+      value0: h.price, rate: h.rate, sellAge, sellPct,
     };
   });
+
+  // Is this home still yours in year `age`? Owned from purchase until the year it is sold.
+  const ownedIn = (h, age) => age >= h.purchaseAge && (h.sellAge == null || age < h.sellAge);
+
+  // Market value at `age`: the value at acquisition, appreciating at homeGrowth. For a home bought in
+  // the past the entered price is today's value, so it grows from today rather than from purchase.
+  const valueAt = (h, age) => {
+    const from = h.owned ? p.currentAge : Math.max(h.purchaseAge, p.currentAge);
+    return h.value0 * Math.pow(Gh, Math.max(0, age - from));
+  };
+
+  // Principal still owed at `age`, from the standard remaining-balance formula. Zero once the loan is
+  // paid off, and zero before the keys change hands.
+  const owedAt = (h, age) => {
+    if (age <= h.purchaseAge) return h.owned ? h.loan : h.loan;
+    if (age >= h.payoff || h.mPI <= 0) return 0;
+    const monthsLeft = (h.payoff - age) * 12, i = (h.rate || 0) / 12, m = h.mPI / 12;
+    return i > 0 ? m * (1 - Math.pow(1 + i, -monthsLeft)) / i : m * monthsLeft;
+  };
+
+  // Net cash from selling in the year it happens: market value, less selling costs, less the loan
+  // you must clear. Can be negative when a home is sold underwater — the model lets that stand rather
+  // than pretending a sale always pays.
+  const saleProceedsAt = (age) => homes.reduce((s, h) =>
+    s + (h.sellAge != null && Math.round(h.sellAge) === age
+      ? valueAt(h, age) * (1 - h.sellPct) - owedAt(h, age)
+      : 0), 0);
   // property tax drifts ~2%/yr with assessments; insurance + upkeep track inflation. Dollar-mode figures
   // are today's $ and drift from the year you enter them (purchase year, or today for a home you own).
   const carryOf = (h, age) => {
-    if (age < h.purchaseAge) return 0;
+    if (!ownedIn(h, age)) return 0;
     const yrs = age - h.purchaseAge;
     if (h.carryMode === "dollar")
       return h.propTaxAnnual * Math.pow(1.02, yrs)
@@ -248,18 +300,20 @@ export function simulate(rawP) {
   const housingAt = (age) => {
     let owned = 0, cost = 0;
     for (const h of homes) {
-      if (age < h.purchaseAge) continue;
+      if (!ownedIn(h, age)) continue;
       owned++;
       cost += carryOf(h, age);
       if (age < h.payoff) cost += h.mPI;
     }
+    // sell the only home you live in and you are a renter again, at today's rent inflated forward
     if (owned === 0) cost += p.rentAnnual * Math.pow(1 + p.inflation, age - p.currentAge);
     return cost;
   };
   const downAt = (age) => homes.reduce((s, h) => s + (age === h.purchaseAge ? h.down : 0), 0);
   const piAt = (age) =>
-    homes.reduce((s, h) => s + (age >= h.purchaseAge && age < h.payoff ? h.mPI : 0), 0);
-  const lastPayoff = homes.length ? Math.max(...homes.map((h) => h.payoff)) : null;
+    homes.reduce((s, h) => s + (ownedIn(h, age) && age < h.payoff ? h.mPI : 0), 0);
+  const held = homes.filter((h) => h.sellAge == null || h.sellAge > h.payoff);
+  const lastPayoff = held.length ? Math.max(...held.map((h) => h.payoff)) : null;
 
   // the naive 4%-rule number, for contrast — spending plus whatever housing costs in steady state
   const steadyCarry = (h) => h.carryMode === "dollar"
@@ -455,7 +509,8 @@ export function simulate(rawP) {
       { key: HOUSING, amount: housingAt(age) },
       // charged in BOTH phases — a child at home costs the same whether or not you have a job
       { key: KIDS, amount: kidCostAt(age) },
-      { key: LUMPS, amount: downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age) },
+      { key: LUMPS, amount: downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age)
+                            - saleProceedsAt(age) },
       // pension / Social Security / annuity: negative because it offsets the bill rather than adding
       // to it. Liquid, so it also shrinks the pre-59.5 bridge.
       { key: INCOME, amount: -incomeAt(age) },
@@ -564,7 +619,7 @@ export function simulate(rawP) {
     let req = 0;
     for (let i = slices.length - 1; i >= 0; i--) {
       const [dt, yr] = slices[i];
-      req = (req + Math.max(0, bill(yr)) * fv(dt)) / growC(dt);
+      req = Math.max(0, (req + Math.max(0, bill(yr)) * fv(dt)) / growC(dt));
     }
     return req;
   };
@@ -610,6 +665,32 @@ export function simulate(rawP) {
 
   // present value, at instant `t`, of the SPENDABLE bill between `t` and `u` (net of a working
   // partner's take-home, which is liquid; their 401k contribution is handled separately, below)
+  // The bridge has to fund the WORST MOMENT of the window, not merely its endpoint.
+  //
+  // A plain present value nets a late inflow against early spending, which is right for the wealth
+  // constraint — over the whole horizon a dollar is a dollar, whenever it lands — and wrong for the
+  // liquidity one, because you cannot pay this year's bills out of next decade's house sale. Adding
+  // home sales made this reachable: selling before 59.5 cut the computed bridge so far that the model
+  // retired you years early, then ran the cash account underwater waiting for the proceeds, and (with
+  // borrowing off) reported "you never retire" for a plan that a later date funds comfortably.
+  //
+  // Taking the running maximum of the partial present value asks the question the cash account
+  // actually poses: how much do you need to REACH the worst point. It is unchanged whenever spending
+  // is positive throughout, which is the ordinary case.
+  const pvSpendPeak = (t, u, atCashRate = false) => {
+    const pvf = atCashRate ? pvFlowC : pvFlow, base = atCashRate ? Gc : G;
+    let acc = 0, peak = 0, disc = 1, s = t;
+    const stop = Math.min(u, END + 1);
+    while (s < stop) {
+      const yr = Math.floor(s), s1 = Math.min(stop, yr + 1), dt = s1 - s;
+      acc += disc * retireNetLiquid(yr) * pvf(dt);
+      if (acc > peak) peak = acc;
+      disc *= Math.pow(base, -dt);
+      s = s1;
+    }
+    return peak;
+  };
+
   // `atCashRate` discounts at the cash rate instead — the minimum CASH that bridges a window, which
   // is what's required when cash alone covers it
   const pvSpend = (t, u, atCashRate = false) => {
@@ -631,12 +712,12 @@ export function simulate(rawP) {
   const spendReq = (T, u, C) => {
     const stop = Math.min(u, END + 1);
     if (stop <= T) return 0;
-    if (!(C > 0)) return pvSpend(T, u);
+    if (!(C > 0)) return pvSpendPeak(T, u);
     const tau = cashDryAt(T, C, retireNetLiquid, stop);
     // cash alone spans the whole window — the requirement is then just the cash that exactly does it
     // (never more than C, so a fatter cash pile is never penalised for being large)
     if (tau >= stop - 1e-9) return cashReqFor(T, stop, retireNetLiquid);
-    return C + pvSpend(tau, u) / grow(tau - T);
+    return C + pvSpendPeak(tau, u) / grow(tau - T);
   };
 
   // present value, at instant `t`, of a working partner's 401k contributions between `t` and `u` —
@@ -951,6 +1032,10 @@ export function simulate(rawP) {
       neededRetirement: Math.max(0, Math.round(reqReal) - Math.round(bridgeReal)),
       coast: coastReal == null ? null : Math.round(coastReal),
       save: Math.round(realSave),
+      // home equity held this year: market value less principal still owed, in today's dollars.
+      // Not part of the portfolio — you cannot spend a house — but the shape of it is what makes
+      // buy-vs-rent legible, so the chart can draw it as its own series.
+      equity: Math.round(homes.reduce((s, h) => s + (ownedIn(h, age) ? valueAt(h, age) - owedAt(h, age) : 0), 0) / infl),
       events, bornNames,
     });
 
@@ -985,7 +1070,11 @@ export function simulate(rawP) {
             bridge: Math.round(fireBridge),
             neededRetirement: Math.max(0, Math.round(fireReq) - Math.round(fireBridge)),
             coast: coastTarget != null && T <= coastTarget ? Math.round(coastAt(T) / inflT) : null,
-            save: 0, events: [],
+            // NB: this row is built by hand, so every field the yearly row carries has to be
+            // repeated here or it reads as `undefined` for exactly one age — which is how `equity`
+            // arrived non-finite at the retirement instant and nowhere else.
+            equity: Math.round(homes.reduce((s, h) => s + (ownedIn(h, T) ? valueAt(h, T) - owedAt(h, T) : 0), 0) / inflT),
+            save: 0, events: [], bornNames: [],
           });
         }
         const r = spendSpan(sT, T, age + 1, T);               // retired for the rest of the year
@@ -1125,7 +1214,14 @@ export function simulate(rawP) {
     homes: homes.map((h) => ({
       price: h.price ?? 0, purchaseAge: h.purchaseAge, payoff: h.payoff,
       mPI: h.mPI, down: h.down, carryAtBuy: carryOf(h, h.purchaseAge), owned: !!h.owned,
+      sellAge: h.sellAge,
+      // what the sale actually hands you, in today's dollars, so the card can show it
+      saleValue: h.sellAge == null ? null : valueAt(h, h.sellAge) / inflAt(h.sellAge),
+      saleOwed: h.sellAge == null ? null : owedAt(h, h.sellAge) / inflAt(h.sellAge),
+      saleNet: h.sellAge == null ? null
+        : (valueAt(h, h.sellAge) * (1 - h.sellPct) - owedAt(h, h.sellAge)) / inflAt(h.sellAge),
     })),
+
     lastPayoff,
     mortgageAtFire: T == null ? 0 : piAt(Math.floor(T)),   // P&I still running when you retire
     minSave: Math.round(minSave), minSaveAge, end, rows, trace, END,
@@ -1665,6 +1761,8 @@ export const DEFAULTS = {
   enforceAccess: true, rothLadder: false, ladderYears: 5, accessAge: 59.5,
   // cash earns its own (lower) rate; borrowing to fund the plan is off unless you opt in
   cashReturn: 0.04, allowBorrowing: false,
+  // homes appreciate; without this they were pure expense and renting forever won by construction
+  homeGrowth: 0.04,
 };
 
 // What the app opens on: every box you'd type a figure into is blank, and there is no home, no kid
@@ -1697,6 +1795,7 @@ const SERIES = [
   { key: "retire", label: "FIRE age", color: C.brass, mark: "◆", on: true },
   { key: "coast", label: "coast FIRE curve", color: C.coast, dash: true, on: true },
   { key: "taxable", label: "taxable cash account", color: C.liquid },
+  { key: "equity", label: "home equity (not spendable)", color: C.brass },
   { key: "retirement", label: "retirement accounts (401k/IRA)", color: C.locked },
   { key: "bridge", label: "minimum in taxable before retirement", color: C.coral, dash: true },
   { key: "neededRetirement", label: "minimum in retirement accounts", color: C.locked, dash: true },
@@ -1886,6 +1985,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
     underwater: underwaterSpans.length > 0,
     home: homeRows.length > 0,
     kids: kidRows.length > 0,
+    equity: rows.some((r) => (r.equity || 0) > 0),
     expense: !!(expenseMarks && expenseMarks.some((m) => m.amount >= 0)),
     windfall: !!(expenseMarks && expenseMarks.some((m) => m.amount < 0)),
   };
@@ -1917,6 +2017,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
               retirement: "Retirement accounts (401k/IRA)",
               required: "Needed in total", bridge: "Needed in taxable",
               neededRetirement: "Needed in retirement accounts",
+              equity: "Home equity (not spendable)",
               coast: coastTarget != null ? `Coast bar (stop saving, retire at ${coastTarget})` : "Coast bar",
             }[name] || name]}
             labelFormatter={(a) => "Age " + a}
@@ -1934,6 +2035,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
           {show.bridge && enforceAccess ? <Line type="monotone" dataKey="bridge" stroke={C.coral} strokeWidth={1.5} strokeDasharray="3 3" dot={false} /> : null}
           {show.neededRetirement && enforceAccess ? <Line type="monotone" dataKey="neededRetirement" stroke={C.locked} strokeWidth={1.5} strokeDasharray="5 4" dot={false} /> : null}
           {show.retirement ? <Line type="monotone" dataKey="retirement" stroke={C.locked} strokeWidth={1.5} dot={false} /> : null}
+          {show.equity && applies.equity ? <Line type="monotone" dataKey="equity" stroke={C.brass} strokeWidth={1.5} strokeDasharray="1 3" dot={false} /> : null}
           {show.taxable ? <Line type="monotone" dataKey="taxable" stroke={C.liquid} strokeWidth={1.5} dot={false} /> : null}
           {show.portfolio ? <Line type="monotone" dataKey="portfolio" stroke={C.teal} strokeWidth={2.5} dot={false} /> : null}
           {show.home ? homeRows.map((h) => <ReferenceDot key={h.age} x={h.age} y={h.portfolio} r={5} fill={C.brass} stroke={C.bg} />) : null}
@@ -2616,6 +2718,8 @@ function Calculator({ shared, isMobile }) {
 
                   {owned ? (
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <Num label="What it's worth today" value={h.price ?? 0} step={25000} onChange={(v) => setHome(i, "price", v)} />
+                      <Num label="Mortgage rate %" value={h.rate ?? 0} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
                       <Num label="Payment / mo (P&I)" value={h.monthlyPI ?? 0} step={100} onChange={(v) => setHome(i, "monthlyPI", v)} />
                       <Num label="Years left" value={h.yearsLeft ?? 0} step={1} onChange={(v) => setHome(i, "yearsLeft", v)} />
                       <Num label="Property tax / yr ($)" value={h.propTaxAnnual ?? 0} step={500} onChange={(v) => setHome(i, "propTaxAnnual", v)} />
@@ -2649,6 +2753,27 @@ function Calculator({ shared, isMobile }) {
                         onClick={() => (dollarCarry ? toPctCarry() : toDollarCarry())} />
                     </div>
                   )}
+
+                  {/* Selling is what makes a home an asset rather than a hole. Leave the age blank to
+                      keep it for good. */}
+                  <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 9 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      <Num label="Sell at your age (blank = keep)" value={h.sellAge ?? ""} step={1}
+                        yearRef={p.currentAge} onChange={(v) => setHome(i, "sellAge", v || null)} />
+                      <Num label="Selling costs %" value={h.sellCostPct ?? 6} step={0.5}
+                        onChange={(v) => setHome(i, "sellCostPct", v)} />
+                    </div>
+                    {m && m.sellAge != null && (
+                      <div style={{ fontSize: 10, color: C.mute, marginTop: 7, lineHeight: 1.6 }}>
+                        Sells for <b style={{ color: C.ink }}>{fmt(m.saleValue)}</b> in today's $
+                        {m.saleOwed > 0 && <> · still owing <b style={{ color: C.ink }}>{fmt(m.saleOwed)}</b></>}
+                        {" "}· nets <b style={{ color: m.saleNet >= 0 ? C.teal : C.coral }}>{fmt(m.saleNet)}</b> into
+                        your taxable account.
+                        {m.saleNet < 0 && <> That's a sale <b style={{ color: C.coral }}>underwater</b> — it costs
+                          you cash rather than paying you.</>}
+                      </div>
+                    )}
+                  </div>
 
                   {m && (
                     <div style={{ fontSize: 10, color: C.mute, marginTop: 8, lineHeight: 1.6 }}>
@@ -2959,6 +3084,7 @@ function Calculator({ shared, isMobile }) {
               {[
                 ["Annual portfolio return %", "nominalReturn", 3, 10],
                 ["Cash return % (savings account)", "cashReturn", 0, 6],
+                ["Home appreciation %", "homeGrowth", 0, 8],
                 ["Inflation %", "inflation", 1, 6],
                 ["Safe withdrawal rate %", "swr", 2.5, 5],
               ].map(([l, k, lo, hi]) => (

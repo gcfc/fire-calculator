@@ -1747,3 +1747,140 @@ describe("kids can carry names", () => {
     expect(named.fireCrossValue).toBe(plain.fireCrossValue);
   });
 });
+
+describe("a home is an asset, not just a hole", () => {
+  // Until homes appreciated and could be sold, they were pure expense with no resale value — so
+  // "rent forever" beat buying by construction. This was the single biggest distortion the README
+  // admitted to.
+  const H = (o = {}) => ({ price: 600000, purchaseAge: 30, downPct: 0.2, rate: 0.06, term: 30,
+                           closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013, ...o });
+  const BASE = { ...DEFAULTS, partnerEnabled: false, kids: [], currentAge: 28,
+                 annualTakeHome: 150000, nonHousingLiving: 40000, retirementSpendToday: 70000,
+                 startPortfolio: 300000, startPortfolioTaxAdv: 100000, startCash: 20000 };
+
+  it("tracks equity: value climbs, principal falls", () => {
+    const s = simulate({ ...BASE, homes: [H()] });
+    const at = (age) => s.rows.find((r) => r.age === age).equity;
+    expect(at(29)).toBe(0);                       // not bought yet
+    expect(at(31)).toBeGreaterThan(0);            // down payment plus a year of appreciation
+    expect(at(45)).toBeGreaterThan(at(35));       // equity builds
+    expect(at(65)).toBeGreaterThan(at(45));       // …and keeps building once the loan clears
+  });
+
+  it("selling pays the net proceeds into the taxable account", () => {
+    const keep = simulate({ ...BASE, homes: [H()] });
+    const sell = simulate({ ...BASE, homes: [H({ sellAge: 50 })] });
+    const spendableAt = (s, age) => s.rows.find((r) => r.age === age).taxable;
+    expect(spendableAt(sell, 51)).toBeGreaterThan(spendableAt(keep, 51));
+    expect(sell.homes[0].saleNet).toBeGreaterThan(0);
+  });
+
+  it("stops charging carry and P&I once it is sold, and puts you back on rent", () => {
+    const s = simulate({ ...BASE, rentAnnual: 30000, homes: [H({ sellAge: 40 })] });
+    const t = (age) => s.trace.find((x) => x.age === age).housing;
+    expect(t(39)).toBeGreaterThan(0);
+    // after the sale the only housing cost is rent, which is far below carry + mortgage
+    expect(t(41)).toBeLessThan(t(39));
+    expect(t(41)).toBeGreaterThan(0);            // renting again, not living free
+  });
+
+  it("nets out the loan still outstanding, and selling costs", () => {
+    const s = simulate({ ...BASE, homes: [H({ sellAge: 40, sellCostPct: 6 })] });
+    const h = s.homes[0];
+    expect(h.saleOwed).toBeGreaterThan(0);                       // mid-term, principal remains
+    expect(h.saleNet).toBeCloseTo(h.saleValue * 0.94 - h.saleOwed, -1);
+  });
+
+  it("a bigger selling cost nets less", () => {
+    const cheap = simulate({ ...BASE, homes: [H({ sellAge: 40, sellCostPct: 2 })] });
+    const dear = simulate({ ...BASE, homes: [H({ sellAge: 40, sellCostPct: 10 })] });
+    expect(dear.homes[0].saleNet).toBeLessThan(cheap.homes[0].saleNet);
+  });
+
+  it("can sell underwater without pretending it pays", () => {
+    // sell one year in, at 10% costs, having put only 5% down: the loan outruns the net price
+    const s = simulate({ ...BASE, homeGrowth: 0, homes: [H({ downPct: 0.05, sellAge: 31, sellCostPct: 10 })] });
+    expect(s.homes[0].saleNet).toBeLessThan(0);
+  });
+
+  it("selling is what lets buying beat renting", () => {
+    const rent = simulate({ ...BASE, homes: [], rentAnnual: 30000 });
+    const keep = simulate({ ...BASE, homes: [H()], rentAnnual: 30000 });
+    const sell = simulate({ ...BASE, homes: [H({ sellAge: 60 })], rentAnnual: 30000 });
+    // holding a home is still costly on these inputs; realising the equity is what changes the answer
+    expect(sell.fireCross).toBeLessThan(keep.fireCross);
+    expect(rent.fireCross).toBeGreaterThan(0);
+  });
+
+  it("appreciation matters and zero growth is not a crash", () => {
+    const flat = simulate({ ...BASE, homeGrowth: 0, homes: [H({ sellAge: 55 })] });
+    const rising = simulate({ ...BASE, homeGrowth: 0.05, homes: [H({ sellAge: 55 })] });
+    expect(rising.homes[0].saleNet).toBeGreaterThan(flat.homes[0].saleNet);
+    expect(flat.rows.every((r) => Number.isFinite(r.equity))).toBe(true);
+  });
+
+  it("a sale age at or before purchase is ignored, not honoured", () => {
+    const bad = simulate({ ...BASE, homes: [H({ sellAge: 29 })] });   // before the purchase at 30
+    const none = simulate({ ...BASE, homes: [H()] });
+    expect(bad.fireCross).toBe(none.fireCross);
+    expect(bad.homes[0].sellAge).toBeNull();
+  });
+
+  it("no sale age leaves every figure exactly as before", () => {
+    const a = simulate({ ...BASE, homes: [H()] });
+    const b = simulate({ ...BASE, homes: [H({ sellAge: null, sellCostPct: 6 })] });
+    expect(a.fireCross).toBe(b.fireCross);
+    expect(a.fireCrossValue).toBe(b.fireCrossValue);
+  });
+
+  it("still lands the horizon on zero with a sale in the middle of retirement", () => {
+    const s = simulate({ ...BASE, rothLadder: true, enforceAccess: false, homes: [H({ sellAge: 62 })] });
+    expect(Math.abs(s.end)).toBeLessThan(5);
+  });
+
+  it("gives the retirement-instant row every field the yearly rows carry", () => {
+    // that row is built by hand, so a new row field can be present for 70 ages and undefined for one
+    const s = simulate({ ...DEFAULTS, homes: [{ price: 600000, purchaseAge: 30, downPct: 0.2, rate: 0.06,
+      term: 30, closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }] });
+    const whole = s.rows.find((r) => Number.isInteger(r.age));
+    for (const r of s.rows) {
+      expect(Object.keys(r).sort(), `age ${r.age}`).toEqual(Object.keys(whole).sort());
+    }
+  });
+
+  it("an earlier sale retires you earlier, and one past the unlock changes nothing", () => {
+    // THE BUG this pins: the bridge was a plain present value, so a sale scheduled before 59.5 netted
+    // against the spending it had to precede. The model retired you years early, ran the cash account
+    // underwater waiting for the proceeds, and (borrowing off) reported "you never retire" for a plan
+    // a later date funds comfortably. The bridge now funds the WORST MOMENT of the window.
+    const at = (sellAge) => simulate({ ...DEFAULTS, homes: DEFAULTS.homes.map((h) => ({ ...h, sellAge })) });
+    const s50 = at(50), s55 = at(55), s60 = at(60), keep = at(null);
+    for (const s of [s50, s55, s60, keep]) {
+      expect(s.fireCross).not.toBeNull();
+      expect(s.illiquidAge).toBeNull();
+    }
+    expect(s50.fireCross).toBeLessThan(s55.fireCross);
+    expect(s55.fireCross).toBeLessThan(s60.fireCross);
+    // a sale after the 59.5 wall cannot shorten a bridge that is already over
+    expect(s60.fireCross).toBeCloseTo(keep.fireCross, 6);
+    // …but it still lowers the total requirement, because the money is real
+    expect(s60.rows[0].required).toBeLessThan(keep.rows[0].required);
+  });
+
+  it("a mid-bridge windfall cannot fund the years before it arrives", () => {
+    // same defect, reachable without a home: a large inheritance late in the bridge used to reduce the
+    // taxable requirement below what was needed to reach it
+    const base = { ...DEFAULTS, partnerEnabled: false, homes: [], kids: [], currentAge: 35,
+                   annualTakeHome: 160000, nonHousingLiving: 45000, retirementSpendToday: 70000,
+                   startPortfolio: 900000, startPortfolioTaxAdv: 600000, startCash: 20000, rentAnnual: 24000 };
+    const s = simulate({ ...base, expenses: [{ label: "inheritance", age: 57, amount: -800000, until: null }] });
+    expect(s.fireCross == null || s.illiquidAge == null).toBe(true);
+  });
+
+  it("equity is never counted as spendable portfolio", () => {
+    const s = simulate({ ...BASE, homes: [H()] });
+    const r = s.rows.find((x) => x.age === 45);
+    expect(r.equity).toBeGreaterThan(0);
+    expect(r.portfolio).toBeCloseTo(r.taxable + r.retirement, -1);   // the house is not in the pot
+  });
+});
