@@ -49,7 +49,7 @@ npm run dev      # http://localhost:5173 — hot-reloads on save
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Dev server with hot reload. |
-| `npm test` | The model's test suite (264 tests, ~6s). |
+| `npm test` | The model's test suite (271 tests, ~7s). |
 | `npm run test:watch` | Same, in watch mode. |
 | `npm run build` | Emits `dist/index.html` — a **single self-contained file** (React and Recharts inlined). Double-click it, email it, or drop it on any static host. |
 | `npm run preview` | Serves the built `dist/` to sanity-check the bundle. |
@@ -85,7 +85,7 @@ form "you could stop working today".
 | **You / Partner** | Age, cash, taxable investments, tax-advantaged accounts, take-home pay, contributions, living costs, rent. The two investment balances are **independent** — enter each as it appears on its own statement. Every partner field is in **their** age, not yours. |
 | **Retirement** | What a year costs once you stop (excluding housing — homes price themselves), your horizon, and optional coast FIRE. |
 | **Homes** | Any number. Each carries its own price, purchase age, down payment, rate, term, closing costs, property tax and upkeep — and an optional **sale age**. |
-| **Kids** | Any number, each with a name and their own clock. Cost fields appear only for phases a child has not already aged out of. |
+| **Kids** | Any number, each on their own clock. Click a child's name in its label to rename them. Cost fields appear only for phases a child has not already aged out of. |
 | **Major expenses / income** | One-offs and windows. Datable at an age, or **relative to retirement**. |
 | **Retirement income** | Pensions, Social Security, annuities. Streams, not pots. |
 | **Debts** | Balance, rate and the payment you actually make; the payoff age is derived. |
@@ -116,6 +116,8 @@ Every series is a clickable chip below the chart — the legend *is* the control
   plan. Watch daycare appear and vanish, the mortgage clear, and the retirement accounts sit sealed
   while your savings carry the bills alone.
 - **Will it survive history?** — your plan replayed against real sequences of returns since 1928.
+  Historical cycles update live as you drag the equity weight; the sampled modes wait for a click,
+  because their run-to-run wobble is the same size as the effect you would be watching.
 - **Trace the numbers** — the year-by-year arithmetic behind every line on the chart.
 - **What moves the needle** — each row is a full re-run of the model, ranked in years of retirement
   bought.
@@ -134,7 +136,7 @@ Two kinds of link, both encoded into the URL — there is no backend and nothing
 ```
 fire_model.jsx        the model (simulate) and the UI (FireModel) — ~4,000 lines
 history.js            annual US market returns since 1928, bundled not fetched
-fire_model.test.js    264 tests — every one pins a real bug or an invariant
+fire_model.test.js    271 tests — every one pins a real bug or an invariant
 legal.js              privacy/terms copy
 scripts/build-legal.mjs  renders legal.js to dist/<slug>/index.html
 index.html            page shell Vite serves
@@ -425,9 +427,13 @@ Two methods:
 - **Historical cycles** — replay each contiguous run of years in the order it occurred, keeping 1929
   followed by 1930. Few independent samples: a 76-year plan leaves ~20 complete windows in a century
   of data, and neighbouring windows share all but one year.
-- **Block bootstrap** — stitch random five-year blocks. Unlimited samples, at the cost of sequences
-  that never happened. Drawing single years would destroy the autocorrelation the feature exists to
-  show.
+- **Random start year** — begin anywhere and run forward in real order, wrapping past the end of the
+  record. As many distinct sequences as you ask for, every year still followed by the year that
+  actually followed it, for one artificial seam per trial where 2024 meets 1928.
+- **Block bootstrap** — stitch random blocks together, block length adjustable. Unlimited samples, at
+  the cost of a seam every block and sequences that never happened.
+
+The three order themselves by seam count, as you would hope: on the demo, 95.5% / 86.5% / ~76%.
 
 A trial fails if it ends below zero *or* could only continue by borrowing.
 
@@ -463,7 +469,7 @@ survivorship bias cannot see.
 ## Tests
 
 ```bash
-npm test     # 264 tests
+npm test     # 271 tests
 ```
 
 Every test pins either a **real bug that was found** or an **invariant that must not break**. Notable
