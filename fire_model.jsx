@@ -2038,58 +2038,68 @@ function SankeyPanel({ trace, fireCross, isMobile }) {
   const d = useMemo(() => sankeyYear(t), [t]);
   // Absolute scale, so the diagram shrinks when the money does — the collapse in total flow the year
   // the salary stops is the whole reason to have a scrubber, and normalising per year would throw it
-  // away. But the reference is the 90th percentile of years, not the maximum: one lumpy year (a
-  // house closing is half a million on its own) otherwise sets the scale for the whole plan and
-  // squashes every ordinary year to a sliver. Years above the reference simply draw taller rather
-  // than being clipped, which keeps every year measured in the same dollars-per-pixel.
+  // away. Referenced to the 90th percentile of years rather than the maximum, because one lumpy year
+  // (a house closing is half a million on its own) otherwise sets the scale for the whole plan and
+  // squashes every ordinary year to a sliver. A year above the reference draws taller rather than
+  // being clipped, so every year stays measured in the same dollars per pixel.
   const scale = useMemo(() => {
     const totals = trace.map((x) => (sankeyYear(x) || { total: 0 }).total).sort((a, b) => a - b);
     const ref = Math.max(1, totals[Math.floor(totals.length * 0.9)] || totals[totals.length - 1] || 1);
-    return 260 / ref;
+    return 300 / ref;
   }, [trace]);
   if (!d) return null;
 
-  const W = isMobile ? 340 : 760, NODE = 12, PAD = 6;
-  const stack = (list) => {
-    let y = 20;
+  // THREE columns, not two. Money is fungible — the model pools it and pays the bills out of the
+  // pool — so there is no honest per-pair attribution between a given source and a given sink. Two
+  // columns forced one, which is why the first version came out as a handful of enormously fat bands
+  // welded together: a greedy match between the two stacks. With a pool in the middle each ribbon
+  // carries exactly one real quantity, and there are as many of them as there are actual flows.
+  const ML = isMobile ? 118 : 168, MR = isMobile ? 118 : 168;
+  const W = isMobile ? 660 : 880, NODE = 9, PAD = 12;
+  const xL = ML, xM = W / 2 - NODE / 2, xR = W - MR - NODE;
+
+  const stack = (list, x) => {
+    let y = 24;
     return list.map((n) => {
-      const h = Math.max(n.value * scale, n.value > 0 ? 1 : 0);
-      const seg = { ...n, y0: y, y1: y + h, h };
+      const h = Math.max(2, n.value * scale);
+      const seg = { ...n, x, y0: y, y1: y + h, h, mid: y + h / 2 };
       y += h + PAD;
       return seg;
     });
   };
-  const src = stack(d.sources), snk = stack(d.sinks);
-  const bottom = Math.max(20, ...src.map((n) => n.y1), ...snk.map((n) => n.y1));
-  const H = Math.max(180, bottom + 20);
-  const xL = 4, xR = W - NODE - 4, xm = W / 2;
+  const src = stack(d.sources, xL), snk = stack(d.sinks, xR);
 
-  // Ribbons run source-stack to sink-stack in order: each side is drawn as one continuous column, so
-  // the ribbon between them is the intersection of two running offsets. Keeps the drawing free of any
-  // per-flow attribution the model does not actually claim.
-  const ribbons = [];
-  {
-    const srcQ = src.map((n) => ({ ...n, left: n.h })), snkQ = snk.map((n) => ({ ...n, left: n.h }));
-    let i = 0, j = 0, sy = src.length ? src[0].y0 : 20, ty = snk.length ? snk[0].y0 : 20;
-    let guard = 0;
-    while (i < srcQ.length && j < snkQ.length && guard++ < 500) {
-      const take = Math.min(srcQ[i].left, snkQ[j].left);
-      if (take > 0.4) {
-        ribbons.push({
-          key: `${srcQ[i].key}-${snkQ[j].key}`,
-          a0: sy, a1: sy + take, b0: ty, b1: ty + take,
-          color: srcQ[i].isGrowth ? C.brass : srcQ[i].isDebt ? C.coral : snkQ[j].color,
-          dim: !!srcQ[i].isGrowth,
-        });
-      }
-      srcQ[i].left -= take; snkQ[j].left -= take; sy += take; ty += take;
-      if (srcQ[i].left <= 0.4) { i++; if (i < srcQ.length) sy = src[i].y0; }
-      if (snkQ[j].left <= 0.4) { j++; if (j < snkQ.length) ty = snk[j].y0; }
-    }
-  }
+  // The pool is one node as tall as the flow through it, and each ribbon meets it at a running
+  // offset — no padding on this side, because the pool is a single quantity rather than a stack.
+  const poolH = Math.max(2, d.total * scale);
+  const poolTop = 24;
+  const offsets = (list) => {
+    let y = poolTop;
+    return list.map((n) => { const o = { y0: y, y1: y + Math.max(2, n.value * scale) }; y = o.y1; return o; });
+  };
+  const inAt = offsets(src), outAt = offsets(snk);
 
-  const path = (r) =>
-    `M${xL + NODE},${r.a0} C${xm},${r.a0} ${xm},${r.b0} ${xR},${r.b0} L${xR},${r.b1} C${xm},${r.b1} ${xm},${r.a1} ${xL + NODE},${r.a1} Z`;
+  const bottom = Math.max(poolTop + poolH, ...src.map((n) => n.y1), ...snk.map((n) => n.y1));
+  const H = Math.max(200, bottom + 24);
+
+  // d3's sankeyLinkHorizontal draws a link as a STROKED centre line rather than a filled polygon:
+  // one cubic with horizontal tangents at both ends, stroke-width set to the flow. Curves stay smooth
+  // where a filled quadrilateral pinches, and the whole thing is one path instead of four edges.
+  // `k` pulls the control points in from the midpoint — lower is a tighter, more pronounced S.
+  const K = 0.42;
+  const link = (x0, y0, x1, y1) => {
+    const dx = x1 - x0;
+    return `M${x0},${y0} C${x0 + dx * K},${y0} ${x1 - dx * K},${y1} ${x1},${y1}`;
+  };
+
+  // Labels sit outside the columns so they never cross a ribbon, and a second pass pushes any that
+  // would collide far enough apart to read. Without it a run of small flows stacks into mush.
+  const declump = (list) => {
+    const out = list.map((n) => ({ ...n, ly: n.mid }));
+    for (let i = 1; i < out.length; i++) out[i].ly = Math.max(out[i].ly, out[i - 1].ly + 15);
+    return out;
+  };
+  const srcL = declump(src), snkL = declump(snk);
 
   const phaseLabel = d.phase === "working" ? "still working" : d.phase === "retires" ? "the year you retire" : "retired";
 
@@ -2114,29 +2124,46 @@ function SankeyPanel({ trace, fireCross, isMobile }) {
         style={{ accentColor: C.brass, width: "100%" }} />
 
       <div style={{ overflowX: "auto" }}>
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: isMobile ? 320 : 620 }} role="img"
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: isMobile ? 560 : 680 }} role="img"
           aria-label={`Cash flows at age ${d.age}`}>
-          {ribbons.map((r) => (
-            <path key={r.key} d={path(r)} fill={r.color} opacity={r.dim ? 0.16 : 0.3} />
-          ))}
-          {src.map((n) => (
-            <g key={n.key}>
-              <rect x={xL} y={n.y0} width={NODE} height={n.h} fill={n.color} opacity={n.isGrowth ? 0.5 : 1} />
-              <text x={xL + NODE + 6} y={n.y0 + n.h / 2 - 1} fontSize={10} fill={C.ink}
-                fontFamily="'Space Grotesk', sans-serif" dominantBaseline="middle">{n.label}</text>
-              <text x={xL + NODE + 6} y={n.y0 + n.h / 2 + 10} fontSize={9} fill={C.mute}
-                fontFamily="'JetBrains Mono', monospace" dominantBaseline="middle">{fmt(n.value)}</text>
-            </g>
-          ))}
-          {snk.map((n) => (
-            <g key={n.key}>
-              <rect x={xR} y={n.y0} width={NODE} height={n.h} fill={n.color} />
-              <text x={xR - 6} y={n.y0 + n.h / 2 - 1} fontSize={10} fill={C.ink} textAnchor="end"
-                fontFamily="'Space Grotesk', sans-serif" dominantBaseline="middle">{n.label}</text>
-              <text x={xR - 6} y={n.y0 + n.h / 2 + 10} fontSize={9} fill={C.mute} textAnchor="end"
-                fontFamily="'JetBrains Mono', monospace" dominantBaseline="middle">{fmt(n.value)}</text>
-            </g>
-          ))}
+            {src.map((n, i) => (
+              <path key={`i${n.key}`} fill="none" strokeLinecap="butt"
+                stroke={n.isDebt ? C.coral : n.isGrowth ? C.brass : n.color}
+                strokeWidth={Math.max(1, n.h)} opacity={n.isGrowth ? 0.22 : 0.4}
+                d={link(xL + NODE, n.mid, xM, (inAt[i].y0 + inAt[i].y1) / 2)} />
+            ))}
+            {snk.map((n, i) => (
+              <path key={`o${n.key}`} fill="none" strokeLinecap="butt" stroke={n.color}
+                strokeWidth={Math.max(1, n.h)} opacity={0.4}
+                d={link(xM + NODE, (outAt[i].y0 + outAt[i].y1) / 2, xR, n.mid)} />
+            ))}
+
+            <rect x={xM} y={poolTop} width={NODE} height={poolH} fill={C.mute} opacity={0.55} rx={2} />
+
+            {src.map((n) => (
+              <rect key={`sn${n.key}`} x={n.x} y={n.y0} width={NODE} height={n.h} rx={2}
+                fill={n.isDebt ? C.coral : n.color} opacity={n.isGrowth ? 0.55 : 1} />
+            ))}
+            {snk.map((n) => (
+              <rect key={`kn${n.key}`} x={n.x} y={n.y0} width={NODE} height={n.h} rx={2} fill={n.color} />
+            ))}
+
+            {srcL.map((n) => (
+              <g key={`sl${n.key}`}>
+                <text x={xL - 9} y={n.ly - 4} fontSize={10.5} fill={n.isGrowth ? C.mute : C.ink} textAnchor="end"
+                  fontFamily="'Space Grotesk', sans-serif">{n.label}</text>
+                <text x={xL - 9} y={n.ly + 7} fontSize={9.5} fill={C.mute} textAnchor="end"
+                  fontFamily="'JetBrains Mono', monospace">{fmt(n.value)}</text>
+              </g>
+            ))}
+            {snkL.map((n) => (
+              <g key={`kl${n.key}`}>
+                <text x={xR + NODE + 9} y={n.ly - 4} fontSize={10.5} fill={C.ink}
+                  fontFamily="'Space Grotesk', sans-serif">{n.label}</text>
+                <text x={xR + NODE + 9} y={n.ly + 7} fontSize={9.5} fill={C.mute}
+                  fontFamily="'JetBrains Mono', monospace">{fmt(n.value)}</text>
+              </g>
+            ))}
         </svg>
       </div>
 
@@ -2148,8 +2175,9 @@ function SankeyPanel({ trace, fireCross, isMobile }) {
       )}
       <div style={{ fontSize: 11, color: C.mute, lineHeight: 1.6 }}>
         Everything in today's dollars, straight from the year-by-year trace, so the two sides balance
-        to the dollar. Growth is drawn faded because it is return rather than cash — the year it
-        outgrows your own saving is worth finding.
+        to the dollar. The column down the middle is the household — money is fungible once it arrives,
+        and pretending a particular dollar of salary paid a particular bill would be a fiction. Growth
+        is drawn faded because it is return rather than cash.
       </div>
     </div>
   );
