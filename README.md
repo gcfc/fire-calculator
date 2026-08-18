@@ -49,7 +49,7 @@ npm run dev      # http://localhost:5173 — hot-reloads on save
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Dev server with hot reload. |
-| `npm test` | The model's test suite (257 tests, ~6s). |
+| `npm test` | The model's test suite (264 tests, ~6s). |
 | `npm run test:watch` | Same, in watch mode. |
 | `npm run build` | Emits `dist/index.html` — a **single self-contained file** (React and Recharts inlined). Double-click it, email it, or drop it on any static host. |
 | `npm run preview` | Serves the built `dist/` to sanity-check the bundle. |
@@ -82,7 +82,7 @@ form "you could stop working today".
 
 | Section | What it is for |
 | --- | --- |
-| **You / Partner** | Age, cash, investments, the slice of investments in a 401k/IRA, take-home pay, contributions, living costs, rent. Every partner field is in **their** age, not yours. |
+| **You / Partner** | Age, cash, taxable investments, tax-advantaged accounts, take-home pay, contributions, living costs, rent. The two investment balances are **independent** — enter each as it appears on its own statement. Every partner field is in **their** age, not yours. |
 | **Retirement** | What a year costs once you stop (excluding housing — homes price themselves), your horizon, and optional coast FIRE. |
 | **Homes** | Any number. Each carries its own price, purchase age, down payment, rate, term, closing costs, property tax and upkeep — and an optional **sale age**. |
 | **Kids** | Any number, each with a name and their own clock. Cost fields appear only for phases a child has not already aged out of. |
@@ -134,7 +134,7 @@ Two kinds of link, both encoded into the URL — there is no backend and nothing
 ```
 fire_model.jsx        the model (simulate) and the UI (FireModel) — ~4,000 lines
 history.js            annual US market returns since 1928, bundled not fetched
-fire_model.test.js    257 tests — every one pins a real bug or an invariant
+fire_model.test.js    264 tests — every one pins a real bug or an invariant
 legal.js              privacy/terms copy
 scripts/build-legal.mjs  renders legal.js to dist/<slug>/index.html
 index.html            page shell Vite serves
@@ -238,6 +238,11 @@ rather than snapping to a birthday — see [§7](#7-solving-for-the-retirement-i
 | **Taxable investments** | `nominalReturn` | yes |
 | **Your 401k / IRA** | `nominalReturn` | no |
 | **Partner's 401k / IRA** | `nominalReturn` | no |
+
+Each is entered as its own balance. They used to be a total with the tax-advantaged share carved out
+of it, which forced people to do arithmetic to enter figures they already had off separate
+statements — and made "my 401k is bigger than my brokerage", which is most households, a state the
+model had to clamp and warn about.
 
 **Spendable** = cash + taxable investments. That is the quantity the bridge is measured against.
 Cash is drawn down first — spending savings before selling assets is what actually happens.
@@ -458,7 +463,7 @@ survivorship bias cannot see.
 ## Tests
 
 ```bash
-npm test     # 257 tests
+npm test     # 264 tests
 ```
 
 Every test pins either a **real bug that was found** or an **invariant that must not break**. Notable

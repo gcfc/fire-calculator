@@ -155,7 +155,8 @@ describe("age frames — partner inputs are in the PARTNER's own age", () => {
     const explicitZero = run({ partnerAge: 0, partnerPortfolio: 0, partnerPortfolioTaxAdv: 0 });
     expect(single.rows[0].portfolio).toBe(explicitZero.rows[0].portfolio);
     // portfolio = invested + cash, and a dropped partner takes their cash with them
-    expect(single.rows[0].portfolio).toBe(DEFAULTS.startPortfolio + DEFAULTS.startCash);
+    expect(single.rows[0].portfolio).toBe(DEFAULTS.startPortfolio + DEFAULTS.startPortfolioTaxAdv
+      + DEFAULTS.startCash);
     // …but a real partner's portfolio still counts
     expect(run({ partnerPortfolio: 250000 }).rows[0].portfolio)
       .toBeGreaterThan(run({ partnerPortfolio: 0 }).rows[0].portfolio);
@@ -447,38 +448,60 @@ describe("core invariants (must hold for every scenario)", () => {
   }
 });
 
-describe("the tax-advantaged slice can never exceed the portfolio it slices", () => {
-  // Without the clamp, taxable floors at 0 while the locked bucket keeps the whole oversized
-  // number — so an over-large 401k figure would INVENT money.
+describe("taxable investments and tax-advantaged accounts are independent balances", () => {
+  // They used to be a total with a slice carved out of it, which meant an over-large 401k figure was
+  // a state the model had to clamp and warn about. People read the two off separate statements, so
+  // asking for a total and then "how much of that is the 401k" made them do arithmetic to enter
+  // figures they already had. Now each is simply a balance.
   const startingTotal = (s) => s.rows[0].portfolio;   // age-0 row, already in today's $
+  const CASH = DEFAULTS.startCash + DEFAULTS.partnerCash;
 
-  it("does not invent money when the 401k figure exceeds your portfolio", () => {
-    const sane = run({ startPortfolio: 400000, startPortfolioTaxAdv: 400000 });
-    const silly = run({ startPortfolio: 400000, startPortfolioTaxAdv: 900000 });
-    expect(startingTotal(silly)).toBe(startingTotal(sane));
-    expect(startingTotal(silly)).toBe(400000 + DEFAULTS.partnerPortfolio + DEFAULTS.startCash + DEFAULTS.partnerCash);
+  it("adds up rather than carving up", () => {
+    const s = run({ startPortfolio: 400000, startPortfolioTaxAdv: 300000 });
+    expect(startingTotal(s)).toBe(400000 + 300000 + DEFAULTS.partnerPortfolio
+      + DEFAULTS.partnerPortfolioTaxAdv + CASH);
   });
 
-  it("does the same for the partner", () => {
-    const silly = run({ partnerPortfolio: 150000, partnerPortfolioTaxAdv: 900000 });
-    expect(startingTotal(silly)).toBe(DEFAULTS.startPortfolio + 150000 + DEFAULTS.startCash + DEFAULTS.partnerCash);
+  it("counts a 401k larger than the taxable account, which is the common case", () => {
+    // under the old carve-out this was the "impossible" state that had to be clamped; it is simply
+    // a household that has saved more into a 401k than into a brokerage, i.e. most households
+    const s = run({ startPortfolio: 50000, startPortfolioTaxAdv: 900000 });
+    expect(startingTotal(s)).toBe(50000 + 900000 + DEFAULTS.partnerPortfolio
+      + DEFAULTS.partnerPortfolioTaxAdv + CASH);
   });
 
-  it("treats an over-large figure as 'all locked, nothing taxable'", () => {
-    const s = run({
-      startPortfolio: 400000, startPortfolioTaxAdv: 900000,
-      partnerPortfolio: 150000, partnerPortfolioTaxAdv: 900000,
-    });
-    // `taxable` is now the spendable line — cash plus taxable investments. The clamp zeroes the
-    // INVESTED slice of it; the cash bucket is untouched by a bad 401k figure.
-    expect(s.rows[0].taxable - s.rows[0].cash).toBe(0);
-    expect(s.rows[0].cash).toBe(DEFAULTS.startCash + DEFAULTS.partnerCash);
+  it("keeps the spendable line to cash plus TAXABLE investments only", () => {
+    const s = run({ startPortfolio: 120000, startPortfolioTaxAdv: 900000,
+                    partnerPortfolio: 0, partnerPortfolioTaxAdv: 0 });
+    expect(s.rows[0].taxable).toBe(120000 + DEFAULTS.startCash + DEFAULTS.partnerCash);
+    expect(s.rows[0].retirement).toBe(900000);
   });
 
-  it("never lets an over-large figure retire you EARLIER than the honest cap", () => {
-    const capped = run({ startPortfolio: 400000, startPortfolioTaxAdv: 400000 });
-    const silly = run({ startPortfolio: 400000, startPortfolioTaxAdv: 900000 });
-    expect(silly.fireCross).toBeCloseTo(capped.fireCross, 9);
+  it("moves a dollar from taxable to tax-advantaged without changing the total", () => {
+    const a = run({ startPortfolio: 400000, startPortfolioTaxAdv: 200000 });
+    const b = run({ startPortfolio: 300000, startPortfolioTaxAdv: 300000 });
+    expect(startingTotal(a)).toBe(startingTotal(b));
+    // …but it does change WHEN you can retire, because one of them is reachable and one is not
+    expect(b.fireCross).toBeGreaterThan(a.fireCross);
+  });
+
+  it("raising the 401k figure raises total wealth instead of reshuffling it", () => {
+    const less = run({ startPortfolioTaxAdv: 100000 });
+    const more = run({ startPortfolioTaxAdv: 400000 });
+    expect(startingTotal(more)).toBe(startingTotal(less) + 300000);
+    // …and on the demo it buys exactly nothing, because that household is gated by the pre-59.5
+    // bridge rather than by total wealth. $300k more in a sealed account cannot shorten a bridge.
+    // This is the app's whole thesis, stated as an equality.
+    expect(more.fireCross).toBe(less.fireCross);
+    // put the same money somewhere reachable and the date moves
+    expect(run({ startPortfolio: DEFAULTS.startPortfolio + 300000 }).fireCross)
+      .toBeLessThan(less.fireCross);
+  });
+
+  it("drops both of a partner's accounts when there is no partner", () => {
+    const single = run({ partnerAge: 0 });
+    expect(startingTotal(single)).toBe(DEFAULTS.startPortfolio + DEFAULTS.startPortfolioTaxAdv
+      + DEFAULTS.startCash);
   });
 });
 
@@ -1427,8 +1450,7 @@ describe("cash is its own bucket, earning its own rate", () => {
     // a household with the same total but more of it in cash is no LESS liquid, so moving invested
     // taxable money into cash must never strand the bridge
     const s = simulate({ ...DEFAULTS, startCash: 300000, startPortfolio: 300000 });
-    expect(s.rows[0].taxable).toBe(s.rows[0].cash + (300000 - DEFAULTS.startPortfolioTaxAdv)
-      + (DEFAULTS.partnerPortfolio - DEFAULTS.partnerPortfolioTaxAdv));
+    expect(s.rows[0].taxable).toBe(s.rows[0].cash + 300000 + DEFAULTS.partnerPortfolio);
   });
 
   it("erodes against inflation at a 0% cash rate", () => {
@@ -2076,5 +2098,49 @@ describe("the Sankey balances, because the trace does", () => {
     const s = simulate(DEFAULTS);
     expect(sankeyYear(s.trace[0]).age).toBe(s.trace[0].age);
     expect(sankeyYear(null)).toBeNull();
+  });
+});
+
+describe("share links survive the tax-advantaged split", () => {
+  // v1 stored startPortfolio as TOTAL invested with the 401k carved out of it. Rejecting those links
+  // would have been easier, and would have quietly emptied every link anyone had already sent.
+  const v1 = (p) => encodeShare({ v: 1, mode: "full", p });
+
+  it("subtracts the carve-out so an old link keeps the household it described", () => {
+    const link = v1({ startPortfolio: 600000, startPortfolioTaxAdv: 200000,
+                      partnerPortfolio: 150000, partnerPortfolioTaxAdv: 100000, currentAge: 30 });
+    const got = decodeShare(link);
+    expect(got.p.startPortfolio).toBe(400000);      // 600k total − 200k locked
+    expect(got.p.startPortfolioTaxAdv).toBe(200000);
+    expect(got.p.partnerPortfolio).toBe(50000);
+    expect(got.p.currentAge).toBe(30);
+    // …and the household it now describes is the one it always described
+    expect(simulate({ ...DEFAULTS, ...got.p }).rows[0].portfolio)
+      .toBe(600000 + 150000 + DEFAULTS.startCash + DEFAULTS.partnerCash);
+  });
+
+  it("never lets the subtraction go negative", () => {
+    const got = decodeShare(v1({ startPortfolio: 50000, startPortfolioTaxAdv: 900000 }));
+    expect(got.p.startPortfolio).toBe(0);
+  });
+
+  it("leaves a v1 plot-only link alone — its numbers are already computed", () => {
+    const snap = snapshotFromSim(simulate(DEFAULTS), defaultShow(), true);
+    const got = decodeShare(encodeShare({ v: 1, mode: "plot", snap }));
+    expect(got.mode).toBe("plot");
+    expect(got.snap.ages.length).toBe(snap.ages.length);
+  });
+
+  it("round-trips a current link untouched", () => {
+    const p = { ...DEFAULTS, currentAge: 41 };
+    const got = decodeShare(encodeShare({ v: 2, mode: "full", p }));
+    expect(got.p.startPortfolio).toBe(DEFAULTS.startPortfolio);
+    expect(got.p.currentAge).toBe(41);
+  });
+
+  it("still rejects junk and unknown versions", () => {
+    expect(decodeShare("not-a-token")).toBeNull();
+    expect(decodeShare(encodeShare({ v: 99, mode: "full", p: {} }))).toBeNull();
+    expect(decodeShare(encodeShare({ v: 2, mode: "nonsense", p: {} }))).toBeNull();
   });
 });

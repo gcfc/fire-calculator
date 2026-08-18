@@ -981,19 +981,24 @@ function simulateOnce(rawP, retireAnchor) {
   // just in the UI) keeps the buckets summing to the stated portfolio: without it, a tax-advantaged
   // figure larger than the total would invent money — taxable floors at 0 while the locked bucket
   // keeps the whole oversized number.
-  const lockedYou = Math.min(p.startPortfolioTaxAdv, p.startPortfolio);
-  // No partner ⇒ no partner assets. Their portfolio is ignored entirely, the same way their income
+  // `startPortfolio` is TAXABLE investments and `startPortfolioTaxAdv` is the 401k/IRA beside it —
+  // two independent balances, not a total with a slice carved out of it. People read their accounts
+  // off separate statements; asking for a total and then "how much of that total is the 401k" made
+  // them do arithmetic to enter figures they already had, and made an over-large 401k figure a state
+  // the model had to clamp and warn about. Now it is simply another balance.
+  const lockedYou = Math.max(0, p.startPortfolioTaxAdv);
+  // No partner ⇒ no partner assets. Their accounts are ignored entirely, the same way their income
   // and their 59.5 unlock already are — otherwise a single filer keeps a phantom account that was
   // only ever meant to belong to someone who isn't in the plan.
-  const partnerPortfolio = hasPartner ? p.partnerPortfolio : 0;
-  const lockedPartner = hasPartner ? Math.min(p.partnerPortfolioTaxAdv, p.partnerPortfolio) : 0;
+  const partnerPortfolio = hasPartner ? Math.max(0, p.partnerPortfolio) : 0;
+  const lockedPartner = hasPartner ? Math.max(0, p.partnerPortfolioTaxAdv) : 0;
   // `startPortfolio` / `partnerPortfolio` are INVESTED assets; cash is its own bucket alongside them,
   // earning its own rate. Cash is spendable at any age, so it counts toward the bridge exactly as
   // taxable investments do — it is simply the slice that doesn't compound at the market rate.
   const startCash = Math.max(0, +p.startCash || 0) + (hasPartner ? Math.max(0, +p.partnerCash || 0) : 0);
   let st = {
     cash: startCash,
-    taxable: (p.startPortfolio - lockedYou) + (partnerPortfolio - lockedPartner),
+    taxable: Math.max(0, p.startPortfolio) + partnerPortfolio,
     taxAdvYou: lockedYou,
     taxAdvPartner: lockedPartner,
   };
@@ -1953,7 +1958,7 @@ const Warn = ({ children }) => (
 // "Load demo" button is pressed — but it is still the canonical parameter set the tests run against.
 // `startPortfolio` is INVESTED assets; cash is its own bucket beside it, earning `cashReturn`.
 export const DEFAULTS = {
-  currentAge: 27, startPortfolio: 560000, startPortfolioTaxAdv: 200000, startCash: 40000,
+  currentAge: 27, startPortfolio: 360000, startPortfolioTaxAdv: 200000, startCash: 40000,
   annualTakeHome: 144000, annualTaxAdv: 36000,
   nonHousingLiving: 36000, rentAnnual: 36000, inflation: 0.03, nominalReturn: 0.07,
   // add or drop as many as you like; each home carries its own loan and each kid its own clock
@@ -1966,7 +1971,7 @@ export const DEFAULTS = {
   expenses: [], debts: [], incomes: [],
 
   partnerAge: 26, partnerIncome: 120000, partnerTaxAdv: 23000,
-  partnerPortfolio: 135000, partnerPortfolioTaxAdv: 100000, partnerCash: 15000,
+  partnerPortfolio: 35000, partnerPortfolioTaxAdv: 100000, partnerCash: 15000,
   partnerStart: 26, partnerEnd: 60, partnerEnabled: true,
   partnerWorksAfterRetire: false, interimLivingToday: null,
   // EXCLUDES housing — every home now prices its own carry, mortgage and closing costs, so
@@ -2187,7 +2192,23 @@ function SankeyPanel({ trace, fireCross, isMobile }) {
 // The site is static (no backend), so all shared state rides in the URL hash. Two shapes:
 //   full — the sharer's inputs, so the recipient gets the whole calculator, pre-filled and editable
 //   plot — ONLY the already-computed chart data, so the raw inputs never leave the sharer's browser
-const SHARE_VERSION = 1;
+const SHARE_VERSION = 2;
+
+// v1 stored `startPortfolio` as TOTAL invested with the tax-advantaged balance carved out of it; v2
+// stores the two side by side. Subtracting on the way in keeps an old link describing the same
+// household it always did. Rejecting v1 outright would have been easier and would have quietly
+// emptied every link anyone had already sent.
+const migrateShare = (obj) => {
+  if (obj.v === SHARE_VERSION) return obj;
+  if (obj.v !== 1) return null;
+  // a plot-only link carries computed rows, not inputs — the meaning of those numbers has not changed
+  if (!obj.p) return { ...obj, v: SHARE_VERSION };
+  const p = { ...obj.p };
+  const carve = (tot, adv) => Math.max(0, (+p[tot] || 0) - (+p[adv] || 0));
+  if (p.startPortfolio != null) p.startPortfolio = carve("startPortfolio", "startPortfolioTaxAdv");
+  if (p.partnerPortfolio != null) p.partnerPortfolio = carve("partnerPortfolio", "partnerPortfolioTaxAdv");
+  return { ...obj, v: SHARE_VERSION, p };
+};
 
 // lz-string's URL-safe codec keeps links short (it compresses the JSON) and needs no base64 step
 export const encodeShare = (obj) => compressToEncodedURIComponent(JSON.stringify(obj));
@@ -2201,10 +2222,10 @@ export const decodeShare = (raw) => {
     if (!token) return null;
     const json = decompressFromEncodedURIComponent(token);
     if (!json) return null;
-    const obj = JSON.parse(json);
-    if (!obj || obj.v !== SHARE_VERSION) return null;
-    if (obj.mode !== "full" && obj.mode !== "plot") return null;
-    return obj;
+    const raw2 = JSON.parse(json);
+    if (!raw2 || typeof raw2.v !== "number") return null;
+    if (raw2.mode !== "full" && raw2.mode !== "plot") return null;
+    return migrateShare(raw2);
   } catch {
     return null;
   }
@@ -2903,8 +2924,8 @@ function Calculator({ shared, isMobile }) {
             ["You", [
               ["Age", "currentAge", {}],
               ["Cash (savings / checking)", "startCash", { step: 5000 }],
-              ["Investments", "startPortfolio", { step: 10000 }],
-              ["Portion of investments in tax-advantaged accounts (401k / IRA / HSA)", "startPortfolioTaxAdv", { step: 10000, max: p.startPortfolio }],
+              ["Taxable investments", "startPortfolio", { step: 10000 }],
+              ["Tax-advantaged accounts (401k / IRA / HSA)", "startPortfolioTaxAdv", { step: 10000 }],
               [gross ? "Gross salary" : "Take-home Pay (after contributions)", "annualTakeHome", { step: 1000, money: true }],
               ["Tax-advantaged contribution", "annualTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.annualTakeHome }],
               ["Non-housing expense", "nonHousingLiving", { step: 1000, money: true }],
@@ -2913,8 +2934,8 @@ function Calculator({ shared, isMobile }) {
             ["Partner", [
               ["Age (0 = single)", "partnerAge", {}],
               ["Cash (savings / checking)", "partnerCash", { step: 5000 }],
-              ["Investments", "partnerPortfolio", { step: 10000 }],
-              ["Portion of investments in tax-advantaged accounts (401k / IRA / HSA)", "partnerPortfolioTaxAdv", { step: 10000, max: p.partnerPortfolio }],
+              ["Taxable investments", "partnerPortfolio", { step: 10000 }],
+              ["Tax-advantaged accounts (401k / IRA / HSA)", "partnerPortfolioTaxAdv", { step: 10000 }],
               [gross ? "Partner gross salary" : "Take-home Pay (after contributions)", "partnerIncome", { step: 5000, money: true }],
               ["Tax-advantaged contribution", "partnerTaxAdv", { step: 500, money: true, modes: ["yr", "mo", "pct"], base: p.partnerIncome }],
               ["Partner earns from their age", "partnerStart", { min: p.partnerAge }],
@@ -3027,21 +3048,6 @@ function Calculator({ shared, isMobile }) {
 
               {/* the locked slice cannot exceed the pot it is a slice of — this fires if the
                   portfolio is later lowered beneath a 401k figure that was already valid */}
-              {group === "You" && p.startPortfolioTaxAdv > p.startPortfolio && (
-                <Warn>
-                  Your 401k/IRA (<b>{fmt(p.startPortfolioTaxAdv)}</b>) is more than your total investments
-                  (<b>{fmt(p.startPortfolio)}</b>). The model caps it there, so every invested dollar counts as
-                  locked and <b>only your cash is spendable</b> — which will strand your bridge. Raise investments
-                  or lower the 401k figure.
-                </Warn>
-              )}
-              {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && p.partnerPortfolioTaxAdv > p.partnerPortfolio && (
-                <Warn>
-                  Your partner's 401k/IRA (<b>{fmt(p.partnerPortfolioTaxAdv)}</b>) is more than their total
-                  investments (<b>{fmt(p.partnerPortfolio)}</b>). The model caps it there — all locked, none
-                  taxable.
-                </Warn>
-              )}
               {group === "Partner" && p.partnerEnabled !== false && p.partnerAge > 0 && p.partnerStart < p.partnerAge && (
                 <Warn>
                   Your partner can't start earning at <b>{p.partnerStart}</b> — they're already{" "}
