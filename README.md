@@ -91,8 +91,8 @@ form "you could stop working today".
 | **Debts** | Balance, rate and the payment you actually make; the payoff age is derived. |
 | **Advanced** | The 59½ rule, Roth ladder, borrowing, college funding, and every rate assumption. |
 
-Type a figure you know; drag the slider under it for one you are feeling out. The slider's range is a
-soft window that recentres as you go, so it never refuses a number you type.
+Money fields take a figure per year, per month, or as a percentage of income — pick whichever unit
+you actually know it in; the stored value is the same either way.
 
 ### Reading the chart
 
