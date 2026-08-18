@@ -2207,3 +2207,60 @@ describe("block length is a real knob, not decoration", () => {
     expect(spread).toBeLessThan(0.15);
   });
 });
+
+describe("the Sankey names what a band actually is", () => {
+  const yearOf = (s, age) => sankeyYear(s.trace.find((t) => t.age === age));
+
+  it("calls college tuition college, not 'one-offs'", () => {
+    // demo kids are born at your 30 and 32, college spread over 18–21, so the windows overlap at
+    // your 50–51 and each quarter is a quarter of $200k
+    const s = simulate(DEFAULTS);
+    const solo = yearOf(s, 48), both = yearOf(s, 50), after = yearOf(s, 54);
+    const band = (d, k) => (d.sinks.find((n) => n.key === k) || { value: 0 }).value;
+    expect(band(solo, "college")).toBeGreaterThan(0);
+    expect(band(both, "college")).toBeCloseTo(band(solo, "college") * 2, -3);   // two children at once
+    expect(band(after, "college")).toBe(0);
+    expect(solo.sinks.some((n) => n.key === "lumps")).toBe(false);              // no catch-all band
+  });
+
+  it("separates a home purchase from tuition in the same plan", () => {
+    const s = simulate(DEFAULTS);
+    const buy = yearOf(s, DEFAULTS.homes[0].purchaseAge);
+    expect(buy.sinks.some((n) => n.key === "homeBuy")).toBe(true);
+  });
+
+  it("puts a home sale and a windfall on the source side", () => {
+    const sold = simulate({ ...DEFAULTS, homes: DEFAULTS.homes.map((h) => ({ ...h, sellAge: 55 })) });
+    expect(yearOf(sold, 55).sources.some((n) => n.key === "homeSell")).toBe(true);
+    const gift = simulate({ ...DEFAULTS, expenses: [{ label: "gift", amount: -50000, age: 52, until: null }] });
+    expect(yearOf(gift, 52).sources.some((n) => n.key === "windfall")).toBe(true);
+  });
+
+  it("does not call growth a contribution", () => {
+    // THE REPORT: the demo appears to "pay into" a 401k at 74. It does not — there are no
+    // contributions after retirement; the balance grows because growth outran the withdrawal.
+    const s = simulate(DEFAULTS);
+    const late = s.trace.find((t) => t.age === 76);
+    expect(late.contributions).toBe(0);
+    expect(late.endTaxAdv).toBeGreaterThan(late.startTaxAdv);     // it really is growing
+    const band = yearOf(s, 76).sinks.find((n) => n.key === "advBal");
+    expect(band.label).toBe("Left compounding, not withdrawn");
+    // …while a working year with real contributions says so
+    expect(yearOf(s, 35).sinks.find((n) => n.key === "advBal").label)
+      .toBe("→ into retirement accounts");
+  });
+
+  it("still balances to the dollar, every year, itemised", () => {
+    for (const p of [DEFAULTS,
+                     { ...DEFAULTS, homes: DEFAULTS.homes.map((h) => ({ ...h, sellAge: 55 })) },
+                     { ...DEFAULTS, use529: true, annual529: 10000 },
+                     { ...DEFAULTS, debts: [{ label: "loan", balance: 40000, apr: 6, payment: 600, startAge: 27 }] }]) {
+      const s = simulate(p);
+      for (const t of s.trace) {
+        const d = sankeyYear(t);
+        const sum = (l) => l.reduce((a, n) => a + n.value, 0);
+        expect(Math.abs(sum(d.sources) - sum(d.sinks)), `age ${t.age}`).toBeLessThan(3);
+      }
+    }
+  });
+});

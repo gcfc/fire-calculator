@@ -541,7 +541,14 @@ function simulateOnce(rawP, retireAnchor) {
   //
   // `household` is the one genuinely phase-dependent line: your working budget before you retire,
   // your retirement budget after. Everything else is charged in both.
-  const HOUSEHOLD = "household", KIDS = "kids", HOUSING = "housing", LUMPS = "lumps", INCOME = "income";
+  // The lumpy lines are itemised rather than pooled. They used to share one "lumps" entry, which was
+  // fine for the arithmetic and useless everywhere it surfaced: the Sankey showed a $100k band
+  // labelled "One-offs" in a household's early fifties with no way to tell that it was college
+  // tuition for two children whose four-year windows overlap.
+  const HOUSEHOLD = "household", KIDS = "kids", HOUSING = "housing", INCOME = "income";
+  const COLLEGE = "college", HOMEBUY = "homebuy", HOMESELL = "homesell";
+  const ONEOFF = "oneoff", DEBT = "debt", SAVE529 = "save529";
+  const LUMP_KEYS = [COLLEGE, HOMEBUY, HOMESELL, ONEOFF, DEBT, SAVE529];
   const flowList = (age, phase) => {
     const infl = inflAt(age);
     const retired = phase === "retired";
@@ -550,13 +557,19 @@ function simulateOnce(rawP, retireAnchor) {
       { key: HOUSING, amount: housingAt(age) },
       // charged in BOTH phases — a child at home costs the same whether or not you have a job
       { key: KIDS, amount: kidCostAt(age) },
-      { key: LUMPS, amount: downAt(age) + (netCollege[age] || 0) + (contrib529[age] || 0) + extraOutflowAt(age)
-                            - saleProceedsAt(age) },
+      { key: COLLEGE, amount: netCollege[age] || 0 },
+      { key: SAVE529, amount: contrib529[age] || 0 },
+      { key: HOMEBUY, amount: downAt(age) },
+      { key: HOMESELL, amount: -saleProceedsAt(age) },   // negative: proceeds come IN
+      { key: ONEOFF, amount: extraLump[age] || 0 },
+      { key: DEBT, amount: debtPaymentAt(age) },
       // pension / Social Security / annuity: negative because it offsets the bill rather than adding
       // to it. Liquid, so it also shrinks the pre-59.5 bridge.
       { key: INCOME, amount: -incomeAt(age) },
     ];
   };
+  const lumpsAt = (age, phase) =>
+    flowList(age, phase).reduce((s, f) => s + (LUMP_KEYS.includes(f.key) ? f.amount : 0), 0);
   const flowTotal = (age, phase) => flowList(age, phase).reduce((s, f) => s + f.amount, 0);
   const flowOf = (age, phase, key) => flowList(age, phase).find((f) => f.key === key).amount;
 
@@ -834,7 +847,7 @@ function simulateOnce(rawP, retireAnchor) {
     const living = flowOf(age, "working", HOUSEHOLD);
     const housing = flowOf(age, "working", HOUSING);
     const kidCost = flowOf(age, "working", KIDS);
-    const lumps = flowOf(age, "working", LUMPS);
+    const lumps = lumpsAt(age, "working");
     const takeHome = salary - flowOf(age, "working", INCOME);
     const surplus = takeHome - (living + housing + kidCost);
     // the components ride along so the UI can show WHY a year drains cash, not just that it did
@@ -1226,6 +1239,13 @@ function simulateOnce(rawP, retireAnchor) {
         takeHome: takeHomeR, otherIncome: otherIncR,
         living: Math.round(r2(livingFV)), housing: Math.round(r2(housingFV)),
         kids: Math.round(r2(kidsFV)), lumps: Math.round(r2(lumpsFV)),
+        // the same total, itemised — so a band can say "college" instead of "one-offs"
+        college: Math.round(r2(flowOf(age, "retired", COLLEGE) * yearFV)),
+        save529: Math.round(r2(flowOf(age, "retired", SAVE529) * yearFV)),
+        homeBuy: Math.round(r2(flowOf(age, "retired", HOMEBUY) * yearFV)),
+        homeSell: Math.round(r2(-flowOf(age, "retired", HOMESELL) * yearFV)),
+        oneOff: Math.round(r2(flowOf(age, "retired", ONEOFF) * yearFV)),
+        debtPay: Math.round(r2(flowOf(age, "retired", DEBT) * yearFV)),
         cashOut: cashOutR,
         cashGrowth: endTaxableR - startTaxableR - takeHomeR - otherIncR + cashOutR,
         // retirement accounts: contributions in, withdrawals out, real interest closing the row
@@ -1386,9 +1406,22 @@ export const sankeyYear = (t) => {
   plain(sinks, "housing", "Housing", t.housing, C.brass);
   plain(sinks, "kids", "Children", t.kids, C.coral);
   plain(sinks, "living", "Living", t.living, C.ink);
-  plain(sinks, "lumps", "One-offs", t.lumps, C.coast);
+  // itemised rather than one "One-offs" band — a $100k block in your early fifties is college
+  // tuition for two children whose four-year windows overlap, and saying so is the whole point
+  plain(sinks, "college", "College", t.college, C.coast);
+  plain(sinks, "save529", "529 contributions", t.save529, C.coast);
+  plain(sinks, "homeBuy", "Home purchase", t.homeBuy, C.brass);
+  plain(sinks, "debtPay", "Debt payments", t.debtPay, C.coral);
+  plain(sinks, "oneOff", "One-off expenses", Math.max(0, t.oneOff), C.coast);
+  // a windfall or a home sale is money arriving, so it belongs on the source side
+  plain(sources, "windfall", "One-off income", -Math.min(0, t.oneOff), C.liquid);
+  plain(sources, "homeSell", "Home sale", t.homeSell, C.brass);
   signed("cashBal", "→ into savings", "Drawn from savings", dCash, C.liquid);
-  signed("advBal", "→ into retirement accounts", "Drawn from retirement accounts", dAdv, C.locked);
+  // "→ into retirement accounts" is only true if you actually put money in. For a retiree the
+  // balance often grows anyway, because growth outran the year's withdrawal — labelling that as a
+  // contribution had people asking why the model was paying into a 401k at 74.
+  signed("advBal", t.contributions > 0 ? "→ into retirement accounts" : "Left compounding, not withdrawn",
+         "Drawn from retirement accounts", dAdv, C.locked);
 
   // The model permits a negative spendable balance, so the two sides can genuinely fail to balance.
   // Give the gap its own node rather than letting it hide: a Sankey that quietly does not add up is
