@@ -1529,7 +1529,9 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
 
 // compact numeric input for the repeatable home/kid cards. `pct` stores a fraction but shows a %.
 // `yearRef`, when given, marks this value as an age and shows the calendar year it lands in.
-const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef }) => {
+// `labelPrefix` lets a caller put its own interactive node at the head of the label — used by the kid
+// card to make the child's name editable in place, rather than spending a second row on a name field.
+const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef, labelPrefix = null }) => {
   const yr = yearRef != null ? yearAt(value, yearRef) : null;
   return (
     // In the card grids these sit side by side; labels of different lengths wrap to different heights,
@@ -1538,7 +1540,7 @@ const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef }
     // cell so the row of boxes always lines up, whether or not the age/year hint is present.
     <label style={{ display: "flex", flexDirection: "column", gap: 3, height: "100%", justifyContent: "space-between" }}>
       <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>
-        {label}{yr != null && <span style={{ opacity: 0.65 }}> · ≈{yr}</span>}
+        {labelPrefix}{label}{yr != null && <span style={{ opacity: 0.65 }}> · ≈{yr}</span>}
       </span>
       <NumberInput
         small
@@ -1548,6 +1550,53 @@ const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef }
         onCommit={(v) => onChange(pct ? v / 100 : v)}
       />
     </label>
+  );
+};
+
+// A name that lives inside a field's own label. Click it and it becomes a text box; blur or Enter
+// commits, Escape abandons. This keeps naming a child to one line instead of a dedicated row — the
+// kid card is repeated per child, so a second row per kid is the most expensive real estate on the
+// panel. Empty commits back to the default, so a name is always removable.
+const InlineName = ({ value, fallback, onCommit }) => {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const ref = useRef(null);
+  useEffect(() => { if (editing && ref.current) { ref.current.focus(); ref.current.select(); } }, [editing]);
+
+  const start = (e) => { e.preventDefault(); setDraft(value || ""); setEditing(true); };
+  const commit = () => { onCommit(draft.trim()); setEditing(false); };
+
+  if (editing) {
+    return (
+      <input
+        ref={ref} value={draft} placeholder={fallback}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          if (e.key === "Escape") { e.preventDefault(); setEditing(false); }
+        }}
+        aria-label={`name for ${value || fallback}`}
+        style={{
+          background: C.bg, border: `1px solid ${C.teal}`, color: C.ink, borderRadius: 4,
+          padding: "1px 4px", fontSize: 10, letterSpacing: ".03em", textTransform: "uppercase",
+          fontFamily: "'Space Grotesk', sans-serif", width: "9em", marginRight: 2,
+        }}
+      />
+    );
+  }
+  return (
+    <button
+      type="button" onClick={start}
+      title="Click to rename"
+      style={{
+        background: "transparent", border: "none", borderBottom: `1px dotted ${C.mute}`,
+        color: value ? C.ink : "inherit", cursor: "text", padding: 0, marginRight: 1,
+        font: "inherit", letterSpacing: "inherit", textTransform: "inherit",
+      }}
+    >
+      {value || fallback}
+    </button>
   );
 };
 
@@ -3228,18 +3277,21 @@ function Calculator({ shared, isMobile }) {
               const birthAge = (rawBirth === "" || rawBirth == null) ? "" : +rawBirth;
               const showNow = k.entry === "now";
               const yearsAway = birthAge - p.currentAge;
-              // a name, when given, replaces "Kid N" everywhere that number appears
+              // The name lives in the field's own label rather than in a row of its own — the kid card
+              // repeats per child, so a second row per kid is the most expensive real estate here.
               const who = kidName(k, i);
+              const nameField = (
+                <InlineName value={(k.name || "").trim()} fallback={`Kid ${i + 1}`}
+                  onCommit={(v) => setKid(i, { name: v })} />
+              );
               return (
                 <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                  <TextField label={`Kid ${i + 1} — name (optional)`} value={k.name || ""}
-                    placeholder={`Kid ${i + 1}`} onChange={(v) => setKid(i, { name: v })} />
                   <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                     <div style={{ flex: 1 }}>
                       {showNow
-                        ? <Num label={`${who} — age now`} value={p.currentAge - birthAge} step={1} min={-120}
+                        ? <Num label=" — age now" labelPrefix={nameField} value={p.currentAge - birthAge} step={1} min={-120}
                             onChange={(v) => setKid(i, { birthAge: p.currentAge - v, ageNow: undefined })} />
-                        : <Num label={`${who} — your age at birth`} value={birthAge} yearRef={p.currentAge}
+                        : <Num label=" — your age at birth" labelPrefix={nameField} value={birthAge} yearRef={p.currentAge}
                             onChange={(v) => setKid(i, { birthAge: v, ageNow: undefined })} />}
                     </div>
                     <DropButton onClick={() => dropKid(i)} />
