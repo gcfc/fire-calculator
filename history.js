@@ -85,6 +85,29 @@ export const historicalCycles = (years, stockPct) => {
   return out;
 };
 
+// RANDOM START: begin at a random year and run forward in real chronological order, wrapping past
+// the end of the record back to the start. This is the direct fix for the weakness in the method
+// above: a 76-year plan leaves only ~20 complete windows in a century of data, and neighbouring
+// windows share all but one year, so "95% survived" rests on almost no independent evidence. Wrapping
+// buys many more distinct sequences while keeping every year followed by the year that actually
+// followed it — 1929 is still followed by 1930.
+//
+// The seam is the honest cost: one junction per trial where 2024 is followed by 1928. That is one
+// artificial transition in ~76 real ones, against a bootstrap's one every `blockYears`.
+export const randomStart = (years, stockPct, trials, rand) => {
+  const out = [];
+  for (let t = 0; t < trials; t++) {
+    const start = Math.floor(rand() * HISTORY.length);
+    const seq = [];
+    for (let i = 0; i < years; i++) {
+      const row = HISTORY[(start + i) % HISTORY.length];
+      seq.push({ ret: blendedReturn(row, stockPct), infl: row[3] });
+    }
+    out.push({ label: `from ${HISTORY[start][0]}`, seq });
+  }
+  return out;
+};
+
 // BLOCK BOOTSTRAP: sample contiguous blocks of years at random and stitch them together. Unlimited
 // samples, and because the blocks are contiguous it keeps some of the sequence structure that plain
 // draw-a-year-at-a-time destroys. Drawing years independently would understate exactly the risk this

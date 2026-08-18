@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { HISTORY, randomStart, blendedReturn, seededRandom } from "./history.js";
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
@@ -2142,5 +2143,67 @@ describe("share links survive the tax-advantaged split", () => {
     expect(decodeShare("not-a-token")).toBeNull();
     expect(decodeShare(encodeShare({ v: 99, mode: "full", p: {} }))).toBeNull();
     expect(decodeShare(encodeShare({ v: 2, mode: "nonsense", p: {} }))).toBeNull();
+  });
+});
+
+describe("random-start sampling answers the overlap problem", () => {
+  // Historical cycles are exact but scarce: a 76-year plan leaves ~20 complete windows in a century
+  // of data, and neighbouring windows share all but one year. Random start wraps past the end of the
+  // record to buy many more distinct sequences while keeping real chronological order.
+  it("gives as many trials as you ask for, where historical cannot", () => {
+    const hist = runTrials(DEFAULTS, { mode: "historical" });
+    const rs = runTrials(DEFAULTS, { mode: "randomstart", trials: 400 });
+    expect(hist.trials).toBeLessThan(40);
+    expect(rs.trials).toBe(400);
+  });
+
+  it("keeps chronological order — every year followed by the year that followed it", () => {
+    const yrs = HISTORY.map((r) => r[0]);
+    const seqs = randomStart(30, 80, 5, seededRandom(1));
+    for (const { seq } of seqs) expect(seq.length).toBe(30);
+    // a wrapped sequence visits the record in order, so the blended returns it produces must all
+    // appear in the record's own set
+    const known = new Set(HISTORY.map((r) => +blendedReturn(r, 80).toFixed(10)));
+    for (const { seq } of seqs) for (const s of seq) expect(known.has(+s.ret.toFixed(10))).toBe(true);
+  });
+
+  it("is deterministic for a given seed", () => {
+    const a = runTrials(DEFAULTS, { mode: "randomstart", trials: 60, seed: 11 });
+    const b = runTrials(DEFAULTS, { mode: "randomstart", trials: 60, seed: 11 });
+    expect(a.successRate).toBe(b.successRate);
+  });
+
+  it("lands between historical and bootstrap, as its seam count implies", () => {
+    // one artificial junction per trial, against a bootstrap's one every block
+    const hist = runTrials(DEFAULTS, { mode: "historical", stockPct: 80 });
+    const rs = runTrials(DEFAULTS, { mode: "randomstart", trials: 300, stockPct: 80, seed: 5 });
+    const boot = runTrials(DEFAULTS, { mode: "bootstrap", trials: 300, stockPct: 80, blockYears: 5, seed: 5 });
+    expect(rs.successRate).toBeLessThanOrEqual(hist.successRate);
+    expect(boot.successRate).toBeLessThanOrEqual(rs.successRate + 0.15);
+  });
+});
+
+describe("block length is a real knob, not decoration", () => {
+  it("reports the length it used, so a result can be read back", () => {
+    expect(runTrials(DEFAULTS, { mode: "bootstrap", trials: 40, blockYears: 12 }).blockYears).toBe(12);
+  });
+
+  it("actually changes the sequences it draws", () => {
+    const short = runTrials(DEFAULTS, { mode: "bootstrap", trials: 300, blockYears: 1, seed: 4 });
+    const long = runTrials(DEFAULTS, { mode: "bootstrap", trials: 300, blockYears: 20, seed: 4 });
+    expect(short.median).not.toBe(long.median);
+  });
+
+  it("does NOT move the success rate monotonically on this plan, and the test says so", () => {
+    // The textbook claim is that short blocks read optimistically, because shuffling year by year
+    // destroys the bad decades that actually kill a retirement. Measured across 1/2/5/10/20-year
+    // blocks at 400 trials the demo gives 74.3 / 71.8 / 78.5 / 78.5 / 75.3 — no monotone trend, and
+    // a spread no larger than the sampling noise. On a plan this over-funded (3.9% assumed real
+    // against 7.2% delivered) the failures come from the worst sequences whatever the blocking.
+    // Pinning the claim would have pinned a coincidence, so pin the bound instead.
+    const rates = [1, 5, 20].map((b) =>
+      runTrials(DEFAULTS, { mode: "bootstrap", trials: 300, blockYears: b, seed: 4 }).successRate);
+    const spread = Math.max(...rates) - Math.min(...rates);
+    expect(spread).toBeLessThan(0.15);
   });
 });

@@ -4,7 +4,7 @@ import {
   ReferenceLine, ReferenceDot, ReferenceArea, ResponsiveContainer,
 } from "recharts";
 import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from "lz-string";
-import { historicalCycles, blockBootstrap, seededRandom, HISTORY_FIRST, HISTORY_LAST } from "./history.js";
+import { historicalCycles, randomStart, blockBootstrap, seededRandom, HISTORY_FIRST, HISTORY_LAST } from "./history.js";
 
 // ---- palette (ledger / instrument) ----
 const C = {
@@ -1421,9 +1421,12 @@ export const runTrials = (p, opts = {}) => {
 
   const years = plan.END + 2 - p.currentAge;
   const rand = seededRandom(o.seed);
+  const trials = Math.max(1, o.trials);
   const seqs = o.mode === "bootstrap"
-    ? blockBootstrap(years, o.stockPct, Math.max(1, o.trials), Math.max(1, o.blockYears), rand)
-    : historicalCycles(years, o.stockPct);
+    ? blockBootstrap(years, o.stockPct, trials, Math.max(1, o.blockYears), rand)
+    : o.mode === "randomstart"
+      ? randomStart(years, o.stockPct, trials, rand)
+      : historicalCycles(years, o.stockPct);
 
   const assumedInfl = p.inflation ?? 0;
   const results = seqs.map(({ label, seq }) => {
@@ -1467,7 +1470,7 @@ export const runTrials = (p, opts = {}) => {
   const sampledReal = realN ? realSum / realN : 0;
 
   return {
-    mode: o.mode, trials: results.length, stockPct: o.stockPct,
+    mode: o.mode, trials: results.length, stockPct: o.stockPct, blockYears: o.blockYears,
     successRate: results.length ? ok / results.length : 0,
     // how many independent windows the horizon actually left room for — a 76-year plan against a
     // century of data leaves barely twenty, and they overlap heavily
@@ -2788,7 +2791,21 @@ function Calculator({ shared, isMobile }) {
   const [mc, setMc] = useState(null);
   const [mcOpts, setMcOpts] = useState(MC_DEFAULTS);
   const [mcBusy, setMcBusy] = useState(false);
-  useEffect(() => { setMc(null); }, [p]);
+
+  // Historical mode runs LIVE; the sampled modes do not. That split is about honesty as much as
+  // speed. Historical is ~100ms and, being the fixed set of every window in the record, carries no
+  // sampling noise at all — the number is exact for the question asked, so it can move under your
+  // finger. The sampled modes are 200ms–1.6s AND wobble by about a point between runs, which is the
+  // same size as the effect a 5% shift in equity weight produces. A figure that visibly changes as
+  // you drag implies a precision the method does not have, so those wait for a click.
+  const liveMode = mcOpts.mode === "historical";
+  const autoMc = useMemo(
+    () => (mcOpen && liveMode && hasPlan && sim.fireCross != null ? runTrials(p, mcOpts) : null),
+    [mcOpen, liveMode, hasPlan, sim.fireCross, p, mcOpts]);
+  const mcShown = liveMode ? autoMc : mc;
+
+  // a sampled result is only ever shown for the inputs that produced it
+  useEffect(() => { setMc(null); }, [p, mcOpts.mode, mcOpts.stockPct, mcOpts.trials, mcOpts.blockYears]);
   const runBacktest = () => {
     setMcBusy(true);
     // yield a frame so the button can paint its busy state before the main thread blocks
@@ -3814,10 +3831,19 @@ function Calculator({ shared, isMobile }) {
               <p style={{ margin: 0, fontSize: 12, color: C.mute, lineHeight: 1.6 }}>
                 Your date stays fixed at <b style={{ color: C.ink }}>{sim.fireCross.toFixed(1)}</b> and only the
                 returns change — you make a plan on an assumption, then test it against what actually
-                happened. <b>Historical</b> replays each run of years in the order it occurred, which keeps
-                1929 followed by 1930. <b>Bootstrap</b> stitches random five-year blocks together for more
-                samples at the cost of never-observed sequences.
+                happened.
               </p>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: C.mute, lineHeight: 1.65 }}>
+                <li><b style={{ color: C.ink }}>Historical cycles</b> — every complete window in the
+                  record, in the order it happened. Exact, but a long horizon leaves very few windows
+                  and they overlap almost entirely.</li>
+                <li><b style={{ color: C.ink }}>Random start year</b> — begin anywhere and run forward
+                  in real order, wrapping past the end of the record. Many more distinct sequences,
+                  every year still followed by the year that actually followed it, at the cost of one
+                  artificial seam per trial where 2024 meets 1928.</li>
+                <li><b style={{ color: C.ink }}>Block bootstrap</b> — stitch random blocks together.
+                  Unlimited samples; a seam every block, and sequences that never happened.</li>
+              </ul>
 
               <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }}>
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -3826,6 +3852,7 @@ function Calculator({ shared, isMobile }) {
                     style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink, borderRadius: 6,
                              padding: "7px 8px", fontSize: 12, fontFamily: "'Space Grotesk', sans-serif" }}>
                     <option value="historical" style={{ background: C.panel }}>historical cycles</option>
+                    <option value="randomstart" style={{ background: C.panel }}>random start year</option>
                     <option value="bootstrap" style={{ background: C.panel }}>block bootstrap</option>
                   </select>
                 </label>
@@ -3837,63 +3864,108 @@ function Calculator({ shared, isMobile }) {
                     onChange={(e) => setMcOpts((o) => ({ ...o, stockPct: Number(e.target.value) }))}
                     style={{ accentColor: C.brass }} />
                 </label>
-                <button onClick={runBacktest} disabled={mcBusy}
-                  style={{ background: mcBusy ? C.line : C.teal, color: C.bg, border: "none", borderRadius: 8,
-                           cursor: mcBusy ? "default" : "pointer", padding: "9px 16px", fontSize: 13,
-                           fontFamily: "'Space Grotesk', sans-serif", fontWeight: 500 }}>
-                  {mcBusy ? "Running…" : mc ? "Run again" : "Run backtest"}
-                </button>
+                {/* Block length only means anything to the bootstrap. Short blocks approach drawing
+                    single years — which destroys the autocorrelation the whole feature exists to
+                    show — and long ones approach replaying history whole. Seeing that tradeoff is
+                    worth more than any single default. */}
+                {mcOpts.mode === "bootstrap" && (
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 150 }}>
+                    <span style={{ fontSize: 10, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
+                      block length · <span style={{ color: C.brass }}>{mcOpts.blockYears}y</span>
+                    </span>
+                    <input type="range" min={1} max={20} step={1} value={mcOpts.blockYears}
+                      onChange={(e) => setMcOpts((o) => ({ ...o, blockYears: Number(e.target.value) }))}
+                      style={{ accentColor: C.brass }} />
+                  </label>
+                )}
+                {!liveMode && (
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 130 }}>
+                    <span style={{ fontSize: 10, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
+                      trials · <span style={{ color: C.brass }}>{mcOpts.trials}</span>
+                    </span>
+                    <input type="range" min={50} max={1000} step={50} value={mcOpts.trials}
+                      onChange={(e) => setMcOpts((o) => ({ ...o, trials: Number(e.target.value) }))}
+                      style={{ accentColor: C.brass }} />
+                  </label>
+                )}
+                {liveMode ? (
+                  <div style={{ fontSize: 11, color: C.mute, paddingBottom: 4, maxWidth: 220, lineHeight: 1.5 }}>
+                    Updating live — every window in the record, so there is nothing to sample and
+                    nothing to wait for.
+                  </div>
+                ) : (
+                  <button onClick={runBacktest} disabled={mcBusy}
+                    style={{ background: mcBusy ? C.line : C.teal, color: C.bg, border: "none", borderRadius: 8,
+                             cursor: mcBusy ? "default" : "pointer", padding: "9px 16px", fontSize: 13,
+                             fontFamily: "'Space Grotesk', sans-serif", fontWeight: 500 }}>
+                    {mcBusy ? "Running…" : mc ? "Run again" : "Run backtest"}
+                  </button>
+                )}
               </div>
 
-              {mc && (
+              {mcShown && (
                 <>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 16 }}>
-                    <Stat label={`Survived · ${mc.trials} runs`} value={`${Math.round(mc.successRate * 100)}%`}
-                      accent={mc.successRate >= 0.9 ? C.teal : mc.successRate >= 0.75 ? C.brass : C.coral} />
-                    <Stat label="Worst run ends with" value={fmtM(mc.worst)} accent={mc.worst < 0 ? C.coral : C.ink} />
-                    <Stat label="Median run ends with" value={fmtM(mc.median)} />
-                    <Stat label="10th percentile" value={fmtM(mc.p10)} />
+                    <Stat label={`Survived · ${mcShown.trials} runs`} value={`${Math.round(mcShown.successRate * 100)}%`}
+                      accent={mcShown.successRate >= 0.9 ? C.teal : mcShown.successRate >= 0.75 ? C.brass : C.coral} />
+                    <Stat label="Worst run ends with" value={fmtM(mcShown.worst)} accent={mcShown.worst < 0 ? C.coral : C.ink} />
+                    <Stat label="Median run ends with" value={fmtM(mcShown.median)} />
+                    <Stat label="10th percentile" value={fmtM(mcShown.p10)} />
                   </div>
 
                   {/* the number that explains every other number on this panel */}
                   <div style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8,
                                 padding: "10px 14px", fontSize: 12.5, color: C.ink, lineHeight: 1.6 }}>
-                    Your plan assumes <b>{(mc.assumedReal * 100).toFixed(1)}%</b> a year after inflation.
-                    A {mc.stockPct}/{100 - mc.stockPct} mix actually returned{" "}
-                    <b style={{ color: mc.sampledReal > mc.assumedReal ? C.teal : C.coral }}>
-                      {(mc.sampledReal * 100).toFixed(1)}%
+                    Your plan assumes <b>{(mcShown.assumedReal * 100).toFixed(1)}%</b> a year after inflation.
+                    A {mcShown.stockPct}/{100 - mcShown.stockPct} mix actually returned{" "}
+                    <b style={{ color: mcShown.sampledReal > mcShown.assumedReal ? C.teal : C.coral }}>
+                      {(mcShown.sampledReal * 100).toFixed(1)}%
                     </b>{" "}
-                    across {mc.dataFrom}–{mc.dataTo}.
-                    {mc.sampledReal > mc.assumedReal + 0.005 && (
+                    across {mcShown.dataFrom}–{mcShown.dataTo}.
+                    {mcShown.sampledReal > mcShown.assumedReal + 0.005 && (
                       <> Your assumption is the more cautious one, which is why these runs end so far above
                         zero — that surplus is the margin in your inputs, not a forecast.</>
                     )}
                   </div>
 
-                  {mc.mode === "historical" && (
+                  {mcShown.mode === "randomstart" && (
                     <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>
-                      A {mc.cycleYears}-year plan leaves only <b style={{ color: C.ink }}>{mc.trials}</b> complete
-                      runs in {mc.dataFrom}–{mc.dataTo}, and they overlap heavily — neighbouring runs share all
-                      but one year, so this is far less independent evidence than the count suggests. Block
-                      bootstrap trades that for sequences that never actually happened. Neither is a forecast.
-                      {mc.failures.length > 0 && (
-                        <> The runs that failed started in <b style={{ color: C.coral }}>{mc.failures.join(", ")}</b>.</>
+                      {mcShown.trials} sequences, each starting at a random year and running forward in
+                      real order. This is the answer to the overlap problem in historical cycles — far
+                      more independent evidence, for one artificial junction per trial.
+                      {mcShown.failures.length > 0 && (
+                        <> <b style={{ color: C.coral }}>{mcShown.failures.length}</b> ran dry.</>
                       )}
                     </div>
                   )}
-                  {mc.mode === "bootstrap" && mc.failures.length > 0 && (
+                  {mcShown.mode === "historical" && (
                     <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>
-                      <b style={{ color: C.coral }}>{mc.failures.length}</b> of {mc.trials} stitched sequences ran
-                      dry. Bootstrap can chain bad decades that history never put back to back, so it reads
-                      harsher than the historical cycles — deliberately.
+                      A {mcShown.cycleYears}-year plan leaves only <b style={{ color: C.ink }}>{mcShown.trials}</b> complete
+                      runs in {mcShown.dataFrom}–{mcShown.dataTo}, and they overlap heavily — neighbouring runs share all
+                      but one year, so this is far less independent evidence than the count suggests. Block
+                      bootstrap trades that for sequences that never actually happened. Neither is a forecast.
+                      {mcShown.failures.length > 0 && (
+                        <> The runs that failed started in <b style={{ color: C.coral }}>{mcShown.failures.join(", ")}</b>.</>
+                      )}
+                    </div>
+                  )}
+                  {mcShown.mode === "bootstrap" && mcShown.failures.length > 0 && (
+                    <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>
+                      <b style={{ color: C.coral }}>{mcShown.failures.length}</b> of {mcShown.trials} stitched sequences ran
+                      dry, at {mcShown.blockYears}-year blocks. Bootstrap can chain bad decades that history
+                      never put back to back, so it reads harsher than the historical cycles — deliberately.
+                      Block length sets how much of history's ordering survives: at 1 it is independent
+                      yearly draws, at 20 it is most of a real sequence. How much that moves the answer
+                      depends on the plan — on an over-funded one it barely registers, because the
+                      failures come from the worst sequences whatever the blocking.
                     </div>
                   )}
                 </>
               )}
-              {!mc && !mcBusy && (
+              {!mcShown && !mcBusy && (
                 <div style={{ fontSize: 11.5, color: C.mute }}>
-                  Nothing run yet. Results clear whenever you change an input, so a stale figure can never
-                  sit underneath new numbers.
+                  Nothing run yet. Results clear whenever you change an input or a setting, so a stale
+                  figure can never sit underneath new numbers.
                 </div>
               )}
             </Collapsible>
