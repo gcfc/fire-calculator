@@ -49,7 +49,7 @@ npm run dev      # http://localhost:5173 — hot-reloads on save
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Dev server with hot reload. |
-| `npm test` | The model's test suite (271 tests, ~7s). |
+| `npm test` | The model's test suite (282 tests, ~8s). |
 | `npm run test:watch` | Same, in watch mode. |
 | `npm run build` | Emits `dist/index.html` — a **single self-contained file** (React and Recharts inlined). Double-click it, email it, or drop it on any static host. |
 | `npm run preview` | Serves the built `dist/` to sanity-check the bundle. |
@@ -113,8 +113,8 @@ Every series is a clickable chip below the chart — the legend *is* the control
 ### The four panels underneath
 
 - **Where the money goes** — one year's cash flow as a Sankey, with a slider to drag across the whole
-  plan. Watch daycare appear and vanish, the mortgage clear, and the retirement accounts sit sealed
-  while your savings carry the bills alone.
+  plan. Watch daycare appear and vanish, college arrive and double while two children overlap, the
+  mortgage clear, and the retirement accounts sit sealed while your savings carry the bills alone.
 - **Will it survive history?** — your plan replayed against real sequences of returns since 1928.
   Historical cycles update live as you drag the equity weight; the sampled modes wait for a click,
   because their run-to-run wobble is the same size as the effect you would be watching.
@@ -136,7 +136,7 @@ Two kinds of link, both encoded into the URL — there is no backend and nothing
 ```
 fire_model.jsx        the model (simulate) and the UI (FireModel) — ~4,000 lines
 history.js            annual US market returns since 1928, bundled not fetched
-fire_model.test.js    271 tests — every one pins a real bug or an invariant
+fire_model.test.js    282 tests — every one pins a real bug or an invariant
 legal.js              privacy/terms copy
 scripts/build-legal.mjs  renders legal.js to dist/<slug>/index.html
 index.html            page shell Vite serves
@@ -290,6 +290,20 @@ overfund.
 > ⚠️ **In this model a 529 is a no-op.** It cannot help, because *no taxes are modelled* — and
 > tax-free growth is the entire point of a 529. The tests pin it as exactly wealth-neutral, so that
 > if it ever *does* start "helping", something has broken.
+
+### 4b. Required minimum distributions (optional)
+
+From `rmdAge` (73, or 75 for those born 1960+) the IRS makes you take prior-year-end balance ÷ a
+divisor from the Uniform Lifetime Table out of tax-deferred accounts each year.
+
+> ⚠️ **In this model an RMD is a strict no-op**, and the tests pin it that way. It moves money from a
+> sealed account to a spendable one; the cost of that move is the tax bill, and no taxes are
+> modelled. It cannot help liquidity either — RMDs begin at 73, long after the 59½ unlock. It is
+> implemented so the structure is right when taxes arrive, and so the trace can show the size of the
+> one withdrawal you do not choose.
+>
+> Roth accounts have no RMD, and the model keeps a single undifferentiated tax-advantaged bucket, so
+> the figure overstates the forced amount for anyone holding Roth money.
 
 ### 5. The requirement curve — `Need`
 
@@ -450,7 +464,7 @@ Each biases the answer in a known direction:
 
 | Limitation | Effect on the answer |
 | --- | --- |
-| **No taxes anywhere** | Traditional 401k withdrawals are free, so the number is **too low**. Also makes the 529 pointless. |
+| **No taxes anywhere** | Traditional 401k withdrawals are free, so the number is **too low**. It is also what makes the 529 and RMDs no-ops — both exist to be correct when taxes land. |
 | **No Social Security estimate** | You must enter a figure yourself. Nobody knows theirs. |
 | **No healthcare / ACA modelling** | Often the largest single early-retirement expense line. |
 | **Deterministic planning rate** | The single retirement age is a midpoint, not a promise. Backtesting is a separate panel, not the headline. |
@@ -469,7 +483,7 @@ survivorship bias cannot see.
 ## Tests
 
 ```bash
-npm test     # 271 tests
+npm test     # 282 tests
 ```
 
 Every test pins either a **real bug that was found** or an **invariant that must not break**. Notable
@@ -485,7 +499,9 @@ ones:
 - An earlier home sale retires you earlier; one past the unlock changes the requirement but not the
   date.
 - A mid-bridge windfall **cannot** fund the years before it arrives.
-- The Sankey's two sides **balance to the dollar**, every year.
+- The Sankey's two sides **balance to the dollar**, every year — with a home sale, a 529 and a debt in
+  the plan.
+- An RMD is **exactly wealth-neutral**, and cannot rescue a plan gated by the 59½ bridge.
 - Backtesting is **deterministic** for a given plan, and leaves plain `simulate()` untouched.
 - The empty state returns **the same keys** as a real run, so no consumer can hit `undefined` — and
   the retirement-instant row carries every field the yearly rows do.

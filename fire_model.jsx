@@ -50,6 +50,28 @@ const yearAt = (age, refAge) =>
 // These pure helpers convert between how a value is SHOWN in a field and the ANNUAL value we store, so
 // a field can offer /yr⇄/mo, $-of-income⇄%, or gross⇄net without the model ever knowing. Exported so
 // the conversions can be unit-tested directly. `toAnnual` and `toShown` are exact inverses.
+// ---- required minimum distributions -----------------------------------------
+// From your RMD age the IRS makes you take a minimum out of tax-DEFERRED accounts each year:
+// prior year-end balance ÷ a divisor from the Uniform Lifetime Table. SECURE 2.0 sets the age at 73,
+// rising to 75 for people born in 1960 or later.
+//
+// Roth accounts have no RMD, and this model does not distinguish Roth from traditional — it has one
+// "tax-advantaged" bucket — so the toggle treats the whole bucket as deferred. That overstates the
+// forced withdrawal for anyone holding Roth money, which the UI says.
+export const RMD_DIVISOR = {
+  73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1, 80: 20.2,
+  81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2, 87: 14.4, 88: 13.7,
+  89: 12.9, 90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1, 94: 9.5, 95: 8.9, 96: 8.4,
+  97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4, 101: 6.0, 102: 5.6, 103: 5.2, 104: 4.9,
+  105: 4.6, 106: 4.3, 107: 3.9, 108: 3.7, 109: 3.4, 110: 3.1, 111: 2.9, 112: 2.6,
+  113: 2.4, 114: 2.1, 115: 1.9, 116: 1.7, 117: 1.5, 118: 1.4, 119: 1.2, 120: 2.0,
+};
+// the table stops at 120; past that the last divisor stands rather than the fraction exploding
+export const rmdDivisor = (age) => RMD_DIVISOR[Math.min(120, Math.max(73, Math.floor(age)))] ?? 2.0;
+
+// The share of a deferred balance that must come out at `age`, or 0 before the RMD age.
+export const rmdFraction = (age, rmdAge) => (age < rmdAge ? 0 : 1 / rmdDivisor(age));
+
 // A kid's display name: whatever was typed, else "Kid N". Exported so the model, the chart markers
 // and the UI all label the same child the same way.
 export const kidName = (kid, i) => {
@@ -81,7 +103,7 @@ const NUMERIC_PARAMS = [
   "daycarePerKid", "ongoingPerKid", "collegePerKid", "annual529",
   "partnerAge", "partnerIncome", "partnerTaxAdv", "partnerPortfolio", "partnerPortfolioTaxAdv",
   "partnerCash", "partnerStart", "partnerEnd",
-  "retirementSpendToday", "endAge", "coastAge", "effTaxRate", "ladderYears", "accessAge",
+  "retirementSpendToday", "endAge", "coastAge", "effTaxRate", "ladderYears", "accessAge", "rmdAge",
 ];
 // these read through `??`, so a blank box has to stay null rather than collapsing to 0
 const NULLABLE_PARAMS = ["interimLivingToday"];
@@ -911,6 +933,30 @@ function simulateOnce(rawP, retireAnchor) {
     return { st: { cash, taxable, taxAdvYou: ty, taxAdvPartner: tp }, short };
   };
 
+  // Force out the minimum before the year's ordinary drawdown. In THIS model that is a transfer, not
+  // a cost: money moves from the sealed bucket to the spendable one and net worth is unchanged,
+  // because no taxes are modelled. Implemented anyway, for the same reason the 529 is — it is the
+  // correct structure for when taxes arrive, it is visible in the trace, and a test pins it as
+  // exactly wealth-neutral so that if it ever starts changing the answer, something has broken.
+  //
+  // It also cannot help liquidity here: RMDs begin at 73 and the buckets already unlocked at 59.5.
+  const rmdAge = Math.max(1, +p.rmdAge || 73);
+  const forceRmd = (st, t0, t1) => {
+    if (!p.useRmd) return st;
+    const age = Math.floor(t0);
+    const frac = rmdFraction(age, rmdAge) * Math.min(1, Math.max(0, t1 - t0));
+    if (frac <= 0) return st;
+    const take = (bal) => Math.max(0, bal) * frac;
+    const fromYou = take(st.taxAdvYou), fromPartner = take(st.taxAdvPartner);
+    if (fromYou + fromPartner <= 0) return st;
+    return {
+      cash: st.cash,
+      taxable: st.taxable + fromYou + fromPartner,
+      taxAdvYou: st.taxAdvYou - fromYou,
+      taxAdvPartner: st.taxAdvPartner - fromPartner,
+    };
+  };
+
   // one retired sub-year. When the partner is still earning their take-home offsets the bill (a
   // surplus lands in taxable) and their 401k contribution grows the locked bucket; otherwise this is
   // exactly spend(). Same taxable-first, then-unlocked draw order, so the two stay consistent.
@@ -945,7 +991,7 @@ function simulateOnce(rawP, retireAnchor) {
     const dry = cashDryAt(t0, st.cash, retireNetLiquid, t1);
     if (dry > t0 + 1e-9 && dry < t1 - 1e-9) cuts.push(dry);
     cuts.sort((a, b) => a - b);
-    let s = st, short = false;
+    let s = forceRmd(st, t0, t1), short = false;
     for (let i = 0; i < cuts.length - 1; i++) {
       const r = retireStep(s, cuts[i], cuts[i + 1], T);   // spend(), plus a working partner's income
       s = r.st; short = short || r.short;
@@ -987,7 +1033,7 @@ function simulateOnce(rawP, retireAnchor) {
     return { cash, taxable, taxAdvYou, taxAdvPartner };
   };
   // advance a working stretch, then sweep any now-reachable account against a cash shortfall
-  const step = (st, age, dt) => settle(work(st, age, dt), age + dt);
+  const step = (st, age, dt) => settle(work(forceRmd(st, age, age + dt), age, dt), age + dt);
 
   // --- three buckets, because "whose account is it" now changes the answer ---
   // The tax-advantaged slice can never exceed the portfolio it is a slice OF. Clamping here (not
@@ -1239,6 +1285,11 @@ function simulateOnce(rawP, retireAnchor) {
         takeHome: takeHomeR, otherIncome: otherIncR,
         living: Math.round(r2(livingFV)), housing: Math.round(r2(housingFV)),
         kids: Math.round(r2(kidsFV)), lumps: Math.round(r2(lumpsFV)),
+        // what the RMD rule forced out of the sealed bucket this year, if it is on. Not a cost — it
+        // lands in the spendable account — but worth seeing, because it is the one withdrawal you
+        // do not choose.
+        rmd: Math.round(r2(
+          p.useRmd ? rmdFraction(age, Math.max(1, +p.rmdAge || 73)) * Math.max(0, startTaxAdv) * inflEndYr / infl : 0)),
         // the same total, itemised — so a band can say "college" instead of "one-offs"
         college: Math.round(r2(flowOf(age, "retired", COLLEGE) * yearFV)),
         save529: Math.round(r2(flowOf(age, "retired", SAVE529) * yearFV)),
@@ -2068,6 +2119,8 @@ export const DEFAULTS = {
   enforceAccess: true, rothLadder: false, ladderYears: 5, accessAge: 59.5,
   // cash earns its own (lower) rate; borrowing to fund the plan is off unless you opt in
   cashReturn: 0.04, allowBorrowing: false,
+  // RMDs: a transfer rather than a cost until taxes are modelled — see the note in simulate()
+  useRmd: false, rmdAge: 73,
   // homes appreciate; without this they were pure expense and renting forever won by construction
   homeGrowth: 0.04,
 };
@@ -3612,6 +3665,25 @@ function Calculator({ shared, isMobile }) {
                   </span>
                 </label>
               )}
+            </SubSection>
+
+            <SubSection title="Required minimum distributions">
+              <Toggle on={!!p.useRmd} onClick={() => set("useRmd", !p.useRmd)}
+                label={`Force RMDs from age ${p.rmdAge || 73}`}
+                sub={p.useRmd
+                  ? "on — the IRS minimum is moved out of retirement accounts each year"
+                  : "off — retirement accounts are drawn only as the plan needs them"} />
+              {p.useRmd && field("RMD age (73, or 75 if born 1960+)", "rmdAge", p.rmdAge, set, { step: 1, min: 50, max: 100 })}
+              <div style={{ fontSize: 10, color: C.mute, lineHeight: 1.6 }}>
+                <b style={{ color: C.brass }}>This changes nothing in the current model, by design.</b> An RMD
+                moves money from a sealed account to a spendable one; the cost of that move is the tax
+                bill, and no taxes are modelled here — the same reason the 529 is a no-op. It is
+                implemented so the structure is right when taxes land, and so you can see the size of
+                the withdrawal you don't get to choose. Note it also cannot help you reach your money
+                earlier: RMDs start at {p.rmdAge || 73}, long after the {p.accessAge} unlock. Roth
+                accounts have no RMD and this model keeps one undifferentiated tax-advantaged bucket,
+                so the figure overstates the forced amount for anyone holding Roth money.
+              </div>
             </SubSection>
 
             <SubSection title="Borrowing">

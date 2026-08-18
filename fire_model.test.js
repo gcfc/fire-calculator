@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { HISTORY, randomStart, blendedReturn, seededRandom } from "./history.js";
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
+  rmdDivisor, rmdFraction,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -2262,5 +2263,64 @@ describe("the Sankey names what a band actually is", () => {
         expect(Math.abs(sum(d.sources) - sum(d.sinks)), `age ${t.age}`).toBeLessThan(3);
       }
     }
+  });
+});
+
+describe("required minimum distributions", () => {
+  it("uses the IRS Uniform Lifetime Table", () => {
+    expect(rmdDivisor(73)).toBe(26.5);
+    expect(rmdDivisor(75)).toBe(24.6);
+    expect(rmdDivisor(80)).toBe(20.2);
+    expect(rmdDivisor(90)).toBe(12.2);
+    expect(rmdDivisor(100)).toBe(6.4);
+    expect(rmdDivisor(130)).toBe(2.0);        // the table stops at 120; the last divisor stands
+    expect(rmdFraction(72, 73)).toBe(0);      // nothing before the RMD age
+    expect(rmdFraction(73, 73)).toBeCloseTo(1 / 26.5, 10);
+    expect(rmdFraction(80, 75)).toBeCloseTo(1 / 20.2, 10);
+  });
+
+  it("is exactly wealth-neutral, which is the point", () => {
+    // An RMD moves money from a sealed account to a spendable one. The cost of that move is the tax
+    // bill, and no taxes are modelled — so it must not change a single figure. Pinned so that if it
+    // ever DOES start changing the answer, something has broken. Same contract as the 529.
+    const off = simulate({ ...DEFAULTS, useRmd: false });
+    const on = simulate({ ...DEFAULTS, useRmd: true });
+    expect(on.fireCross).toBeCloseTo(off.fireCross, 9);
+    expect(on.fireCrossValue).toBeCloseTo(off.fireCrossValue, 2);
+    expect(on.end).toBeCloseTo(off.end, 2);
+    for (let i = 0; i < off.rows.length; i++) {
+      expect(on.rows[i].portfolio, `age ${off.rows[i].age}`).toBeCloseTo(off.rows[i].portfolio, -1);
+    }
+  });
+
+  it("really does move the money, even though the total is unchanged", () => {
+    const on = simulate({ ...DEFAULTS, useRmd: true });
+    const off = simulate({ ...DEFAULTS, useRmd: false });
+    const at = (s, age) => s.trace.find((t) => t.age === age);
+    // by the mid-eighties the forced withdrawals have shifted real balance out of the sealed bucket
+    expect(at(on, 85).startTaxAdv).toBeLessThan(at(off, 85).startTaxAdv);
+    expect(at(on, 85).startTaxable).toBeGreaterThan(at(off, 85).startTaxable);
+  });
+
+  it("reports the forced amount, and only from the RMD age", () => {
+    const s = simulate({ ...DEFAULTS, useRmd: true });
+    expect(s.trace.find((t) => t.age === 72).rmd).toBe(0);
+    const at73 = s.trace.find((t) => t.age === 73);
+    expect(at73.rmd).toBeGreaterThan(0);
+    expect(at73.rmd).toBeCloseTo(at73.startTaxAdv / 26.5, -2);
+    expect(simulate({ ...DEFAULTS, useRmd: false }).trace.find((t) => t.age === 73).rmd).toBe(0);
+  });
+
+  it("honours a later RMD age", () => {
+    const a = simulate({ ...DEFAULTS, useRmd: true, rmdAge: 75 });
+    expect(a.trace.find((t) => t.age === 74).rmd).toBe(0);
+    expect(a.trace.find((t) => t.age === 75).rmd).toBeGreaterThan(0);
+  });
+
+  it("cannot rescue a plan gated by the 59.5 bridge", () => {
+    // RMDs begin at 73, long after the unlock — so they can never make an early retirement reachable
+    const gated = { ...DEFAULTS, startPortfolio: 20000, startPortfolioTaxAdv: 3000000, rothLadder: false };
+    expect(simulate({ ...gated, useRmd: true }).fireCross)
+      .toBe(simulate({ ...gated, useRmd: false }).fireCross);
   });
 });
