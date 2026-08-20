@@ -2743,3 +2743,59 @@ describe("palettes", () => {
       expect(Object.values(dark), `${n.key} leaked a dark colour`).not.toContain(n.color);
   });
 });
+
+// ---------------------------------------------------------------------------
+// the lump column, itemised
+// ---------------------------------------------------------------------------
+describe("what a lump was", () => {
+  it("splits into parts that add back up to the column", () => {
+    const s = simulate(DEFAULTS);
+    for (const t of s.trace) {
+      const parts = t.college + t.save529 + t.homeBuy - t.homeSell + t.oneOff + t.debtPay;
+      // each component is rounded independently, so allow a dollar per component
+      expect(Math.abs(parts - t.lumps), `age ${t.age}`).toBeLessThanOrEqual(6);
+    }
+  });
+
+  it("names each one-off entry that landed in a year", () => {
+    const p = { ...DEFAULTS, expenses: [
+      { label: "New roof", age: DEFAULTS.currentAge + 2, amount: 40000, until: null },
+      { label: "Sabbatical", age: DEFAULTS.currentAge + 2, amount: 25000, until: null },
+    ] };
+    const row = simulate(p).trace.find((t) => t.age === DEFAULTS.currentAge + 2);
+    expect(row.oneOffItems.map((i) => i.label)).toEqual(["New roof", "Sabbatical"]);
+    // the named parts reconcile to the pooled figure the column shows
+    const sum = row.oneOffItems.reduce((a, i) => a + i.amount, 0);
+    expect(Math.abs(sum - row.oneOff)).toBeLessThanOrEqual(2);
+  });
+
+  it("gives an unlabelled entry a name rather than a blank row", () => {
+    const p = { ...DEFAULTS, expenses: [{ label: "", age: DEFAULTS.currentAge + 1, amount: 12000, until: null }] };
+    const row = simulate(p).trace.find((t) => t.age === DEFAULTS.currentAge + 1);
+    expect(row.oneOffItems[0].label).toMatch(/One-off expense/);
+    // …and a windfall is named as income, not as an expense
+    const w = { ...DEFAULTS, expenses: [{ label: "", age: DEFAULTS.currentAge + 1, amount: -9000, until: null }] };
+    expect(simulate(w).trace.find((t) => t.age === DEFAULTS.currentAge + 1).oneOffItems[0].label)
+      .toMatch(/One-off income/);
+  });
+
+  it("repeats a multi-year entry in every year it runs", () => {
+    const a = DEFAULTS.currentAge;
+    const p = { ...DEFAULTS, expenses: [{ label: "Care", age: a + 1, amount: 20000, until: a + 3 }] };
+    const s = simulate(p);
+    for (const age of [a + 1, a + 2, a + 3])
+      expect(s.trace.find((t) => t.age === age).oneOffItems.map((i) => i.label)).toEqual(["Care"]);
+    expect(s.trace.find((t) => t.age === a + 4).oneOffItems).toEqual([]);
+  });
+
+  it("keeps the demo's biggest lumps attributable", () => {
+    // the two figures that made the old "one-off" header a lie: a house, and overlapping tuition
+    const s = simulate(DEFAULTS);
+    const house = s.trace.find((t) => t.homeBuy > 0);
+    expect(house.oneOff).toBe(0);
+    expect(house.homeBuy).toBeGreaterThan(0);
+    const tuition = s.trace.filter((t) => t.college > 0);
+    expect(tuition.length).toBeGreaterThan(0);
+    for (const t of tuition) expect(t.oneOff).toBe(0);
+  });
+});

@@ -603,20 +603,28 @@ function simulateOnce(rawP, retireAnchor) {
   // resulting date back in and runs again.
   const relAnchor = (e) => (e && e.anchor === "retirement");
   const extraLump = {};
-  for (const e of (p.expenses || [])) {
+  // …and the same total kept itemised. A year's lump column is otherwise a bare figure with no way to
+  // ask what it was: on the demo, $100,447 at age 50 is two children enrolled at once, and $392,682 at
+  // 31 is a house. Names ride alongside the arithmetic so the table can answer that in place.
+  const extraLumpItems = {};
+  (p.expenses || []).forEach((e, i) => {
     const amt = (e && +e.amount) || 0;
-    if (!amt) continue;
+    if (!amt) return;
     let a0, a1;
     if (relAnchor(e)) {
-      if (retireAnchor == null) continue;                       // no date yet — resolved on a later pass
+      if (retireAnchor == null) return;                         // no date yet — resolved on a later pass
       a0 = Math.round(retireAnchor + (+e.age || 0));
       a1 = e.until === "" || e.until == null ? a0 : Math.max(a0, Math.round(retireAnchor + (+e.until || 0)));
     } else {
       a0 = Math.round(e.age);
       a1 = e.until ? Math.max(a0, Math.round(e.until)) : a0;
     }
-    for (let y = a0; y <= a1; y++) extraLump[y] = (extraLump[y] || 0) + amt * inflAt(y);
-  }
+    const label = (e.label || "").trim() || `${amt < 0 ? "One-off income" : "One-off expense"} ${i + 1}`;
+    for (let y = a0; y <= a1; y++) {
+      extraLump[y] = (extraLump[y] || 0) + amt * inflAt(y);
+      (extraLumpItems[y] = extraLumpItems[y] || []).push({ label, amount: amt * inflAt(y) });
+    }
+  });
   const debts = (p.debts || []).map((d) => {
     const bal = Math.max(0, +d.balance || 0), pay = Math.max(0, +d.payment || 0), r = (+d.apr || 0) / 100 / 12;
     // `balance` is the balance TODAY, so a loan that began in the past is amortised from now, not from
@@ -1446,6 +1454,10 @@ function simulateOnce(rawP, retireAnchor) {
         homeBuy: Math.round(r2(flowOf(age, "retired", HOMEBUY) * yearFV)),
         homeSell: Math.round(r2(-flowOf(age, "retired", HOMESELL) * yearFV)),
         oneOff: Math.round(r2(flowOf(age, "retired", ONEOFF) * yearFV)),
+        // the same figure, split by the entry that caused it, on the same scale as every other column
+        oneOffItems: (extraLumpItems[age] || []).map((it) => ({
+          label: it.label, amount: Math.round(r2(it.amount * yearFV)),
+        })),
         debtPay: Math.round(r2(flowOf(age, "retired", DEBT) * yearFV)),
         cashOut: cashOutR,
         cashGrowth: endTaxableR - startTaxableR - takeHomeR - otherIncR + cashOutR,
@@ -2056,12 +2068,45 @@ const Footnote = () => {
   );
 };
 
+// The lump column is a sum of six unrelated things, and until you can see which one it was, a figure
+// like $100,447 at age 50 is unreadable. Everything here is already on the trace row; this just names
+// the parts. Home sale proceeds come IN, so they carry a negative sign against the rest.
+const lumpParts = (t) => {
+  const parts = [
+    { label: "College", amount: t.college },
+    { label: "529 contributions", amount: t.save529 },
+    { label: "Home purchase", amount: t.homeBuy },
+    { label: "Home sale proceeds", amount: -t.homeSell },
+    { label: "Debt payments", amount: t.debtPay },
+    // itemised down to the entry that caused it, rather than one pooled "one-offs" line
+    ...(t.oneOffItems && t.oneOffItems.length
+      ? t.oneOffItems
+      : [{ label: "One-offs", amount: t.oneOff }]),
+  ];
+  return parts.filter((x) => Math.round(x.amount || 0) !== 0);
+};
+
 // Year-by-year arithmetic for the whole projection. The chart shows the shape; this shows the sums that
 // produce it — and in particular answers the question the shape provokes: why does the portfolio keep
 // CLIMBING after you retire? Because the retirement bucket is locked until 59.5, so it compounds
 // untouched while only the taxable account is drawn down.
 const TraceTable = ({ trace, accessAge, fireCross }) => {
   const C = usePalette();
+  // ONE popover for the whole table, positioned from the hovered cell and rendered OUTSIDE the scroll
+  // box. A bubble inside the box would be clipped by its own `overflow: auto` the moment a row near
+  // the bottom was hovered, which is most of them.
+  const [peek, setPeek] = useState(null);
+  const boxRef = useRef(null);
+  const showPeek = (t) => (ev) => {
+    const box = boxRef.current;
+    if (!box) return;
+    const r = ev.currentTarget.getBoundingClientRect(), b = box.getBoundingClientRect();
+    const below = r.bottom - b.top + 4;               // card's top edge, hanging under the cell
+    // near the bottom of the scroll box there is no room under the row, so pin the card's BOTTOM edge
+    // to just above the cell instead
+    const above = b.height - (r.top - b.top) + 4;
+    setPeek({ t, left: r.left - b.left + r.width / 2, below, above, flip: below > b.height - 140 });
+  };
   if (!trace || !trace.length) return null;
   const money = (v) => (!v ? <span style={{ color: `${C.mute}66` }}>·</span> : fmt(Math.abs(v)));
   const phaseColor = { working: C.teal, retires: C.brass, retired: C.mute };
@@ -2069,7 +2114,7 @@ const TraceTable = ({ trace, accessAge, fireCross }) => {
   const grp = { ...cell, fontSize: 9, letterSpacing: ".06em", textTransform: "uppercase", textAlign: "center", fontWeight: 400 };
   const edge = `1px solid ${C.line}`;
   return (
-    <div>
+    <div ref={boxRef} style={{ position: "relative" }}>
       <div style={{ maxHeight: 420, overflow: "auto", border: `1px solid ${C.line}`, borderRadius: 6 }}>
         <table style={{ borderCollapse: "collapse", fontFamily: "'JetBrains Mono', monospace", fontSize: 11, minWidth: "100%" }}>
           <thead>
@@ -2092,7 +2137,12 @@ const TraceTable = ({ trace, accessAge, fireCross }) => {
               <th style={{ ...cell, borderLeft: edge }}>living</th>
               <th style={cell}>housing</th>
               <th style={cell}>kids</th>
-              <th style={cell}>one-off</th>
+              {/* NOT "one-off": on the demo this column is a house at 31 and four years of tuition in
+                  the fifties. The name promised something the figure was not, so the column says what
+                  it is — everything episodic — and hovering a cell breaks it apart. */}
+              <th style={cell} title="Tuition, 529 contributions, a home purchase or sale, debt payments and your own one-off entries. Hover a figure to see which.">
+                lumps<span style={{ color: C.mute, opacity: 0.7 }}> ⓘ</span>
+              </th>
               <th style={{ ...cell, borderLeft: edge }}>interest</th>
               <th style={cell}>balance</th>
               <th style={{ ...cell, borderLeft: edge }}>in</th>
@@ -2121,7 +2171,21 @@ const TraceTable = ({ trace, accessAge, fireCross }) => {
                   <td style={{ ...cell, color: C.ink, borderLeft: edge }}>{money(t.living)}</td>
                   <td style={{ ...cell, color: C.ink }}>{money(t.housing)}</td>
                   <td style={{ ...cell, color: C.ink }}>{money(t.kids)}</td>
-                  <td style={{ ...cell, color: C.ink }}>{money(t.lumps)}</td>
+                  <td style={{ ...cell, color: C.ink, position: "relative" }}>
+                    {t.lumps ? (
+                      // a button, not a bare cell, so the breakdown is reachable by keyboard too
+                      <button type="button"
+                        onMouseEnter={showPeek(t)} onMouseLeave={() => setPeek(null)}
+                        onFocus={showPeek(t)} onBlur={() => setPeek(null)}
+                        style={{
+                          background: "none", border: "none", padding: 0, cursor: "help",
+                          font: "inherit", color: "inherit",
+                          textDecoration: `underline dotted ${C.mute}`, textUnderlineOffset: 3,
+                        }}>
+                        {money(t.lumps)}
+                      </button>
+                    ) : money(t.lumps)}
+                  </td>
                   {/* cash account */}
                   <td style={{ ...cell, color: t.cashGrowth < 0 ? C.coral : C.liquid, borderLeft: edge }}>
                     {t.cashGrowth < 0 ? "−" : ""}{money(t.cashGrowth)}
@@ -2140,6 +2204,33 @@ const TraceTable = ({ trace, accessAge, fireCross }) => {
           </tbody>
         </table>
       </div>
+      {peek && (
+        <div style={{
+          position: "absolute", left: peek.left,
+          top: peek.flip ? undefined : peek.below, bottom: peek.flip ? peek.above : undefined,
+          transform: "translateX(-50%)", zIndex: 5, pointerEvents: "none",
+          background: C.tip, border: `1px solid ${C.line}`, borderRadius: 6,
+          boxShadow: `0 8px 22px ${C.shade}`, padding: "8px 10px", minWidth: 210,
+          fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, color: C.ink,
+        }}>
+          <div style={{ color: C.mute, marginBottom: 5, letterSpacing: ".04em" }}>AGE {peek.t.age}</div>
+          {lumpParts(peek.t).map((part, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 14, lineHeight: 1.7 }}>
+              <span style={{ color: C.mute }}>{part.label}</span>
+              <span style={{ color: part.amount < 0 ? C.liquid : C.ink }}>
+                {part.amount < 0 ? "−" : ""}{fmt(Math.abs(part.amount))}
+              </span>
+            </div>
+          ))}
+          {lumpParts(peek.t).length > 1 && (
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 14, lineHeight: 1.7,
+                          borderTop: `1px solid ${C.line}`, marginTop: 4, paddingTop: 4 }}>
+              <span style={{ color: C.mute }}>total</span>
+              <span>{fmt(peek.t.lumps)}</span>
+            </div>
+          )}
+        </div>
+      )}
       <div style={{ fontSize: 10, color: C.mute, marginTop: 6, lineHeight: 1.6 }}>
         Today's dollars, at the END of each year. Each account balances exactly:{" "}
         <b style={{ color: C.ink }}>start + in − out + interest = balance</b>, so “interest” is the real
@@ -2147,7 +2238,10 @@ const TraceTable = ({ trace, accessAge, fireCross }) => {
         guaranteed income and a working partner's pay once retired. Retirement accounts are{" "}
         <span style={{ color: C.locked }}>locked</span> until {accessAge} — while they are, their “out”
         is zero and the interest simply compounds, which is why the total keeps climbing after you stop
-        working. A <span style={{ color: `${C.mute}` }}>·</span> is zero. Note that in take-home mode
+        working. <b style={{ color: C.ink }}>Lumps</b> pools everything episodic — tuition, 529
+        contributions, buying or selling a home, debt payments, your own one-off entries — so any
+        underlined figure in that column can be hovered to see which. A{" "}
+        <span style={{ color: `${C.mute}` }}>·</span> is zero. Note that in take-home mode
         your contributions are already excluded from “pay”, so they are not deducted again here.
       </div>
     </div>
