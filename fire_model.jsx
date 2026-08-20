@@ -209,6 +209,7 @@ const emptyResult = (p) => ({
   partnerStopsAtAge: null, unlockYouAtFire: null,
   fireTaxable: null, fireLocked: null, fireBridge: null, lockedShare: 0, illiquidAge: null,
   underwaterCause: null,
+  kidsIncluded: p.kidCostsInLiving === true, kidCostToday: 0, livingBaseline: 0, retireBaseline: 0,
   useCoast: p.useCoast !== false, coastSpecified: false, coastTarget: null, coastCross: null, coastCrossValue: null,
   coastToday: null, coastShortfall: null,
   partnerAgeAtFire: null, partnerAgeAtEnd: null,
@@ -607,6 +608,28 @@ function simulateOnce(rawP, retireAnchor) {
   // fine for the arithmetic and useless everywhere it surfaced: the Sankey showed a $100k band
   // labelled "One-offs" in a household's early fifties with no way to tell that it was college
   // tuition for two children whose four-year windows overlap.
+  // "My living figure already includes the kids."
+  //
+  // Naively this would mean "stop adding kid costs", and that is wrong in a way that is easy to miss:
+  // it freezes the child cost at today's level forever, so you keep paying phantom daycare long after
+  // they have left home. Same error as baking a paid-off house into a flat retirement budget.
+  //
+  // Instead, derive the kid-free baseline by subtracting what the model says the children cost TODAY:
+  //
+  //     baseline = entered − kidCostAt(currentAge)
+  //     living(age) = baseline + kidCostAt(age)
+  //
+  // At today that reproduces exactly the figure typed, so ticking the box never makes an entered
+  // number wrong; from then on the ramp is the model's, so costs fall away as each child ages out.
+  const kidsIncluded = p.kidCostsInLiving === true;
+  const kidCostToday = kidsIncluded ? kidCostAt(p.currentAge) / inflAt(p.currentAge) : 0;
+  const householdBudget = (retired) => {
+    const entered = retired ? p.retirementSpendToday : p.nonHousingLiving;
+    // clamp at zero: a household whose modelled children cost more than its whole budget is telling
+    // us something is off, and the UI says so rather than the model going negative
+    return kidsIncluded ? Math.max(0, entered - kidCostToday) : entered;
+  };
+
   const HOUSEHOLD = "household", KIDS = "kids", HOUSING = "housing", INCOME = "income";
   const COLLEGE = "college", HOMEBUY = "homebuy", HOMESELL = "homesell";
   const ONEOFF = "oneoff", DEBT = "debt", SAVE529 = "save529";
@@ -615,7 +638,7 @@ function simulateOnce(rawP, retireAnchor) {
     const infl = inflAt(age);
     const retired = phase === "retired";
     return [
-      { key: HOUSEHOLD, amount: (retired ? p.retirementSpendToday : p.nonHousingLiving) * infl },
+      { key: HOUSEHOLD, amount: householdBudget(retired) * infl },
       { key: HOUSING, amount: housingAt(age) },
       // charged in BOTH phases — a child at home costs the same whether or not you have a job
       { key: KIDS, amount: kidCostAt(age) },
@@ -1413,6 +1436,11 @@ function simulateOnce(rawP, retireAnchor) {
       // the cash balance going into the year that broke, so the shortfall can be put in context
       taxableAtStart: (rows.find((r) => r.age === illiquidAge) || {}).taxable ?? null,
     },
+    // what the "kids are already in my living figure" adjustment actually did, so the panel can show
+    // the baseline it derived rather than leaving the user to trust a checkbox
+    kidsIncluded, kidCostToday: Math.round(kidCostToday),
+    livingBaseline: Math.round(householdBudget(false)),
+    retireBaseline: Math.round(householdBudget(true)),
     useCoast, coastSpecified, coastTarget, coastCross, coastCrossValue, coastToday: coastAt(p.currentAge),
     // when coast is ON but never reached: what you'd need vs. what you'd have at the coast target
     coastShortfall: !coastSpecified || coastCross != null ? null : (() => {
@@ -2183,7 +2211,7 @@ export const DEFAULTS = {
   // cash earns its own (lower) rate; borrowing to fund the plan is off unless you opt in
   cashReturn: 0.04, allowBorrowing: false,
   // RMDs: a transfer rather than a cost until taxes are modelled — see the note in simulate()
-  useRmd: false, rmdAge: 73,
+  useRmd: false, rmdAge: 73, kidCostsInLiving: false,
   // homes appreciate; without this they were pure expense and renting forever won by construction
   homeGrowth: 0.04,
 };
@@ -3583,6 +3611,33 @@ function Calculator({ shared, isMobile }) {
             })}
             {kidsCount > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 2 }}>
+                <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+                  <input type="checkbox" checked={!!p.kidCostsInLiving}
+                    onChange={(e) => set("kidCostsInLiving", e.target.checked)}
+                    style={{ accentColor: C.teal, cursor: "pointer", width: 15, height: 15, marginTop: 1, flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, color: C.ink, lineHeight: 1.45 }}>
+                    My living figures already include the kids
+                    <InfoIcon>Most people budget one number for the whole household. Tick this and the
+                      model subtracts what the children cost <em>today</em> to find your kid-free
+                      baseline, then adds the costs back year by year — so today's total is exactly what
+                      you typed, and it still falls away as they grow up. Untick it and the costs are
+                      added on top instead.</InfoIcon>
+                  </span>
+                </label>
+                {p.kidCostsInLiving && sim.kidCostToday > 0 && (
+                  <div style={{ fontSize: 10, color: C.mute, lineHeight: 1.6, marginTop: -6 }}>
+                    Children cost <b style={{ color: C.ink }}>{fmt(sim.kidCostToday)}</b>/yr right now, so
+                    your kid-free baseline works out at <b style={{ color: C.ink }}>{fmt(sim.livingBaseline)}</b>/yr
+                    while working and <b style={{ color: C.ink }}>{fmt(sim.retireBaseline)}</b>/yr in retirement.
+                  </div>
+                )}
+                {p.kidCostsInLiving && sim.kidCostToday >= p.nonHousingLiving && p.nonHousingLiving > 0 && (
+                  <Warn>
+                    The children alone cost <b>{fmt(sim.kidCostToday)}</b>/yr, which is more than the
+                    <b> {fmt(p.nonHousingLiving)}</b>/yr living figure they are supposed to be inside. The
+                    baseline is held at zero — check whether that living figure really includes them.
+                  </Warn>
+                )}
                 {/* Only ask for a cost you can still incur. A phase every child has already aged out
                     of will never be charged — kidCostAt() keys off each kid's own age — so asking a
                     parent of teenagers for a daycare figure is asking for a number that cannot

@@ -2410,3 +2410,54 @@ describe("presets", () => {
     expect(dear.fireCross).toBeGreaterThan(cheap.fireCross);
   });
 });
+
+describe("kid costs already inside the living figure", () => {
+  // The naive reading — "stop adding kid costs" — freezes the child cost at today's level forever,
+  // so you keep paying phantom daycare after they have left home. Same error as baking a paid-off
+  // house into a flat retirement budget. The derived baseline avoids it.
+  const P = { ...DEFAULTS, currentAge: 40, kids: [{ birthAge: 37 }, { birthAge: 39 }],
+              nonHousingLiving: 90000, retirementSpendToday: 90000 };
+
+  it("reproduces today's figure exactly, so ticking the box never makes an entry wrong", () => {
+    const on = simulate({ ...P, kidCostsInLiving: true });
+    const today = on.trace.find((t) => t.age === P.currentAge);
+    const off = simulate({ ...P, kidCostsInLiving: false });
+    const offToday = off.trace.find((t) => t.age === P.currentAge);
+    // living + kids under the new reading equals living alone under the old one
+    expect(today.living + today.kids).toBeCloseTo(offToday.living, -2);
+    expect(on.livingBaseline).toBe(90000 - on.kidCostToday);
+  });
+
+  it("still falls away as the children age out", () => {
+    const on = simulate({ ...P, kidCostsInLiving: true });
+    const early = on.trace.find((t) => t.age === 41);      // both children at home
+    const late = on.trace.find((t) => t.age === 62);       // long grown
+    expect(early.kids).toBeGreaterThan(0);
+    expect(late.kids).toBe(0);
+    // the household line is the baseline in both years; the difference is entirely the children
+    expect(early.living + early.kids).toBeGreaterThan(late.living + late.kids);
+  });
+
+  it("is a strict no-op with no children", () => {
+    const none = { ...P, kids: [] };
+    expect(simulate({ ...none, kidCostsInLiving: true }).fireCross)
+      .toBe(simulate({ ...none, kidCostsInLiving: false }).fireCross);
+  });
+
+  it("retires you earlier than adding the costs on top, because it is not double-counting", () => {
+    const inside = simulate({ ...P, kidCostsInLiving: true });
+    const onTop = simulate({ ...P, kidCostsInLiving: false });
+    expect(inside.fireCross).toBeLessThan(onTop.fireCross);
+  });
+
+  it("clamps at zero rather than going negative", () => {
+    const tiny = simulate({ ...P, nonHousingLiving: 5000, retirementSpendToday: 5000, kidCostsInLiving: true });
+    expect(tiny.livingBaseline).toBe(0);
+    expect(tiny.rows.every((r) => Number.isFinite(r.portfolio))).toBe(true);
+  });
+
+  it("is off by default", () => {
+    expect(DEFAULTS.kidCostsInLiving).toBe(false);
+    expect(simulate(DEFAULTS).kidsIncluded).toBe(false);
+  });
+});
