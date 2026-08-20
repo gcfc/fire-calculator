@@ -2936,7 +2936,7 @@ function MortalityPanel({ p, sim, mc, isMobile }) {
 }
 
 // ---- the compare panel -------------------------------------------------------
-function ComparePanel({ p, saved, onSave, onClear, isMobile }) {
+function ComparePanel({ p, saved, onSave, onClear, onApplyPreset, isMobile }) {
   const C = usePalette();
   const cmp = useMemo(() => (saved ? compareScenarios(saved.p, p) : null), [saved, p]);
   if (!saved) {
@@ -2988,6 +2988,31 @@ function ComparePanel({ p, saved, onSave, onClear, isMobile }) {
           Drop the comparison
         </button>
       </div>
+
+      {/* Comparing two PRESETS is the obvious thing to want here and used to be impossible: the preset
+          list only existed on the empty page, so pinning one household left no way to reach another
+          without clearing everything — which also cleared the pin. The pinned copy is a snapshot held
+          outside `p`, so swapping the live plan wholesale is exactly the safe operation. */}
+      {onApplyPreset && (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap",
+                      fontSize: 11, color: C.mute }}>
+          <span style={{ letterSpacing: ".04em", textTransform: "uppercase", fontSize: 10 }}>
+            load as “now”
+          </span>
+          {PRESETS.map((ps) => (
+            <button key={ps.key} type="button" onClick={() => onApplyPreset(ps)} title={ps.blurb}
+              style={{
+                background: "transparent", border: `1px solid ${C.line}`, color: C.ink,
+                borderRadius: 999, padding: "4px 10px", cursor: "pointer", fontSize: 11,
+                fontFamily: "'Space Grotesk', sans-serif", whiteSpace: "nowrap",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.teal; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.line; }}>
+              {ps.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div style={{ overflowX: "auto" }}>
         <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: isMobile ? 340 : 560 }} role="img"
@@ -3631,6 +3656,82 @@ function ShareMenu({ p, show, sim }) {
   );
 }
 
+// The presets used to live only in the empty state, which made them a one-shot onboarding device: the
+// moment a plan existed they were gone. That broke the one workflow they are most useful for — pin one
+// household as "before", load a different one, and read the difference — because the second preset was
+// no longer reachable without wiping the page. Same list, always in the header.
+//
+// Applying one REPLACES the whole plan, so when there is something to lose it asks first. A pinned
+// comparison survives, which is the point: that snapshot is held outside `p`.
+function PresetMenu({ onApply, hasPlan, pinnedLabel }) {
+  const C = usePalette();
+  const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState(null);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setConfirming(null); } };
+    const onKey = (e) => { if (e.key === "Escape") { setOpen(false); setConfirming(null); } };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+
+  const pick = (ps) => {
+    if (hasPlan && confirming !== ps.key) { setConfirming(ps.key); return; }
+    onApply(ps);
+    setOpen(false); setConfirming(null);
+  };
+
+  return (
+    <div ref={ref} style={{ position: "relative", flexShrink: 0 }}>
+      <button type="button" onClick={() => { setOpen((o) => !o); setConfirming(null); }}
+        aria-expanded={open} title="Start from a household like yours"
+        style={{
+          background: "transparent", color: C.teal, border: `1px solid ${C.teal}`, borderRadius: 8,
+          cursor: "pointer", padding: "8px 14px", fontFamily: "'Space Grotesk', sans-serif",
+          fontSize: 13, fontWeight: 500, whiteSpace: "nowrap",
+        }}>
+        ⌂ Presets
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 20, width: 290,
+          background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 6,
+          boxShadow: `0 10px 30px ${C.shade}`, textAlign: "left",
+        }}>
+          {PRESETS.map((ps) => (
+            <button key={ps.key} type="button" onClick={() => pick(ps)}
+              style={{
+                display: "block", width: "100%", textAlign: "left", cursor: "pointer",
+                background: confirming === ps.key ? `${C.coral}1A` : "transparent",
+                border: "none", color: C.ink, padding: "8px 12px", borderRadius: 6,
+                fontFamily: "'Space Grotesk', sans-serif", fontSize: 13,
+              }}
+              onMouseEnter={(e) => { if (confirming !== ps.key) e.currentTarget.style.background = `${C.teal}1A`; }}
+              onMouseLeave={(e) => { if (confirming !== ps.key) e.currentTarget.style.background = "transparent"; }}>
+              {confirming === ps.key ? (
+                <>
+                  <span style={{ color: C.coral }}>Replace everything you've typed?</span>
+                  <span style={{ display: "block", fontSize: 11, color: C.mute, marginTop: 2 }}>
+                    Click again to load “{ps.label}”.
+                    {pinnedLabel ? " Your pinned “before” plan is kept." : ""}
+                  </span>
+                </>
+              ) : (
+                <>
+                  {ps.label}
+                  <span style={{ display: "block", fontSize: 11, color: C.mute, marginTop: 2 }}>{ps.blurb}</span>
+                </>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // the read-only view a "plot only" link opens: just the chart, rebuilt from the snapshot, no inputs
 function SharedPlot({ snap, isMobile }) {
   const C = usePalette();
@@ -4056,6 +4157,7 @@ function Calculator({ shared, isMobile }) {
               }}>
               ▶ Load demo
             </button>
+            <PresetMenu onApply={applyPreset} hasPlan={hasPlan} pinnedLabel={!!pinned} />
             <ShareMenu p={p} show={show} sim={sim} />
             <ThemeToggle />
           </div>
@@ -5103,7 +5205,8 @@ function Calculator({ shared, isMobile }) {
               open={cmpOpen} onToggle={() => setCmpOpen((v) => !v)}
             >
               <ComparePanel p={p} saved={pinned} isMobile={isMobile}
-                onSave={() => setPinned({ p })} onClear={() => setPinned(null)} />
+                onSave={() => setPinned({ p })} onClear={() => setPinned(null)}
+                onApplyPreset={applyPreset} />
             </Collapsible>
           )}
 
