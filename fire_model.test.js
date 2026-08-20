@@ -3,7 +3,7 @@ import { HISTORY, randomStart, blendedReturn, seededRandom } from "./history.js"
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
   rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
-  PRESETS, SCHOOL_TIERS,
+  PRESETS, SCHOOL_TIERS, traceToCsv,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -2459,5 +2459,39 @@ describe("kid costs already inside the living figure", () => {
   it("is off by default", () => {
     expect(DEFAULTS.kidCostsInLiving).toBe(false);
     expect(simulate(DEFAULTS).kidsIncluded).toBe(false);
+  });
+});
+
+describe("CSV export", () => {
+  it("has a header and one row per traced year", () => {
+    const s = simulate(DEFAULTS);
+    const lines = traceToCsv(s.trace).trim().split("\n");
+    expect(lines.length).toBe(s.trace.length + 1);
+    expect(lines[0]).toMatch(/^Age,Phase,/);
+  });
+
+  it("carries the itemised columns, not just a lumps total", () => {
+    const head = traceToCsv(simulate(DEFAULTS).trace).split("\n")[0];
+    for (const c of ["College", "Home purchase", "Debt payments", "RMD forced", "Growth in retirement"]) {
+      expect(head).toContain(c);
+    }
+  });
+
+  it("writes numbers bare so a spreadsheet reads them as numbers", () => {
+    const s = simulate(DEFAULTS);
+    const row = traceToCsv(s.trace).trim().split("\n")[1].split(",");
+    expect(row[0]).toBe(String(s.trace[0].age));
+    expect(row[0]).not.toMatch(/"/);
+  });
+
+  it("quotes anything that could break a column", () => {
+    const csv = traceToCsv([{ age: 1, phase: 'we, "said"', takeHome: 5 }]);
+    expect(csv).toContain('"we, ""said"""');
+  });
+
+  it("is empty for an empty plan rather than throwing", () => {
+    expect(traceToCsv([])).toBe("");
+    expect(traceToCsv(null)).toBe("");
+    expect(traceToCsv(simulate(EMPTY).trace)).toBe("");
   });
 });

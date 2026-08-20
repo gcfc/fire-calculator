@@ -2359,6 +2359,38 @@ const SERIES = [
 // a series' default visibility changes (which is exactly how the share-link test broke)
 export const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
 
+// ---- CSV --------------------------------------------------------------------
+// The trace is fully assembled and, until now, could not leave the page. Everything is already in
+// today's dollars, which is what a spreadsheet wants — nobody opening this in Excel is going to
+// deflate nominal figures by hand.
+export const traceToCsv = (trace) => {
+  if (!trace || !trace.length) return "";
+  const cols = [
+    ["age", "Age"], ["phase", "Phase"],
+    ["takeHome", "Pay in"], ["otherIncome", "Other income in"],
+    ["living", "Living"], ["housing", "Housing"], ["kids", "Children"],
+    ["college", "College"], ["save529", "529 contributions"], ["homeBuy", "Home purchase"],
+    ["homeSell", "Home sale in"], ["oneOff", "One-offs"], ["debtPay", "Debt payments"],
+    ["startCash", "Cash at start"], ["endCash", "Cash at end"],
+    ["startTaxable", "Spendable at start"], ["endTaxable", "Spendable at end"], ["cashGrowth", "Growth on spendable"],
+    ["startTaxAdv", "Retirement at start"], ["endTaxAdv", "Retirement at end"],
+    ["contributions", "Contributions"], ["withdrawn", "Withdrawn"], ["rmd", "RMD forced"],
+    ["advGrowth", "Growth in retirement"],
+    ["startTotal", "Total at start"], ["endTotal", "Total at end"],
+  ];
+  // quote anything that could carry a comma or a quote; numbers go through bare so a spreadsheet
+  // reads them as numbers rather than as text
+  const cell = (v) => {
+    if (v == null) return "";
+    if (typeof v === "number") return String(v);
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const head = cols.map(([, label]) => cell(label)).join(",");
+  const body = trace.map((t) => cols.map(([k]) => cell(t[k])).join(",")).join("\n");
+  return `${head}\n${body}\n`;
+};
+
 // ---- the Sankey panel -------------------------------------------------------
 function SankeyPanel({ trace, fireCross, isMobile }) {
   const years = trace.map((t) => t.age);
@@ -4420,6 +4452,27 @@ function Calculator({ shared, isMobile }) {
                 bridge line is about.
               </div>
             )}
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                onClick={() => {
+                  // A Blob URL rather than a data: URI — a 100-row trace is comfortably past what
+                  // some browsers will accept in a data URI, and this releases the memory after.
+                  const blob = new Blob([traceToCsv(sim.trace)], { type: "text/csv;charset=utf-8" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `fire-plan-age-${Math.round(p.currentAge)}-to-${sim.END}.csv`;
+                  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                  setTimeout(() => URL.revokeObjectURL(url), 0);
+                }}
+                style={{
+                  background: "transparent", border: `1px solid ${C.line}`, color: C.teal,
+                  borderRadius: 6, padding: "6px 12px", cursor: "pointer", fontSize: 12,
+                  fontFamily: "'Space Grotesk', sans-serif",
+                }}>
+                ↓ Download CSV
+              </button>
+            </div>
             <TraceTable trace={sim.trace} accessAge={sim.accessYou} fireCross={sim.fireCross} />
           </Collapsible>}
 
