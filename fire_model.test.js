@@ -2495,3 +2495,38 @@ describe("CSV export", () => {
     expect(traceToCsv(simulate(EMPTY).trace)).toBe("");
   });
 });
+
+describe("the percentile fan", () => {
+  it("carries the deterministic plan alongside the bands", () => {
+    // a fan without the plan on it is a picture of uncertainty with no answer in it
+    const mc = runTrials(DEFAULTS, { mode: "historical" });
+    expect(mc.bands.every((b) => Number.isFinite(b.plan))).toBe(true);
+    const plan = simulate(DEFAULTS);
+    const at60 = mc.bands.find((b) => b.age === 60);
+    expect(at60.plan).toBe(plan.rows.find((r) => r.age === 60).portfolio);
+  });
+
+  it("keeps the percentiles ordered at every age", () => {
+    for (const mode of ["historical", "randomstart", "bootstrap"]) {
+      const mc = runTrials(DEFAULTS, { mode, trials: 120, seed: 2 });
+      for (const b of mc.bands) {
+        expect(b.p10, `${mode} @${b.age}`).toBeLessThanOrEqual(b.p25);
+        expect(b.p25).toBeLessThanOrEqual(b.p50);
+        expect(b.p50).toBeLessThanOrEqual(b.p75);
+        expect(b.p75).toBeLessThanOrEqual(b.p90);
+      }
+    }
+  });
+
+  it("spans the whole plan, not just retirement", () => {
+    const mc = runTrials(DEFAULTS, { mode: "historical" });
+    expect(mc.bands[0].age).toBe(DEFAULTS.currentAge);
+    expect(mc.bands[mc.bands.length - 1].age).toBe(simulate(DEFAULTS).END);
+  });
+
+  it("widens with time, because uncertainty compounds", () => {
+    const mc = runTrials(DEFAULTS, { mode: "randomstart", trials: 200, seed: 9 });
+    const early = mc.bands.find((b) => b.age === 35), late = mc.bands.find((b) => b.age === 85);
+    expect(late.p90 - late.p10).toBeGreaterThan(early.p90 - early.p10);
+  });
+});

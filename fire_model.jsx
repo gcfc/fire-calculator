@@ -1602,13 +1602,15 @@ export const runTrials = (p, opts = {}) => {
 
   // percentile bands of the portfolio path, for the fan on the chart
   const ages = plan.rows.filter((r) => Number.isInteger(r.age)).map((r) => r.age);
+  const planRow = (age) => (plan.rows.find((r) => r.age === age) || { portfolio: 0 }).portfolio;
   const bands = ages.map((age, i) => {
     const vals = results.map((r) => {
       const row = r.rows.find((x) => x.age === age);
       return row ? row.portfolio : 0;
     }).sort((a, b) => a - b);
     const at = (q) => vals[Math.min(vals.length - 1, Math.floor(q * vals.length))];
-    return { age, p10: at(0.1), p25: at(0.25), p50: at(0.5), p75: at(0.75), p90: at(0.9) };
+    return { age, p10: at(0.1), p25: at(0.25), p50: at(0.5), p75: at(0.75), p90: at(0.9),
+             plan: planRow(age) };
   });
 
   // The plan's assumed real return against what this mix actually delivered. Without this the
@@ -1621,8 +1623,13 @@ export const runTrials = (p, opts = {}) => {
   for (const { seq } of seqs) for (const s of seq) { realSum += (1 + s.ret) / (1 + s.infl) - 1; realN++; }
   const sampledReal = realN ? realSum / realN : 0;
 
+  // the deterministic path, carried alongside the bands so the fan can show where the PLAN sits
+  // inside the distribution — a fan without it is a picture of uncertainty with no answer in it
+  const planPath = Object.fromEntries(plan.rows.filter((r) => Number.isInteger(r.age)).map((r) => [r.age, r.portfolio]));
+
   return {
     mode: o.mode, trials: results.length, stockPct: o.stockPct, blockYears: o.blockYears,
+    planPath,
     successRate: results.length ? ok / results.length : 0,
     // how many independent windows the horizon actually left room for — a 76-year plan against a
     // century of data leaves barely twenty, and they overlap heavily
@@ -2358,6 +2365,94 @@ const SERIES = [
 // exported so tests read the real defaults rather than a hand-copy that silently goes stale whenever
 // a series' default visibility changes (which is exactly how the share-link test broke)
 export const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
+
+// ---- the percentile fan -----------------------------------------------------
+// Where the plan sits inside the distribution of what history would have done to it.
+//
+// This lives HERE, in the backtest panel, and not overlaid on the main chart. The main chart's
+// y-axis already carries the portfolio, the requirement, the bridge, the coast bar and home equity;
+// a fan behind all of that makes both unreadable. It is also conditional — it exists only once a
+// backtest has run, and it changes when you drag the equity weight — and a main chart that mutates
+// because of a control in a different panel is disorienting. The deterministic path is drawn ON the
+// fan instead, which answers the same question ("where does my plan sit?") without the collision.
+function FanChart({ bands, isMobile }) {
+  if (!bands || bands.length < 2) return null;
+  const W = isMobile ? 380 : 760, H = 260, L = 52, R = 12, T = 14, B = 26;
+  const ages = bands.map((b) => b.age);
+  const a0 = ages[0], a1 = ages[ages.length - 1];
+  // LOG axis, and it has to be.
+  //
+  // On a plan whose assumed return is well below what history delivered, the spread is enormous —
+  // the demo runs from a failed $0 to a best case past $120M, while the plan itself peaks at $4.6M.
+  // No linear axis survives that: fit the top and the plan is pinned to the zero line, fit the plan
+  // and three quarters of the distribution is off the chart. A log axis shows all three things this
+  // chart exists to answer at once — does it survive, how wide is the spread, where does my plan sit.
+  //
+  // Runs that fail reach zero, which a log axis has no room for, so they clamp to a floor and sit on
+  // the bottom rule. That is the correct reading anyway: below the floor, broke is broke.
+  const FLOOR = 10000;
+  const hi = Math.max(FLOOR * 10, ...bands.map((b) => b.p90));
+  const lg = Math.log10;
+  const span = lg(hi) - lg(FLOOR);
+  const x = (a) => L + ((a - a0) / Math.max(1, a1 - a0)) * (W - L - R);
+  const y = (v) => T + (1 - (lg(Math.max(FLOOR, v || 0)) - lg(FLOOR)) / span) * (H - T - B);
+
+  // a filled band between two percentile series
+  const ribbon = (lo, up) =>
+    `M${bands.map((b) => `${x(b.age)},${y(b[up])}`).join(" L")} L${[...bands].reverse().map((b) => `${x(b.age)},${y(b[lo])}`).join(" L")} Z`;
+  const line = (k) => `M${bands.map((b) => `${x(b.age)},${y(b[k])}`).join(" L")}`;
+
+  const ticks = [];
+  for (let a = Math.ceil(a0 / 10) * 10; a <= a1; a += 10) ticks.push(a);
+  // decade ticks, so the axis reads as money rather than as maths
+  const yTicks = [];
+  for (let v = FLOOR; v <= hi; v *= 10) yTicks.push(v);
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: isMobile ? 340 : 560 }} role="img"
+        aria-label="Portfolio percentile bands across every age, with the deterministic plan drawn on top">
+        {yTicks.map((v, i) => (
+          <g key={i}>
+            <line x1={L} y1={y(v)} x2={W - R} y2={y(v)} stroke={C.line} strokeWidth={1} />
+            <text x={L - 6} y={y(v) + 3} fontSize={9} fill={C.mute} textAnchor="end"
+              fontFamily="'JetBrains Mono', monospace">
+              {v >= 1e6 ? `$${(v / 1e6).toFixed(v >= 1e7 ? 0 : 1)}M` : `$${Math.round(v / 1000)}k`}
+            </text>
+          </g>
+        ))}
+        <defs>
+          <clipPath id="fanclip"><rect x={L} y={T} width={W - L - R} height={H - T - B} /></clipPath>
+        </defs>
+        {/* two nested bands: the middle half, then the 10th-to-90th spread around it */}
+        <g clipPath="url(#fanclip)">
+          <path d={ribbon("p10", "p90")} fill={C.teal} opacity={0.13} />
+          <path d={ribbon("p25", "p75")} fill={C.teal} opacity={0.2} />
+          <path d={line("p50")} fill="none" stroke={C.teal} strokeWidth={1.5} opacity={0.8} />
+        </g>
+        {/* the plan itself, in the colour it wears on the main chart */}
+        <g clipPath="url(#fanclip)">
+          <path d={line("plan")} fill="none" stroke={C.brass} strokeWidth={2} strokeDasharray="5 3" />
+        </g>
+        {ticks.map((a) => (
+          <text key={a} x={x(a)} y={H - 8} fontSize={9} fill={C.mute} textAnchor="middle"
+            fontFamily="'JetBrains Mono', monospace">{a}</text>
+        ))}
+      </svg>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 10.5, color: C.mute, marginTop: 6 }}>
+        <span><span style={{ display: "inline-block", width: 14, height: 8, background: C.teal, opacity: 0.2, marginRight: 5, verticalAlign: "middle" }} />middle half of runs (25th–75th)</span>
+        <span><span style={{ display: "inline-block", width: 14, height: 8, background: C.teal, opacity: 0.13, marginRight: 5, verticalAlign: "middle" }} />10th–90th</span>
+        <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.teal, marginRight: 5, verticalAlign: "middle" }} />median run</span>
+        <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.brass, marginRight: 5, verticalAlign: "middle" }} />your plan's own assumption</span>
+      </div>
+      <div style={{ fontSize: 10.5, color: C.mute, marginTop: 4, lineHeight: 1.5 }}>
+        The axis is logarithmic — each gridline is ten times the one below. It has to be: these runs
+        span a failed $0 to {fmtM(Math.max(...bands.map((b) => b.p90)))}, and on a linear axis your own
+        plan would be pinned flat to the bottom. A run that has failed sits on the floor line.
+      </div>
+    </div>
+  );
+}
 
 // ---- CSV --------------------------------------------------------------------
 // The trace is fully assembled and, until now, could not leave the page. Everything is already in
@@ -4376,6 +4471,8 @@ function Calculator({ shared, isMobile }) {
                     <Stat label="Median run ends with" value={fmtM(mcShown.median)} />
                     <Stat label="10th percentile" value={fmtM(mcShown.p10)} />
                   </div>
+
+                  <FanChart bands={mcShown.bands} isMobile={isMobile} />
 
                   {/* the number that explains every other number on this panel */}
                   <div style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8,
