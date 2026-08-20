@@ -72,6 +72,46 @@ export const rmdDivisor = (age) => RMD_DIVISOR[Math.min(120, Math.max(73, Math.f
 // The share of a deferred balance that must come out at `age`, or 0 before the RMD age.
 export const rmdFraction = (age, rmdAge) => (age < rmdAge ? 0 : 1 / rmdDivisor(age));
 
+// ---- where a number came from ------------------------------------------------
+// Three provenances, and the difference matters to a reader more than it looks.
+//
+//   typed   — you put this figure in. Trust it.
+//   preset  — a persona or a cost tier supplied it. Plausible for someone, maybe not for you.
+//   default — nobody chose it. It is the model's own assumption, still sitting where it started.
+//
+// Without this, a plan built from a preset looks exactly like a plan someone entered by hand, and
+// the reader has no way to tell which figures they have actually vouched for. `provenance` is kept
+// beside the params rather than inside them, so it never reaches simulate() and cannot change a
+// single number.
+export const PROV = { TYPED: "typed", PRESET: "preset", DEFAULT: "default" };
+
+// every key a person can meaningfully vouch for; the rest are structural (lists, toggles, modes)
+export const TRACKED_KEYS = [
+  "currentAge", "startCash", "startPortfolio", "startPortfolioTaxAdv", "annualTakeHome",
+  "annualTaxAdv", "nonHousingLiving", "rentAnnual",
+  "partnerAge", "partnerCash", "partnerPortfolio", "partnerPortfolioTaxAdv", "partnerIncome",
+  "partnerTaxAdv", "partnerStart", "partnerEnd",
+  "retirementSpendToday", "endAge", "coastAge",
+  "daycarePerKid", "ongoingPerKid", "collegePerKid",
+  "inflation", "nominalReturn", "cashReturn", "swr", "homeGrowth", "effTaxRate", "accessAge", "rmdAge",
+];
+
+export const provenanceOf = (prov, key) => (prov && prov[key]) || PROV.DEFAULT;
+
+// mark a set of keys, leaving the rest of the record alone
+export const markProvenance = (prov, keys, how) => {
+  const out = { ...prov };
+  for (const k of keys) out[k] = how;
+  return out;
+};
+
+// how many of the tracked figures the person has actually vouched for
+export const provenanceCount = (prov) => {
+  const c = { typed: 0, preset: 0, default: 0 };
+  for (const k of TRACKED_KEYS) c[provenanceOf(prov, k)]++;
+  return c;
+};
+
 // A kid's display name: whatever was typed, else "Kid N". Exported so the model, the chart markers
 // and the UI all label the same child the same way.
 export const kidName = (kid, i) => {
@@ -2000,12 +2040,33 @@ const DropButton = ({ onClick }) => (
 );
 
 // `opts.yearRef`, when given, marks this field as an age and shows the calendar year it lands in.
+// A dot beside a label saying who chose the number. Deliberately quiet — it is an annotation on a
+// figure, not a control, so it must not compete with the figure. Default is hollow (nobody chose
+// this), preset is brass (something chose it for you), typed is nothing at all: a number you entered
+// needs no marker, and marking every field once the form is full would be pure noise.
+const ProvDot = ({ how }) => {
+  if (!how || how === PROV.TYPED) return null;
+  const preset = how === PROV.PRESET;
+  return (
+    <span
+      title={preset ? "From a preset — worth checking against your own figures" : "Model default — nobody has chosen this yet"}
+      style={{
+        display: "inline-block", width: 5, height: 5, borderRadius: "50%", marginLeft: 5,
+        verticalAlign: "middle", flexShrink: 0,
+        background: preset ? C.brass : "transparent",
+        border: preset ? "none" : `1px solid ${C.mute}`,
+        opacity: preset ? 0.9 : 0.5,
+      }}
+    />
+  );
+};
+
 const field = (label, key, val, set, opts = {}) => {
   const yr = opts.yearRef != null ? yearAt(val, opts.yearRef) : null;
   return (
     <label key={key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
-        {label}{yr != null && <span style={{ opacity: 0.65 }}> · ≈{yr}</span>}
+        {label}{yr != null && <span style={{ opacity: 0.65 }}> · ≈{yr}</span>}<ProvDot how={opts.prov} />
       </span>
       <NumberInput
         value={val}
@@ -2037,7 +2098,7 @@ const UnitPill = ({ label, onClick }) => (
 // picking a different unit simply re-renders the same stored value in the new unit, and typing
 // afterwards commits back through that unit. Nothing about the model changes.
 const MONEY_LABEL = { yr: "per year", mo: "per month", pct: "% of income" };
-function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr", "mo"], base = 0 }) {
+function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr", "mo"], base = 0, prov }) {
   const [mode, setMode] = useState(modes[0]);
   const usablePct = mode === "pct" && base > 0;
   // an unfilled box stays unfilled: the app opens with every figure blank, and converting "" through
@@ -2047,7 +2108,9 @@ function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr
   const commit = (v) => onChange(mode === "mo" ? toAnnual(v, "mo") : usablePct ? Math.round(dollarsFromPct(v, base)) : v);
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
+      <span style={{ fontSize: 11, letterSpacing: ".04em", color: C.mute, textTransform: "uppercase" }}>
+        {label}<ProvDot how={prov} />
+      </span>
       {/* input and unit picker share a row when there's room; `flexWrap` drops the picker onto its own
           line on a narrow phone rather than crushing the number box. The input flexes but is allowed to
           shrink (minWidth 0 beats the browser's default min-content floor for <input>), so the select
@@ -2781,8 +2844,12 @@ function Calculator({ shared, isMobile }) {
   const [mcOpen, setMcOpen] = useState(false);               // backtesting, on demand — it is not free
   const [sankeyOpen, setSankeyOpen] = useState(false);       // the year-by-year flow diagram
   const [leversOpen, setLeversOpen] = useState(true);        // …but the levers are the payoff, so open
-  const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
-  const setPct = (k, v) => setP((s) => ({ ...s, [k]: v / 100 }));
+  // Provenance rides alongside the params, never inside them — simulate() must not be able to see it.
+  const [prov, setProv] = useState(() =>
+    (shared && shared.mode === "full" ? markProvenance({}, Object.keys(shared.p || {}), PROV.TYPED) : {}));
+  const touch = (k) => setProv((s) => (s[k] === PROV.TYPED ? s : { ...s, [k]: PROV.TYPED }));
+  const set = (k, v) => { touch(k); setP((s) => ({ ...s, [k]: v })); };
+  const setPct = (k, v) => { touch(k); setP((s) => ({ ...s, [k]: v / 100 })); };
 
   // --- add / edit / drop homes and kids -------------------------------------
   const setHome = (i, k, v) =>
@@ -3046,7 +3113,7 @@ function Calculator({ shared, isMobile }) {
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexShrink: 0 }}>
             <button
-              onClick={() => { setP(DEFAULTS); setShow(defaultShow()); }}
+              onClick={() => { setP(DEFAULTS); setProv(markProvenance({}, TRACKED_KEYS, PROV.PRESET)); setShow(defaultShow()); }}
               title="Fill every field with a worked example you can then edit"
               style={{
                 background: hasPlan ? "transparent" : C.brass, color: hasPlan ? C.brass : C.bg,
@@ -3150,8 +3217,9 @@ function Calculator({ shared, isMobile }) {
                 {fields.map(([l, k, o]) => (
                   <React.Fragment key={k}>
                     {o.money
-                      ? <MoneyField label={l} value={p[k]} onChange={(v) => set(k, v)} step={o.step} modes={o.modes} base={o.base} />
-                      : field(l, k, p[k], set, o)}
+                      ? <MoneyField label={l} value={p[k]} onChange={(v) => set(k, v)} step={o.step} modes={o.modes}
+                          base={o.base} prov={provenanceOf(prov, k)} />
+                      : field(l, k, p[k], set, { ...o, prov: provenanceOf(prov, k) })}
                     {/* the gross/net switch belongs beside the salary it reinterprets, not in a
                         separate block further down the column */}
                     {/* ticking the box adds this field but no curve — say why, rather than leaving
@@ -3949,7 +4017,7 @@ function Calculator({ shared, isMobile }) {
                 ))}
               </div>
               <button
-                onClick={() => { setP(DEFAULTS); setShow(defaultShow()); }}
+                onClick={() => { setP(DEFAULTS); setProv(markProvenance({}, TRACKED_KEYS, PROV.PRESET)); setShow(defaultShow()); }}
                 style={{
                   marginTop: 4, background: C.brass, color: C.bg, border: "none", borderRadius: 8,
                   cursor: "pointer", padding: "9px 16px", fontFamily: "'Space Grotesk', sans-serif",

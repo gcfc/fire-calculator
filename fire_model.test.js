@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { HISTORY, randomStart, blendedReturn, seededRandom } from "./history.js";
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
-  rmdDivisor, rmdFraction,
+  rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -2322,5 +2322,35 @@ describe("required minimum distributions", () => {
     const gated = { ...DEFAULTS, startPortfolio: 20000, startPortfolioTaxAdv: 3000000, rothLadder: false };
     expect(simulate({ ...gated, useRmd: true }).fireCross)
       .toBe(simulate({ ...gated, useRmd: false }).fireCross);
+  });
+});
+
+describe("input provenance", () => {
+  it("defaults to nobody-chose-this", () => {
+    expect(provenanceOf({}, "currentAge")).toBe(PROV.DEFAULT);
+    expect(provenanceOf(null, "annualTakeHome")).toBe(PROV.DEFAULT);
+  });
+
+  it("marks only the keys it is given", () => {
+    const m = markProvenance({}, ["currentAge", "startCash"], PROV.TYPED);
+    expect(provenanceOf(m, "currentAge")).toBe(PROV.TYPED);
+    expect(provenanceOf(m, "startPortfolio")).toBe(PROV.DEFAULT);
+  });
+
+  it("lets a typed value overwrite a preset one, key by key", () => {
+    let m = markProvenance({}, TRACKED_KEYS, PROV.PRESET);
+    expect(provenanceCount(m)).toEqual({ typed: 0, preset: TRACKED_KEYS.length, default: 0 });
+    m = markProvenance(m, ["retirementSpendToday"], PROV.TYPED);
+    const c = provenanceCount(m);
+    expect(c.typed).toBe(1);
+    expect(c.preset).toBe(TRACKED_KEYS.length - 1);
+  });
+
+  it("never reaches the model", () => {
+    // provenance is bookkeeping about the inputs, not an input. If it can change a number, it is
+    // a bug — so it lives beside the params and is pinned out of them here.
+    const withNoise = { ...DEFAULTS, provenance: markProvenance({}, TRACKED_KEYS, PROV.PRESET) };
+    expect(simulate(withNoise).fireCross).toBe(simulate(DEFAULTS).fireCross);
+    expect(TRACKED_KEYS.every((k) => k in DEFAULTS)).toBe(true);   // and every tracked key is real
   });
 });
