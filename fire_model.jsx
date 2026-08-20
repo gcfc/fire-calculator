@@ -3095,7 +3095,10 @@ function Calculator({ shared, isMobile }) {
             ]],
             ["Retirement", [
               ["Retirement spending, excluding housing", "retirementSpendToday", { step: 5000, money: true }],
-              ["Life Expectancy", "endAge", { yearRef: p.currentAge }],
+              // NOT "life expectancy". Life expectancy at 27 is about 80; someone who reads the old
+              // label literally and types 80 underfunds themselves by two decades. This is the age
+              // the money has to reach, which is a deliberately pessimistic number.
+              ["Plan until age", "endAge", { yearRef: p.currentAge }],
               // the coast target only exists when coast FIRE is switched on below
               ...(p.useCoast !== false ? [["Coast FIRE: fully retire at age", "coastAge", { yearRef: p.currentAge }]] : []),
             ]],

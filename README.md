@@ -83,7 +83,7 @@ form "you could stop working today".
 | Section | What it is for |
 | --- | --- |
 | **You / Partner** | Age, cash, taxable investments, tax-advantaged accounts, take-home pay, contributions, living costs, rent. The two investment balances are **independent** — enter each as it appears on its own statement. Every partner field is in **their** age, not yours. |
-| **Retirement** | What a year costs once you stop (excluding housing — homes price themselves), your horizon, and optional coast FIRE. |
+| **Retirement** | What a year costs once you stop (excluding housing — homes price themselves), the age the money must reach, and optional coast FIRE. |
 | **Homes** | Any number. Each carries its own price, purchase age, down payment, rate, term, closing costs, property tax and upkeep — and an optional **sale age**. |
 | **Kids** | Any number, each on their own clock. Click a child's name in its label to rename them. Cost fields appear only for phases a child has not already aged out of. |
 | **Major expenses / income** | One-offs and windows. Datable at an age, or **relative to retirement**. |
