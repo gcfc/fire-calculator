@@ -203,8 +203,18 @@ export const lastSurvivorCurve = (yourFrom, partnerFrom, to, partnerOffset) => {
 };
 
 // The age by which survival has fallen to `p` — "half of people are gone by here".
+//
+// Returns null when the curve never gets that low. This used to return the curve's last age instead,
+// which was a silent lie the moment a curve was cut short: a plan to 60 produced a survival curve
+// ending at 60, still around 90%, and the panel reported "half of people are gone by 60". Callers
+// that want a real answer should hand in a curve run to the end of the table, not to the horizon.
 export const survivalPercentileAge = (curve, p) => {
   const ages = Object.keys(curve).map(Number).sort((a, b) => a - b);
   for (const a of ages) if (curve[a] <= p) return a;
-  return ages[ages.length - 1];
+  return null;
 };
+
+// The last age the life table has anything to say about. Medians are computed against a curve run
+// this far no matter where the PLAN stops, because "half of people are gone by 84" is a fact about
+// the table and has nothing to do with where someone chose to end their projection.
+export const TABLE_END = 120;

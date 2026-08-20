@@ -5,7 +5,7 @@ import {
 } from "recharts";
 import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from "lz-string";
 import { historicalCycles, randomStart, blockBootstrap, seededRandom, HISTORY_FIRST, HISTORY_LAST,
-         survivalCurve, lastSurvivorCurve, survivalPercentileAge } from "./history.js";
+         survivalCurve, lastSurvivorCurve, survivalPercentileAge, TABLE_END } from "./history.js";
 
 // ---- palette (ledger / instrument) ----
 // Two themes, same key set. Every colour in the app comes from here — see usePalette() below.
@@ -2649,25 +2649,47 @@ export const compareScenarios = (a, b) => {
 };
 
 // ---- the mortality panel -----------------------------------------------------
+// A survival probability, rendered so neither tail rounds into a lie: a 0.4% chance must not print as
+// "0%", and a 99.7% chance must not print as "100%" next to a sentence about how you might not be there.
+const pctText = (v) => {
+  if (v >= 0.995) return ">99%";
+  if (v > 0 && v < 0.005) return "<1%";
+  return `${(v * 100).toFixed(v < 0.1 ? 1 : 0)}%`;
+};
+
 function MortalityPanel({ p, sim, mc, isMobile }) {
   const C = usePalette();
   const to = sim.END;
-  const you = useMemo(() => survivalCurve(p.currentAge, to), [p.currentAge, to]);
+  // Curves run to the end of the TABLE, not to the plan's horizon. A horizon is a choice; the median
+  // age at death is not, and a curve truncated at the horizon dragged the median down to meet it — a
+  // plan to 60 used to be told "half of people are gone by 60", which is off by more than two decades.
+  // Drawing the full curve is also the only way the horizon line means anything: on a chart that
+  // stopped at the horizon, a short plan was a flat line pinned at the top of the panel.
+  const you = useMemo(() => survivalCurve(p.currentAge, TABLE_END), [p.currentAge]);
   const either = useMemo(
-    () => lastSurvivorCurve(p.currentAge, sim.hasPartner ? p.partnerAge : null, to, sim.partnerOffset),
-    [p.currentAge, p.partnerAge, sim.hasPartner, sim.partnerOffset, to]);
+    () => lastSurvivorCurve(p.currentAge, sim.hasPartner ? p.partnerAge : null, TABLE_END, sim.partnerOffset),
+    [p.currentAge, p.partnerAge, sim.hasPartner, sim.partnerOffset]);
+  // outcomeMix joins survival against the backtest's bands, which stop at the plan's horizon
   const mix = useMemo(() => outcomeMix(mc, either), [mc, either]);
-
-  const W = isMobile ? 380 : 760, H = 210, L = 44, R = 14, T = 12, B = 26;
-  const a0 = Math.floor(p.currentAge), a1 = to;
-  const x = (a) => L + ((a - a0) / Math.max(1, a1 - a0)) * (W - L - R);
-  const y = (v) => T + (1 - v) * (H - T - B);
-  const path = (curve) => `M${Object.keys(curve).map(Number).sort((m, n) => m - n)
-    .map((a) => `${x(a)},${y(curve[a])}`).join(" L")}`;
 
   const medianYou = survivalPercentileAge(you, 0.5);
   const medianEither = survivalPercentileAge(either, 0.5);
   const atEnd = either[to] ?? 0, atEndYou = you[to] ?? 0;
+  // Which side of the median the horizon falls on decides what this panel should be saying. Past it,
+  // the horizon is a tail and the point is that a tail is the right thing to plan to. Short of it, the
+  // plan simply stops before the person is likely to — a different and much more urgent message.
+  const medianRef = sim.hasPartner ? medianEither : medianYou;
+  const shortHorizon = medianRef != null && to < medianRef;
+
+  const W = isMobile ? 380 : 760, H = 210, L = 44, R = 14, T = 12, B = 26;
+  // Draw until the curve is visually finished (2% left) rather than to a fixed age, and always at
+  // least as far as the horizon, so a plan past the end of the table still fits on the panel.
+  const a0 = Math.floor(p.currentAge);
+  const a1 = Math.max(to, survivalPercentileAge(either, 0.02) ?? TABLE_END);
+  const x = (a) => L + ((a - a0) / Math.max(1, a1 - a0)) * (W - L - R);
+  const y = (v) => T + (1 - v) * (H - T - B);
+  const path = (curve) => `M${Object.keys(curve).map(Number).sort((m, n) => m - n).filter((a) => a <= a1)
+    .map((a) => `${x(a)},${y(curve[a])}`).join(" L")}`;
   const ticks = []; for (let a = Math.ceil(a0 / 10) * 10; a <= a1; a += 10) ticks.push(a);
 
   return (
@@ -2675,13 +2697,25 @@ function MortalityPanel({ p, sim, mc, isMobile }) {
       <p style={{ margin: 0, fontSize: 12.5, color: C.mute, lineHeight: 1.6 }}>
         You are planning to <b style={{ color: C.ink }}>{to}</b>. Against a general-population life
         table that is about a{" "}
-        <b style={{ color: C.brass }}>{(atEnd * 100).toFixed(atEnd < 0.1 ? 1 : 0)}%</b> chance
+        <b style={{ color: shortHorizon ? C.coral : C.brass }}>{pctText(atEnd)}</b> chance
         {sim.hasPartner ? " that either of you is still there" : " that you are still there"}
-        {sim.hasPartner && <> — and {(atEndYou * 100).toFixed(atEndYou < 0.1 ? 1 : 0)}% for you alone</>}.
-        Half of people are gone by <b style={{ color: C.ink }}>{medianYou}</b>
-        {sim.hasPartner && <>, or <b style={{ color: C.ink }}>{medianEither}</b> for the last survivor</>}.
-        That is not an argument for planning to a shorter horizon — it is the reason the horizon is a
-        planning choice rather than a prediction.
+        {sim.hasPartner && <> — and {pctText(atEndYou)} for you alone</>}.
+        Half of people are gone by <b style={{ color: C.ink }}>{medianYou ?? "—"}</b>
+        {sim.hasPartner && <>, or <b style={{ color: C.ink }}>{medianEither ?? "—"}</b> for the last survivor</>}.{" "}
+        {shortHorizon ? (
+          <>
+            The horizon lands <b style={{ color: C.ink }}>{medianRef - to}</b>{" "}
+            {medianRef - to === 1 ? "year" : "years"} short of that, so the more likely outcome is that
+            the plan runs out of years before {sim.hasPartner ? "either of you does" : "you do"} — and
+            everything above, the FIRE number included, is the answer to a shorter question than the
+            one you are actually asking. Raise the horizon to see what the same plan costs.
+          </>
+        ) : (
+          <>
+            That is not an argument for planning to a shorter horizon — it is the reason the horizon is
+            a planning choice rather than a prediction.
+          </>
+        )}
       </p>
 
       <div style={{ overflowX: "auto" }}>
@@ -2698,12 +2732,31 @@ function MortalityPanel({ p, sim, mc, isMobile }) {
               alive and you individually are not, which is exactly why the horizon runs to the last
               survivor */}
           {sim.hasPartner && (
-            <path d={`${path(either)} L${x(a1)},${y(you[a1] ?? 0)} ${Object.keys(you).map(Number).sort((m, n) => n - m).map((a) => `L${x(a)},${y(you[a])}`).join(" ")} Z`}
-              fill={C.teal} opacity={0.12} />
+            <path d={`${path(either)} L${x(a1)},${y(you[a1] ?? 0)} ${Object.keys(you).map(Number).sort((m, n) => n - m).filter((a) => a <= a1).map((a) => `L${x(a)},${y(you[a])}`).join(" ")} Z`}
+              fill={C.teal} opacity={0.12 * C.wash} />
           )}
           <path d={path(you)} fill="none" stroke={C.brass} strokeWidth={2} strokeDasharray="5 3" />
           {sim.hasPartner && <path d={path(either)} fill="none" stroke={C.teal} strokeWidth={2} />}
-          <line x1={x(a1)} y1={T} x2={x(a1)} y2={H - B} stroke={C.brass} strokeDasharray="3 3" opacity={0.7} />
+          {/* the horizon, which is now a line ACROSS the curve rather than the edge of the panel —
+              the whole point when it lands early */}
+          <line x1={x(to)} y1={T} x2={x(to)} y2={H - B} stroke={shortHorizon ? C.coral : C.brass}
+            strokeDasharray="3 3" opacity={0.8} />
+          {/* the label needs its own ground: at a short horizon it lands on the flat top of the curve,
+              at a long one on the gridlines, and a bare <text> was unreadable against both. Width is
+              estimated from the character count — 9px JetBrains Mono runs about 5.4px per glyph. */}
+          {(() => {
+            const label = `plan ends ${to}`;
+            const w = label.length * 5.4 + 8, flip = x(to) > W - (w + 10);
+            const bx = flip ? x(to) - w - 4 : x(to) + 4;
+            return (
+              <g>
+                <rect x={bx} y={T + 2} width={w} height={13} rx={2} fill={C.panel} opacity={0.92} />
+                <text x={bx + w / 2} y={T + 11.5} fontSize={9} textAnchor="middle"
+                  fill={shortHorizon ? C.coral : C.mute}
+                  fontFamily="'JetBrains Mono', monospace">{label}</text>
+              </g>
+            );
+          })()}
           {sim.fireCross != null && (
             <line x1={x(sim.fireCross)} y1={T} x2={x(sim.fireCross)} y2={H - B} stroke={C.mute}
               strokeDasharray="2 4" opacity={0.6} />
@@ -2716,7 +2769,7 @@ function MortalityPanel({ p, sim, mc, isMobile }) {
         <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 10.5, color: C.mute, marginTop: 4 }}>
           <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.brass, marginRight: 5, verticalAlign: "middle" }} />you</span>
           {sim.hasPartner && <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.teal, marginRight: 5, verticalAlign: "middle" }} />either of you</span>}
-          <span>dotted lines: your retirement date, and the horizon</span>
+          <span>dotted lines: your retirement date, and where the plan stops</span>
         </div>
       </div>
 

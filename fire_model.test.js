@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { HISTORY, randomStart, blendedReturn, seededRandom,
-         survivalCurve, lastSurvivorCurve, survivalPercentileAge } from "./history.js";
+         survivalCurve, lastSurvivorCurve, survivalPercentileAge, TABLE_END } from "./history.js";
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
   rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
@@ -2559,6 +2559,22 @@ describe("mortality", () => {
     const s = survivalCurve(27, 101);
     expect(s[100]).toBeLessThan(0.15);
     expect(s[100]).toBeGreaterThan(0);
+  });
+
+  it("says nothing rather than something false when the curve stops short", () => {
+    // A plan to 60 produces a curve that never falls to 50%. Returning its last age said "half of
+    // people are gone by 60", which is wrong by more than twenty years — the panel now reads the
+    // median off a full-table curve, and this pins the signal that made that bug visible.
+    expect(survivalPercentileAge(survivalCurve(30, 60), 0.5)).toBeNull();
+    expect(survivalCurve(30, 60)[60]).toBeGreaterThan(0.85);
+  });
+
+  it("puts the median in the same place whatever the plan's horizon", () => {
+    // the median age at death is a fact about the life table, not about where someone stopped planning
+    const m = survivalPercentileAge(survivalCurve(30, TABLE_END), 0.5);
+    expect(m).toBeGreaterThan(75);
+    expect(m).toBeLessThan(92);
+    expect(survivalPercentileAge(survivalCurve(30, 200), 0.5)).toBe(m);
   });
 
   it("outcome columns stack to exactly one", () => {
