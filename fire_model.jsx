@@ -8,12 +8,56 @@ import { historicalCycles, randomStart, blockBootstrap, seededRandom, HISTORY_FI
          survivalCurve, lastSurvivorCurve, survivalPercentileAge } from "./history.js";
 
 // ---- palette (ledger / instrument) ----
-const C = {
+// Two themes, same key set. Every colour in the app comes from here — see usePalette() below.
+const DARK = {
+  page: "#0B1418",                                          // the html/body ground behind the app
   bg: "#0E1A1F", panel: "#14252B", panel2: "#1B303733", ink: "#EAE6DD",
   brass: "#C9A24B", teal: "#5FB0A6", coral: "#D9695A", mute: "#7A8A8E",
   line: "#26424B", liquid: "#9AD5CB", coast: "#B48EAD", locked: "#7FA8D9",
   // panel2 is deliberately translucent; popovers need a FULLY opaque surface or the page shows through
   tip: "#1B3037",
+  shade: "rgba(0,0,0,.55)",
+  neutral: "#EAE6DD",   // a large neutral FILL (not text) — pale against a dark ground
+  wash: 1,              // see LIGHT.wash
+};
+// A light theme is not an inversion. The pale accents (liquid, locked, coast) carry no contrast on a
+// white panel, so instead of lightness they are separated by HUE — green-teal → blue → indigo →
+// purple — which is the same order they already run in on dark, just at legible darkness. Every
+// accent here clears ~4.5:1 on `panel`, because several of them are used for small table text.
+const LIGHT = {
+  page: "#E9E5DC",
+  bg: "#F5F2EA", panel: "#FFFFFF", panel2: "#0E1A1F0A", ink: "#16242A",
+  brass: "#8A6A18", teal: "#1D7D71", coral: "#B4402F", mute: "#5A6C71",
+  line: "#D8DEDB", liquid: "#0F6E8C", coast: "#7A4E8F", locked: "#3A4FA8",
+  tip: "#FBFAF6",
+  shade: "rgba(22,36,42,.20)",
+  neutral: "#5E7176",   // `ink` here is near-black, and a near-black RIBBON reads as the loudest
+                        // thing on the page; the neutral mass wants mid-grey on a white ground
+  // A translucent fill over a dark ground gains contrast as it lightens the page; over white it only
+  // washes out. The percentile bands were tuned on dark, so light multiplies their alpha to land at
+  // the same apparent weight rather than duplicating every number.
+  wash: 1.9,
+};
+export const PALETTES = { dark: DARK, light: LIGHT };
+const THEME_KEY = "fire.theme";
+
+// The palette rides in context rather than a module constant, so a component can never read a stale
+// theme, and so the read-only shared-plot view (a sibling of the calculator, not a child) gets the
+// same one. Every component that paints does `const C = usePalette()`; there is deliberately no
+// module-level `C`, so a component that forgets fails loudly instead of silently rendering dark.
+const ThemeCtx = React.createContext({ C: DARK, theme: "dark", setTheme: () => {} });
+const usePalette = () => React.useContext(ThemeCtx).C;
+const useTheme = () => React.useContext(ThemeCtx);
+
+// Remember the choice across visits. index.html applies the same key before first paint so a light
+// reader never sees a dark flash; this is only the in-app half.
+const readTheme = () => {
+  try {
+    const v = window.localStorage.getItem(THEME_KEY);
+    if (v === "light" || v === "dark") return v;
+    // no stored choice yet — follow the OS
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  } catch { return "dark"; }
 };
 
 // track a CSS media query so inline-styled layout can collapse on small screens
@@ -1533,7 +1577,9 @@ export function simulate(rawP) {
 //   3. NO RE-SIMULATION. sim.trace already holds every year, and it reconciles by construction
 //      (start + in − out + growth = end), which is what makes the diagram honest rather than
 //      decorative. Scrubbing is a lookup.
-export const sankeyYear = (t) => {
+// The palette is an argument rather than a hook because this is a model function, not a component —
+// it is called from tests with no React tree around it, so it defaults to the dark palette there.
+export const sankeyYear = (t, C = DARK) => {
   if (!t) return null;
   // The trace reconciles by construction, and the Sankey is that identity drawn:
   //     Δtaxable = takeHome + otherIncome − cashOut + cashGrowth
@@ -1567,7 +1613,7 @@ export const sankeyYear = (t) => {
 
   plain(sinks, "housing", "Housing", t.housing, C.brass);
   plain(sinks, "kids", "Children", t.kids, C.coral);
-  plain(sinks, "living", "Living", t.living, C.ink);
+  plain(sinks, "living", "Living", t.living, C.neutral);
   // itemised rather than one "One-offs" band — a $100k block in your early fifties is college
   // tuition for two children whose four-year windows overlap, and saying so is the whole point
   plain(sinks, "college", "College", t.college, C.coast);
@@ -1691,6 +1737,7 @@ export const runTrials = (p, opts = {}) => {
 // clicking in SELECTS the current value, so typing replaces it instead of landing after the leading 0;
 // and the box is allowed to sit empty while you type, instead of a 0 snapping back in behind the cursor.
 const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small = false }) => {
+  const C = usePalette();
   const [draft, setDraft] = useState(null);            // the raw string while editing; null when idle
   const clamp = (n) => Math.min(max, Math.max(min, n));
   return (
@@ -1734,6 +1781,7 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
 // `labelPrefix` lets a caller put its own interactive node at the head of the label — used by the kid
 // card to make the child's name editable in place, rather than spending a second row on a name field.
 const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef, labelPrefix = null }) => {
+  const C = usePalette();
   const yr = yearRef != null ? yearAt(value, yearRef) : null;
   return (
     // In the card grids these sit side by side; labels of different lengths wrap to different heights,
@@ -1760,6 +1808,7 @@ const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef, 
 // kid card is repeated per child, so a second row per kid is the most expensive real estate on the
 // panel. Empty commits back to the default, so a name is always removable.
 const InlineName = ({ value, fallback, onCommit }) => {
+  const C = usePalette();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const ref = useRef(null);
@@ -1807,6 +1856,7 @@ const InlineName = ({ value, fallback, onCommit }) => {
 // long and buried the fields themselves. CSS-only so there is no state to manage and nothing to
 // mispositition on re-render; the bubble is anchored to the icon and clamped to a readable width.
 const InfoIcon = ({ children }) => {
+  const C = usePalette();
   const bubble = useRef(null);
   // A 260px bubble anchored to an icon sitting two-thirds across a 390px phone runs off the screen, and
   // which icons do that depends on where the text wraps — so it can't be solved by hand-picking an anchor
@@ -1843,7 +1893,7 @@ const InfoIcon = ({ children }) => {
         position: "absolute", bottom: "calc(100% + 7px)", left: -6, zIndex: 40,
         width: "max-content", maxWidth: "min(260px, calc(100vw - 24px))", padding: "8px 10px",
         background: C.tip, border: `1px solid ${C.line}`, borderRadius: 6,
-        boxShadow: "0 8px 22px rgba(0,0,0,.55)",
+        boxShadow: `0 8px 22px ${C.shade}`,
         color: C.ink, fontSize: 11, fontWeight: 400, fontStyle: "normal", lineHeight: 1.55,
         textTransform: "none", letterSpacing: "normal", textAlign: "left",
         fontFamily: "'Space Grotesk', system-ui, sans-serif",
@@ -1858,55 +1908,65 @@ const InfoIcon = ({ children }) => {
 };
 
 // a compact free-text input for card labels (wedding, medical, student loan, …); display only
-const TextField = ({ label, value, onChange, placeholder }) => (
-  <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-    <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
-    <input
-      value={value ?? ""}
-      placeholder={placeholder}
-      onChange={(e) => onChange(e.target.value)}
-      style={{
-        background: C.bg, border: `1px solid ${C.line}`, color: C.ink, padding: "6px 8px", borderRadius: 5,
-        fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, width: "100%", boxSizing: "border-box",
-      }}
-    />
-  </label>
-);
+const TextField = ({ label, value, onChange, placeholder }) => {
+  const C = usePalette();
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <span style={{ fontSize: 10, letterSpacing: ".03em", color: C.mute, textTransform: "uppercase" }}>{label}</span>
+      <input
+        value={value ?? ""}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          background: C.bg, border: `1px solid ${C.line}`, color: C.ink, padding: "6px 8px", borderRadius: 5,
+          fontFamily: "'Space Grotesk', sans-serif", fontSize: 13, width: "100%", boxSizing: "border-box",
+        }}
+      />
+    </label>
+  );
+};
 
 // A titled section that folds away. Used to tuck the settings most people never touch (the 59.5 rule,
 // college funding, return/inflation assumptions) behind one "Advanced settings" disclosure, so the
 // input column leads with the figures that actually get edited.
-const Collapsible = ({ title, subtitle, open, onToggle, children }) => (
-  <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8 }}>
-    <button
-      type="button" onClick={onToggle} aria-expanded={open}
-      style={{
-        background: "transparent", border: "none", width: "100%", cursor: "pointer",
-        padding: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8,
-        fontFamily: "'Space Grotesk', sans-serif", textAlign: "left",
-      }}>
-      <span>
-        <span style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>{title}</span>
-        {subtitle && !open && <span style={{ display: "block", fontSize: 10, color: C.mute, marginTop: 3 }}>{subtitle}</span>}
-      </span>
-      <span style={{ color: C.mute, fontSize: 11, flexShrink: 0 }}>{open ? "▲" : "▼"}</span>
-    </button>
-    {open && <div style={{ padding: "0 14px 14px", display: "flex", flexDirection: "column", gap: 14 }}>{children}</div>}
-  </div>
-);
+const Collapsible = ({ title, subtitle, open, onToggle, children }) => {
+  const C = usePalette();
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 8 }}>
+      <button
+        type="button" onClick={onToggle} aria-expanded={open}
+        style={{
+          background: "transparent", border: "none", width: "100%", cursor: "pointer",
+          padding: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8,
+          fontFamily: "'Space Grotesk', sans-serif", textAlign: "left",
+        }}>
+        <span>
+          <span style={{ fontSize: 12, color: C.teal, letterSpacing: ".08em", textTransform: "uppercase" }}>{title}</span>
+          {subtitle && !open && <span style={{ display: "block", fontSize: 10, color: C.mute, marginTop: 3 }}>{subtitle}</span>}
+        </span>
+        <span style={{ color: C.mute, fontSize: 11, flexShrink: 0 }}>{open ? "▲" : "▼"}</span>
+      </button>
+      {open && <div style={{ padding: "0 14px 14px", display: "flex", flexDirection: "column", gap: 14 }}>{children}</div>}
+    </div>
+  );
+};
 
 // one sub-panel inside Advanced settings — same look as a top-level card, minus the outer chrome
-const SubSection = ({ title, children }) => (
-  <div style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
-    <div style={{ fontSize: 11, color: C.brass, letterSpacing: ".06em", textTransform: "uppercase" }}>{title}</div>
-    {children}
-  </div>
-);
+const SubSection = ({ title, children }) => {
+  const C = usePalette();
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+      <div style={{ fontSize: 11, color: C.brass, letterSpacing: ".06em", textTransform: "uppercase" }}>{title}</div>
+      {children}
+    </div>
+  );
+};
 
 // The arithmetic behind a cash account that ran dry, laid out as a ledger. Knowing the year isn't much
 // use on its own — what you need is the line that broke the budget, which is why every component is
 // shown and the dominant one is called out underneath.
 const CashLedger = ({ cause, accessAge }) => {
+  const C = usePalette();
   if (!cause) return null;
   const { age, takeHome, living, housing, kids, lumps, taxAdv, toTaxable, mortgage, taxableAtStart } = cause;
   const rows = [
@@ -1974,6 +2034,7 @@ const CashLedger = ({ cause, accessAge }) => {
 // visible inline, and links out for the rest. Links are RELATIVE so they resolve correctly under a
 // project sub-path such as /fire-calculator/ as well as at a domain root.
 const Footnote = () => {
+  const C = usePalette();
   const link = {
     color: C.teal, textDecoration: "none", borderBottom: `1px solid ${C.teal}55`, paddingBottom: 1,
   };
@@ -2000,6 +2061,7 @@ const Footnote = () => {
 // CLIMBING after you retire? Because the retirement bucket is locked until 59.5, so it compounds
 // untouched while only the taxable account is drawn down.
 const TraceTable = ({ trace, accessAge, fireCross }) => {
+  const C = usePalette();
   if (!trace || !trace.length) return null;
   const money = (v) => (!v ? <span style={{ color: `${C.mute}66` }}>·</span> : fmt(Math.abs(v)));
   const phaseColor = { working: C.teal, retires: C.brass, retired: C.mute };
@@ -2092,30 +2154,36 @@ const TraceTable = ({ trace, accessAge, fireCross }) => {
   );
 };
 
-const AddButton = ({ onClick, label }) => (
-  <button
-    onClick={onClick}
-    style={{
-      background: "transparent", border: `1px dashed ${C.teal}`, color: C.teal, borderRadius: 999,
-      padding: "3px 10px", cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif",
-      fontSize: 11, letterSpacing: ".03em",
-    }}
-  >
-    + {label}
-  </button>
-);
+const AddButton = ({ onClick, label }) => {
+  const C = usePalette();
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: "transparent", border: `1px dashed ${C.teal}`, color: C.teal, borderRadius: 999,
+        padding: "3px 10px", cursor: "pointer", fontFamily: "'Space Grotesk', sans-serif",
+        fontSize: 11, letterSpacing: ".03em",
+      }}
+    >
+      + {label}
+    </button>
+  );
+};
 
-const DropButton = ({ onClick }) => (
-  <button
-    onClick={onClick} title="remove"
-    style={{
-      background: "transparent", border: `1px solid ${C.line}`, color: C.mute, borderRadius: 5,
-      width: 26, height: 26, cursor: "pointer", fontSize: 13, lineHeight: 1, flexShrink: 0,
-    }}
-  >
-    ×
-  </button>
-);
+const DropButton = ({ onClick }) => {
+  const C = usePalette();
+  return (
+    <button
+      onClick={onClick} title="remove"
+      style={{
+        background: "transparent", border: `1px solid ${C.line}`, color: C.mute, borderRadius: 5,
+        width: 26, height: 26, cursor: "pointer", fontSize: 13, lineHeight: 1, flexShrink: 0,
+      }}
+    >
+      ×
+    </button>
+  );
+};
 
 // `opts.yearRef`, when given, marks this field as an age and shows the calendar year it lands in.
 // A dot beside a label saying who chose the number. Deliberately quiet — it is an annotation on a
@@ -2123,6 +2191,7 @@ const DropButton = ({ onClick }) => (
 // this), preset is brass (something chose it for you), typed is nothing at all: a number you entered
 // needs no marker, and marking every field once the form is full would be pure noise.
 const ProvDot = ({ how }) => {
+  const C = usePalette();
   if (!how || how === PROV.TYPED) return null;
   const preset = how === PROV.PRESET;
   return (
@@ -2139,7 +2208,10 @@ const ProvDot = ({ how }) => {
   );
 };
 
-const field = (label, key, val, set, opts = {}) => {
+// A labelled number input, built by a function rather than rendered as a component because call sites
+// use it conditionally (`{gross && field(…)}`) — a component would be fine, but a hook inside one
+// called conditionally would not be, so the palette is closed over at the top of the render instead.
+const makeField = (C) => (label, key, val, set, opts = {}) => {
   const yr = opts.yearRef != null ? yearAt(val, opts.yearRef) : null;
   return (
     <label key={key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -2159,16 +2231,19 @@ const field = (label, key, val, set, opts = {}) => {
 
 // a small pill that cycles a field's entry unit (/yr → /mo → …). Purely cosmetic — the value stored is
 // always annual dollars; the pill only changes how it's shown and typed.
-const UnitPill = ({ label, onClick }) => (
-  <button type="button" onClick={onClick} title="change units"
-    style={{
-      background: "transparent", border: `1px solid ${C.line}`, color: C.teal, borderRadius: 999,
-      padding: "0 7px", cursor: "pointer", fontSize: 10, letterSpacing: ".02em", textTransform: "none",
-      fontFamily: "'Space Grotesk', sans-serif", flexShrink: 0, lineHeight: 1.7,
-    }}>
-    {label} ⇄
-  </button>
-);
+const UnitPill = ({ label, onClick }) => {
+  const C = usePalette();
+  return (
+    <button type="button" onClick={onClick} title="change units"
+      style={{
+        background: "transparent", border: `1px solid ${C.line}`, color: C.teal, borderRadius: 999,
+        padding: "0 7px", cursor: "pointer", fontSize: 10, letterSpacing: ".02em", textTransform: "none",
+        fontFamily: "'Space Grotesk', sans-serif", flexShrink: 0, lineHeight: 1.7,
+      }}>
+      {label} ⇄
+    </button>
+  );
+};
 
 // A money field that stores an ANNUAL dollar amount but lets you enter it the way you actually know it:
 // /yr, /mo, or (for a 401k-style contribution) as a % of some income base. All conversions go through
@@ -2177,6 +2252,7 @@ const UnitPill = ({ label, onClick }) => (
 // afterwards commits back through that unit. Nothing about the model changes.
 const MONEY_LABEL = { yr: "per year", mo: "per month", pct: "% of income" };
 function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr", "mo"], base = 0, prov }) {
+  const C = usePalette();
   const [mode, setMode] = useState(modes[0]);
   const usablePct = mode === "pct" && base > 0;
   // an unfilled box stays unfilled: the app opens with every figure blank, and converting "" through
@@ -2222,14 +2298,17 @@ function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr
 }
 
 // inline caution, for when the inputs contradict each other
-const Warn = ({ children }) => (
-  <div style={{
-    marginTop: 8, padding: "7px 9px", borderRadius: 6, fontSize: 10, lineHeight: 1.6,
-    color: C.ink, background: `${C.coral}14`, border: `1px solid ${C.coral}66`,
-  }}>
-    ⚠ {children}
-  </div>
-);
+const Warn = ({ children }) => {
+  const C = usePalette();
+  return (
+    <div style={{
+      marginTop: 8, padding: "7px 9px", borderRadius: 6, fontSize: 10, lineHeight: 1.6,
+      color: C.ink, background: `${C.coral}14`, border: `1px solid ${C.coral}66`,
+    }}>
+      ⚠ {children}
+    </div>
+  );
+};
 
 // The demo household. The app itself now opens on EMPTY (below) and loads this only when the
 // "Load demo" button is pressed — but it is still the canonical parameter set the tests run against.
@@ -2386,23 +2465,23 @@ export const EMPTY = {
 // every mark on the chart, switchable. `on` is the default visibility: start with the
 // headline story (portfolio vs. the total it must clear, and where they meet) and let the
 // liquidity detail be opted into.
-const SERIES = [
-  { key: "portfolio", label: "total portfolio", color: C.teal, on: true },
-  { key: "required", label: "FIRE curve", color: C.brass, dash: true, on: true },
-  { key: "retire", label: "FIRE age", color: C.brass, mark: "◆", on: true },
-  { key: "coast", label: "coast FIRE curve", color: C.coast, dash: true, on: true },
-  { key: "taxable", label: "taxable cash account", color: C.liquid },
-  { key: "equity", label: "home equity (not spendable)", color: C.brass },
-  { key: "retirement", label: "retirement accounts (401k/IRA)", color: C.locked },
-  { key: "bridge", label: "minimum in taxable before retirement", color: C.coral, dash: true },
-  { key: "neededRetirement", label: "minimum in retirement accounts", color: C.locked, dash: true },
-  { key: "underwater", label: "taxable underwater (< $0)", color: C.coral, mark: "▨", on: true },
-  { key: "access", label: "retirement unlocked", color: C.mute, dash: true, on: true },
-  { key: "partnerStops", label: "partner stops working", color: C.brass, dash: true, on: true },
-  { key: "home", label: "home purchase", color: C.brass, mark: "●", on: true },
-  { key: "kids", label: "child born", color: C.ink, mark: "●", on: true },
-  { key: "expense", label: "major expense", color: C.coral, mark: "●", on: true },
-  { key: "windfall", label: "major income", color: C.liquid, mark: "●", on: true },
+export const SERIES = [
+  { key: "portfolio", label: "total portfolio", tone: "teal", on: true },
+  { key: "required", label: "FIRE curve", tone: "brass", dash: true, on: true },
+  { key: "retire", label: "FIRE age", tone: "brass", mark: "◆", on: true },
+  { key: "coast", label: "coast FIRE curve", tone: "coast", dash: true, on: true },
+  { key: "taxable", label: "taxable cash account", tone: "liquid" },
+  { key: "equity", label: "home equity (not spendable)", tone: "brass" },
+  { key: "retirement", label: "retirement accounts (401k/IRA)", tone: "locked" },
+  { key: "bridge", label: "minimum in taxable before retirement", tone: "coral", dash: true },
+  { key: "neededRetirement", label: "minimum in retirement accounts", tone: "locked", dash: true },
+  { key: "underwater", label: "taxable underwater (< $0)", tone: "coral", mark: "▨", on: true },
+  { key: "access", label: "retirement unlocked", tone: "mute", dash: true, on: true },
+  { key: "partnerStops", label: "partner stops working", tone: "brass", dash: true, on: true },
+  { key: "home", label: "home purchase", tone: "brass", mark: "●", on: true },
+  { key: "kids", label: "child born", tone: "ink", mark: "●", on: true },
+  { key: "expense", label: "major expense", tone: "coral", mark: "●", on: true },
+  { key: "windfall", label: "major income", tone: "liquid", mark: "●", on: true },
 ];
 
 // exported so tests read the real defaults rather than a hand-copy that silently goes stale whenever
@@ -2458,6 +2537,7 @@ export const outcomeMix = (mc, survival) => {
 // because of a control in a different panel is disorienting. The deterministic path is drawn ON the
 // fan instead, which answers the same question ("where does my plan sit?") without the collision.
 function FanChart({ bands, isMobile }) {
+  const C = usePalette();
   if (!bands || bands.length < 2) return null;
   const W = isMobile ? 380 : 760, H = 260, L = 52, R = 12, T = 14, B = 26;
   const ages = bands.map((b) => b.age);
@@ -2508,8 +2588,8 @@ function FanChart({ bands, isMobile }) {
         </defs>
         {/* two nested bands: the middle half, then the 10th-to-90th spread around it */}
         <g clipPath="url(#fanclip)">
-          <path d={ribbon("p10", "p90")} fill={C.teal} opacity={0.13} />
-          <path d={ribbon("p25", "p75")} fill={C.teal} opacity={0.2} />
+          <path d={ribbon("p10", "p90")} fill={C.teal} opacity={0.13 * C.wash} />
+          <path d={ribbon("p25", "p75")} fill={C.teal} opacity={0.2 * C.wash} />
           <path d={line("p50")} fill="none" stroke={C.teal} strokeWidth={1.5} opacity={0.8} />
         </g>
         {/* the plan itself, in the colour it wears on the main chart */}
@@ -2522,8 +2602,8 @@ function FanChart({ bands, isMobile }) {
         ))}
       </svg>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 10.5, color: C.mute, marginTop: 6 }}>
-        <span><span style={{ display: "inline-block", width: 14, height: 8, background: C.teal, opacity: 0.2, marginRight: 5, verticalAlign: "middle" }} />middle half of runs (25th–75th)</span>
-        <span><span style={{ display: "inline-block", width: 14, height: 8, background: C.teal, opacity: 0.13, marginRight: 5, verticalAlign: "middle" }} />10th–90th</span>
+        <span><span style={{ display: "inline-block", width: 14, height: 8, background: C.teal, opacity: 0.2 * C.wash, marginRight: 5, verticalAlign: "middle" }} />middle half of runs (25th–75th)</span>
+        <span><span style={{ display: "inline-block", width: 14, height: 8, background: C.teal, opacity: 0.13 * C.wash, marginRight: 5, verticalAlign: "middle" }} />10th–90th</span>
         <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.teal, marginRight: 5, verticalAlign: "middle" }} />median run</span>
         <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.brass, marginRight: 5, verticalAlign: "middle" }} />your plan's own assumption</span>
       </div>
@@ -2570,6 +2650,7 @@ export const compareScenarios = (a, b) => {
 
 // ---- the mortality panel -----------------------------------------------------
 function MortalityPanel({ p, sim, mc, isMobile }) {
+  const C = usePalette();
   const to = sim.END;
   const you = useMemo(() => survivalCurve(p.currentAge, to), [p.currentAge, to]);
   const either = useMemo(
@@ -2709,6 +2790,7 @@ function MortalityPanel({ p, sim, mc, isMobile }) {
 
 // ---- the compare panel -------------------------------------------------------
 function ComparePanel({ p, saved, onSave, onClear, isMobile }) {
+  const C = usePalette();
   const cmp = useMemo(() => (saved ? compareScenarios(saved.p, p) : null), [saved, p]);
   if (!saved) {
     return (
@@ -2871,11 +2953,12 @@ export const traceToCsv = (trace) => {
 
 // ---- the Sankey panel -------------------------------------------------------
 function SankeyPanel({ trace, fireCross, isMobile }) {
+  const C = usePalette();
   const years = trace.map((t) => t.age);
   const [age, setAge] = useState(() => (fireCross != null ? Math.floor(fireCross) : years[0]));
   const clamped = Math.min(years[years.length - 1], Math.max(years[0], age));
   const t = trace.find((x) => x.age === clamped) || trace[0];
-  const d = useMemo(() => sankeyYear(t), [t]);
+  const d = useMemo(() => sankeyYear(t, C), [t, C]);
   // Absolute scale, so the diagram shrinks when the money does — the collapse in total flow the year
   // the salary stops is the whole reason to have a scrubber, and normalising per year would throw it
   // away. Referenced to the 90th percentile of years rather than the maximum, because one lumpy year
@@ -2883,7 +2966,7 @@ function SankeyPanel({ trace, fireCross, isMobile }) {
   // squashes every ordinary year to a sliver. A year above the reference draws taller rather than
   // being clipped, so every year stays measured in the same dollars per pixel.
   const scale = useMemo(() => {
-    const totals = trace.map((x) => (sankeyYear(x) || { total: 0 }).total).sort((a, b) => a - b);
+    const totals = trace.map((x) => (sankeyYear(x, C) || { total: 0 }).total).sort((a, b) => a - b);
     const ref = Math.max(1, totals[Math.floor(totals.length * 0.9)] || totals[totals.length - 1] || 1);
     return 300 / ref;
   }, [trace]);
@@ -3192,6 +3275,7 @@ export const allocationAdvice = (p) => {
 // ---- the trajectory chart, driven entirely by props so it renders from a live sim OR a snapshot ----
 function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enforceAccess, unlockAtFire,
   partnerStopsAtAge, expenseMarks, coastTarget, homeRows, kidRows, coastCross, coastCrossValue, fireCross, fireCrossValue, show, setShow }) {
+  const C = usePalette();
   // ONE unlock line marking the real liquidity wall: the statutory 59.5 normally, or the earlier
   // retire+5 when a Roth ladder is on (unlockYouAtFire already encodes both; fall back to 59.5 when
   // there's no retirement instant to shorten it).
@@ -3295,14 +3379,14 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
               title={on ? "hide" : "show"}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
-                background: on ? `${s.color}1A` : "transparent",
-                border: `1px solid ${on ? s.color : C.line}`,
+                background: on ? `${C[s.tone]}1A` : "transparent",
+                border: `1px solid ${on ? C[s.tone] : C.line}`,
                 color: on ? C.ink : C.mute, borderRadius: 999, padding: "4px 10px",
                 fontFamily: "'Space Grotesk', sans-serif", fontSize: 11, letterSpacing: ".02em",
                 opacity: on ? 1 : 0.6,
               }}
             >
-              <span style={{ color: s.color, fontSize: 13, lineHeight: 1 }}>
+              <span style={{ color: C[s.tone], fontSize: 13, lineHeight: 1 }}>
                 {s.mark || (s.dash ? "┄" : "━")}
               </span>
               {s.label}
@@ -3316,6 +3400,7 @@ function ChartPanel({ rows, xStart, END, ticks, underwaterSpans, accessYou, enfo
 
 // the copy-to-clipboard Share control: one button, a popover with the two link kinds
 function ShareMenu({ p, show, sim }) {
+  const C = usePalette();
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(null);      // which kind was just copied
   const [manual, setManual] = useState(null);      // fallback URL to copy by hand, if the API fails
@@ -3379,7 +3464,7 @@ function ShareMenu({ p, show, sim }) {
         <div style={{
           position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 20, width: 260,
           background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: 6,
-          boxShadow: "0 10px 30px rgba(0,0,0,.45)",
+          boxShadow: `0 10px 30px ${C.shade}`,
         }}>
           {item("plot", "Copy plot-only link", "Just the chart — your numbers stay private")}
           {item("full", "Copy full-details link", "The whole calculator, pre-filled and editable")}
@@ -3401,6 +3486,7 @@ function ShareMenu({ p, show, sim }) {
 
 // the read-only view a "plot only" link opens: just the chart, rebuilt from the snapshot, no inputs
 function SharedPlot({ snap, isMobile }) {
+  const C = usePalette();
   const [show, setShow] = useState({ ...defaultShow(), ...(snap.show || {}) });
   const rows = useMemo(() => rehydrateRows(snap), [snap]);
   const underwaterSpans = useMemo(() => underwaterOf(rows, snap.END), [rows, snap.END]);
@@ -3418,12 +3504,17 @@ function SharedPlot({ snap, isMobile }) {
         }
         .info:focus-visible { outline: 2px solid ${C.teal}; outline-offset: 2px; }`}</style>
       <div style={{ borderBottom: `1px solid ${C.line}`, paddingBottom: 16, marginBottom: 20 }}>
-        <div style={{ fontSize: 11, letterSpacing: ".2em", color: C.brass, textTransform: "uppercase", marginBottom: 6 }}>
-          Shared projection · read-only
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+            <div style={{ fontSize: 11, letterSpacing: ".2em", color: C.brass, textTransform: "uppercase", marginBottom: 6 }}>
+              Shared projection · read-only
+            </div>
+            <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, lineHeight: 1.15 }}>
+              A FIRE trajectory someone shared with you
+            </h1>
+          </div>
+          <ThemeToggle />
         </div>
-        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, lineHeight: 1.15 }}>
-          A FIRE trajectory someone shared with you
-        </h1>
         <p style={{ margin: "8px 0 0", color: C.mute, fontSize: 14, maxWidth: 680 }}>
           This is the chart only — the underlying inputs were kept private and are not part of this link.
           Toggle any series in the legend below.
@@ -3446,7 +3537,7 @@ function SharedPlot({ snap, isMobile }) {
           style={{
             background: C.teal, color: C.bg, border: "none", borderRadius: 10, cursor: "pointer",
             padding: "14px 28px", fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 600,
-            letterSpacing: ".02em", boxShadow: "0 6px 22px rgba(95,176,166,.28)",
+            letterSpacing: ".02em", boxShadow: `0 6px 22px ${C.teal}47`,
           }}
         >
           Build your own projection →
@@ -3462,12 +3553,52 @@ export default function FireModel() {
   // read any shared state from the URL once. A "plot only" link opens straight into the read-only
   // snapshot view (no inputs, no simulate()); everything else renders the full calculator.
   const shared = useMemo(() => decodeShare(typeof window !== "undefined" ? window.location.hash : ""), []);
-  return shared && shared.mode === "plot" && shared.snap
-    ? <SharedPlot snap={shared.snap} isMobile={isMobile} />
-    : <Calculator shared={shared} isMobile={isMobile} />;
+  // The theme lives at the root because both branches below need it, and because the ground behind
+  // the app (html/body, painted by index.html) has to move with it — an app-coloured card floating on
+  // a permanently dark page is worse than either theme on its own.
+  const [theme, setTheme] = useState(readTheme);
+  useEffect(() => {
+    const C = PALETTES[theme] || DARK;
+    document.documentElement.style.background = C.page;
+    document.documentElement.style.colorScheme = theme;   // native scrollbars and form controls
+    try { window.localStorage.setItem(THEME_KEY, theme); } catch { /* private mode; session-only */ }
+  }, [theme]);
+  const ctx = useMemo(() => ({ C: PALETTES[theme] || DARK, theme, setTheme }), [theme]);
+  return (
+    <ThemeCtx.Provider value={ctx}>
+      {shared && shared.mode === "plot" && shared.snap
+        ? <SharedPlot snap={shared.snap} isMobile={isMobile} />
+        : <Calculator shared={shared} isMobile={isMobile} />}
+    </ThemeCtx.Provider>
+  );
+}
+
+// The theme switch. Two states only — no "system" option, because the OS preference is already the
+// default on a first visit (see readTheme); once you touch this you have expressed a preference and
+// it should stick.
+function ThemeToggle() {
+  const { C, theme, setTheme } = useTheme();
+  const dark = theme === "dark";
+  return (
+    <button
+      type="button"
+      onClick={() => setTheme(dark ? "light" : "dark")}
+      title={dark ? "Switch to light theme" : "Switch to dark theme"}
+      aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
+      aria-pressed={!dark}
+      style={{
+        background: "transparent", border: `1px solid ${C.line}`, color: C.mute,
+        borderRadius: 999, cursor: "pointer", padding: "5px 10px", fontSize: 12,
+        fontFamily: "'Space Grotesk', sans-serif", lineHeight: 1, flexShrink: 0,
+      }}>
+      {dark ? "☾" : "☀"}
+    </button>
+  );
 }
 
 function Calculator({ shared, isMobile }) {
+  const C = usePalette();
+  const field = useMemo(() => makeField(C), [C]);
   // A "full details" link pre-fills the whole calculator; anything not in the link falls back to the
   // demo values. With no link we open EMPTY — blank boxes, no chart — so nobody has to overwrite a
   // stranger's household field by field before the numbers mean anything.
@@ -3779,6 +3910,7 @@ function Calculator({ shared, isMobile }) {
               ▶ Load demo
             </button>
             <ShareMenu p={p} show={show} sim={sim} />
+            <ThemeToggle />
           </div>
         </div>
         <p style={{ margin: "8px 0 0", color: C.mute, fontSize: 14, maxWidth: 680 }}>

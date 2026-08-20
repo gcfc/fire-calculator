@@ -9,6 +9,20 @@
       #root { max-width: 1280px; margin: 0 auto; padding: 16px; }
       @media (max-width: 720px) { #root { padding: 6px; } }
     </style>
+    <script>
+      // Paint the right ground BEFORE the bundle parses. Without this a light-theme reader gets a
+      // dark flash on every load, which is worse than not offering the theme at all. Kept in sync
+      // with the `page` colours in the palettes at the top of fire_model.jsx.
+      (function () {
+        try {
+          var t = localStorage.getItem("fire.theme");
+          if (t !== "light" && t !== "dark")
+            t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          document.documentElement.style.background = t === "light" ? "#E9E5DC" : "#0B1418";
+          document.documentElement.style.colorScheme = t;
+        } catch (e) { /* no storage: the default dark stylesheet above already applies */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

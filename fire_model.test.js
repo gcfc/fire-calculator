@@ -6,7 +6,7 @@ import {
   rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
   PRESETS, SCHOOL_TIERS, traceToCsv, outcomeMix, ssPia, ssClaimFactor, ssEstimate, compareScenarios,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
-  allocationAdvice, retiresOnLoan, defaultShow,
+  allocationAdvice, retiresOnLoan, defaultShow, PALETTES, SERIES,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
 } from "./fire_model.jsx";
 
@@ -2680,5 +2680,50 @@ describe("scenario comparison", () => {
     // homes/kids/expenses are arrays; diffing them by identity would report a change on every render
     const c = compareScenarios(DEFAULTS, { ...DEFAULTS, kids: [...DEFAULTS.kids] });
     expect(c.changed).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// themes
+// ---------------------------------------------------------------------------
+// Nothing here renders — these pin the two invariants that make swapping the palette at runtime safe.
+// A key present in one theme and missing in the other is invisible until someone toggles, and then it
+// paints `undefined`, which browsers quietly treat as "no colour at all".
+describe("palettes", () => {
+  it("defines exactly the same keys in both themes", () => {
+    expect(Object.keys(PALETTES.light).sort()).toEqual(Object.keys(PALETTES.dark).sort());
+  });
+
+  it("gives every key a usable value in both themes", () => {
+    for (const [name, pal] of Object.entries(PALETTES))
+      for (const [k, v] of Object.entries(pal)) {
+        expect(v, `${name}.${k}`).toBeDefined();
+        if (k === "wash") expect(typeof v, `${name}.${k}`).toBe("number");
+        else expect(String(v).length, `${name}.${k}`).toBeGreaterThan(3);
+      }
+  });
+
+  it("resolves every chart series' tone against both themes", () => {
+    // SERIES stores a palette KEY, not a colour, precisely so it can outlive a theme switch
+    for (const s of SERIES)
+      for (const [name, pal] of Object.entries(PALETTES))
+        expect(pal[s.tone], `${s.key} in ${name}`).toBeTruthy();
+  });
+
+  it("keeps the Sankey on the dark palette when no theme is supplied", () => {
+    // sankeyYear is a model function called from tests with no React tree around it
+    const s = simulate(DEFAULTS);
+    const d = sankeyYear(s.trace[0]);
+    expect(d.sinks.find((x) => x.key === "living").color).toBe(PALETTES.dark.neutral);
+    const light = sankeyYear(s.trace[0], PALETTES.light);
+    expect(light.sinks.find((x) => x.key === "living").color).toBe(PALETTES.light.neutral);
+  });
+
+  it("colours the Sankey purely from the palette it was handed", () => {
+    const s = simulate(DEFAULTS);
+    const light = sankeyYear(s.trace[0], PALETTES.light);
+    const dark = PALETTES.dark;
+    for (const n of [...light.sources, ...light.sinks])
+      expect(Object.values(dark), `${n.key} leaked a dark colour`).not.toContain(n.color);
   });
 });

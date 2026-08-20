@@ -207,6 +207,16 @@ second copy of that accounting is exactly how the two bugs above happened.
   so a stale figure can never sit under new numbers.
 - No backend, no account, no analytics, no network calls. The market data is bundled for the same
   reason.
+- **Theming.** Two palettes, `DARK` and `LIGHT`, with an identical key set, handed down through a
+  React context; every component that paints starts with `const C = usePalette()`. There is
+  deliberately no module-level `C`, so a component that forgets the hook fails loudly instead of
+  silently freezing one theme in place. Nearly all the colour lives in inline styles and hand-rolled
+  SVG attributes, where CSS custom properties do not reach — hence a context rather than `var(--x)`.
+  The light theme is not an inversion: the pale accents carry no contrast on white, so they are
+  separated by hue rather than lightness, and translucent fills get an alpha multiplier (`wash`)
+  because a wash gains contrast over a dark ground and loses it over a light one. First visit follows
+  the OS; after that the choice is remembered, and `index.html` replays it before first paint so
+  there is no flash of the wrong theme.
 
 ---
 
