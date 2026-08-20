@@ -73,6 +73,48 @@ export const rmdDivisor = (age) => RMD_DIVISOR[Math.min(120, Math.max(73, Math.f
 // The share of a deferred balance that must come out at `age`, or 0 before the RMD age.
 export const rmdFraction = (age, rmdAge) => (age < rmdAge ? 0 : 1 / rmdDivisor(age));
 
+// ---- Social Security ----------------------------------------------------------
+// Nobody knows their own benefit, so "enter your Social Security" is a question most people cannot
+// answer — and leaving it blank understates the plan badly, because for a median household it is the
+// single largest retirement income stream.
+//
+// The real calculation: index 35 years of earnings, take the monthly average (AIME), run it through
+// three bend points to get the primary insurance amount (PIA), then adjust for claiming early or
+// late. This does the shape of that honestly and skips the indexing, which needs a full earnings
+// history nobody is going to type in.
+//
+// 2024 bend points, in monthly dollars.
+const SS_BEND_1 = 1174, SS_BEND_2 = 7078;
+const SS_CAP = 168600;               // annual taxable maximum — earnings above this earn no benefit
+
+// Primary insurance amount: what you get at full retirement age, per year in today's dollars.
+export const ssPia = (annualEarnings, yearsWorked = 35) => {
+  const capped = Math.max(0, Math.min(SS_CAP, +annualEarnings || 0));
+  // fewer than 35 years of earnings means zeros are averaged in, which is the single biggest thing
+  // people miss about their own benefit
+  const aime = (capped / 12) * (Math.min(35, Math.max(0, yearsWorked)) / 35);
+  const pia =
+    0.90 * Math.min(aime, SS_BEND_1) +
+    0.32 * Math.max(0, Math.min(aime, SS_BEND_2) - SS_BEND_1) +
+    0.15 * Math.max(0, aime - SS_BEND_2);
+  return Math.round(pia * 12);
+};
+
+// Claiming adjustment. Before full retirement age the benefit is cut 5/9 of 1% per month for the
+// first 36 months and 5/12 of 1% beyond; after it, delayed credits add 8% a year to age 70.
+export const ssClaimFactor = (claimAge, fullAge = 67) => {
+  const months = Math.round((claimAge - fullAge) * 12);
+  if (months === 0) return 1;
+  if (months < 0) {
+    const early = Math.min(36, -months), extra = Math.max(0, -months - 36);
+    return Math.max(0, 1 - early * (5 / 900) - extra * (5 / 1200));
+  }
+  return 1 + Math.min(months, (70 - fullAge) * 12) * (0.08 / 12);
+};
+
+export const ssEstimate = (annualEarnings, claimAge, yearsWorked = 35, fullAge = 67) =>
+  Math.round(ssPia(annualEarnings, yearsWorked) * ssClaimFactor(claimAge, fullAge));
+
 // ---- where a number came from ------------------------------------------------
 // Three provenances, and the difference matters to a reader more than it looks.
 //
@@ -3274,6 +3316,11 @@ function Calculator({ shared, isMobile }) {
   const [mcOpen, setMcOpen] = useState(false);               // backtesting, on demand — it is not free
   const [sankeyOpen, setSankeyOpen] = useState(false);       // the year-by-year flow diagram
   const [mortOpen, setMortOpen] = useState(false);           // survival curves and the outcome mix
+  // the Social Security estimator's own inputs — deliberately NOT part of `p`, because they describe
+  // a calculation you ran, not a fact about the plan; only its output ever becomes an income stream
+  const [ssEarn, setSsEarn] = useState(70000);
+  const [ssYears, setSsYears] = useState(35);
+  const [ssClaim, setSsClaim] = useState(67);
   const [leversOpen, setLeversOpen] = useState(true);        // …but the levers are the payoff, so open
   // Provenance rides alongside the params, never inside them — simulate() must not be able to see it.
   const [prov, setProv] = useState(() =>
@@ -4105,6 +4152,52 @@ function Calculator({ shared, isMobile }) {
               </div>
               <AddButton onClick={addIncome} label="add income" />
             </div>
+            {/* Nobody knows their own benefit, and leaving it blank understates a median plan badly
+                — it is usually the largest single retirement income stream. This estimates it from
+                the two things people DO know. */}
+            <details style={{ fontSize: 11 }}>
+              <summary style={{ cursor: "pointer", color: C.teal, fontSize: 11, letterSpacing: ".02em" }}>
+                Don't know your Social Security? Estimate it
+              </summary>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <Num label="typical annual earnings" value={ssEarn} step={5000}
+                    onChange={setSsEarn} />
+                  <Num label="years worked (35 counts)" value={ssYears} step={1}
+                    onChange={setSsYears} />
+                  <Num label="claim at age" value={ssClaim} step={1} min={62}
+                    onChange={setSsClaim} />
+                  <div style={{ display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+                    <span style={{ fontSize: 10, color: C.mute, textTransform: "uppercase", letterSpacing: ".03em" }}>
+                      estimate
+                    </span>
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 14, color: C.brass }}>
+                      {fmt(ssEstimate(ssEarn, ssClaim, ssYears))}/yr
+                    </span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setP((s) => ({ ...s, incomes: [...(s.incomes || []), {
+                    label: "Social Security", amount: ssEstimate(ssEarn, ssClaim, ssYears),
+                    startAge: ssClaim, whose: "you", cola: true, until: null }] }))}
+                  style={{
+                    background: "transparent", border: `1px solid ${C.teal}`, color: C.teal,
+                    borderRadius: 6, padding: "5px 10px", cursor: "pointer", fontSize: 11,
+                    fontFamily: "'Space Grotesk', sans-serif", alignSelf: "flex-start",
+                  }}>
+                  + Add this as an income stream
+                </button>
+                <div style={{ fontSize: 10, color: C.mute, lineHeight: 1.6 }}>
+                  The real calculation indexes 35 years of earnings, averages them monthly, and runs
+                  that through three bend points — so it replaces far more of a low wage than a high
+                  one. This does that shape honestly and skips the indexing, which needs an earnings
+                  history nobody is going to type in. <b>Fewer than 35 years averages zeros in</b>,
+                  which is the thing most people miss about their own number. Claiming at{" "}
+                  {ssClaim} is worth {(ssClaimFactor(ssClaim) * 100).toFixed(0)}% of the benefit at 67.
+                  Treat it as an estimate, not a statement — ssa.gov has your real figure.
+                </div>
+              </div>
+            </details>
             {(p.incomes || []).map((inc, i) => {
               const onPartner = inc.whose === "partner";
               const refAge = onPartner ? p.partnerAge : p.currentAge;

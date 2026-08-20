@@ -4,7 +4,7 @@ import { HISTORY, randomStart, blendedReturn, seededRandom,
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
   rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
-  PRESETS, SCHOOL_TIERS, traceToCsv, outcomeMix,
+  PRESETS, SCHOOL_TIERS, traceToCsv, outcomeMix, ssPia, ssClaimFactor, ssEstimate,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -2583,5 +2583,55 @@ describe("mortality", () => {
   it("gives nothing back without a backtest", () => {
     expect(outcomeMix(null, survivalCurve(30, 90))).toBeNull();
     expect(outcomeMix(runTrials(DEFAULTS, { mode: "historical" }), null)).toBeNull();
+  });
+});
+
+describe("Social Security estimator", () => {
+  it("is progressive — the bend points bite", () => {
+    // a benefit that replaced a constant share of earnings would be a straight line; the whole
+    // point of the bend points is that it replaces far more of a low wage than a high one
+    const lo = ssPia(30000), mid = ssPia(80000), hi = ssPia(200000);
+    expect(lo / 30000).toBeGreaterThan(mid / 80000);
+    expect(mid / 80000).toBeGreaterThan(hi / 200000);
+  });
+
+  it("caps at the taxable maximum", () => {
+    expect(ssPia(400000)).toBe(ssPia(168600));
+  });
+
+  it("docks a short career, which is the thing people miss", () => {
+    // fewer than 35 years averages zeros in
+    expect(ssPia(90000, 20)).toBeLessThan(ssPia(90000, 35));
+    expect(ssPia(90000, 40)).toBe(ssPia(90000, 35));
+  });
+
+  it("prices claiming early and late the way the rules do", () => {
+    expect(ssClaimFactor(67)).toBe(1);
+    expect(ssClaimFactor(70)).toBeCloseTo(1.24, 2);        // 8% a year for three years
+    expect(ssClaimFactor(62)).toBeCloseTo(0.7, 2);         // the familiar 30% cut
+    expect(ssClaimFactor(66)).toBeCloseTo(1 - 12 * (5 / 900), 4);
+    expect(ssClaimFactor(75)).toBe(ssClaimFactor(70));     // credits stop at 70
+  });
+
+  it("lands a median earner in the right ballpark", () => {
+    // roughly $2k/mo at full retirement age for someone on about $60k — the published average
+    const yearly = ssEstimate(60000, 67);
+    expect(yearly).toBeGreaterThan(19000);
+    expect(yearly).toBeLessThan(30000);
+  });
+
+  it("feeds the model as an ordinary income stream", () => {
+    const amount = ssEstimate(90000, 67);
+    const ss = [{ label: "Social Security", amount, startAge: 67, whose: "you", cola: true, until: null }];
+    const withSS = simulate({ ...DEFAULTS, incomes: ss });
+    expect(withSS.incomePV).toBeGreaterThan(0);
+    // It lowers what you need — but NOT the demo's date, because that household is gated by the
+    // pre-59.5 bridge and a benefit starting at 67 cannot shorten a bridge that is already over.
+    // Same shape as a home sold after the unlock. Pin both halves.
+    expect(withSS.rows[0].required).toBeLessThan(simulate(DEFAULTS).rows[0].required);
+    expect(withSS.fireCross).toBe(simulate(DEFAULTS).fireCross);
+    // on a household that is NOT liquidity-gated, the date does move
+    const free = { ...DEFAULTS, enforceAccess: false };
+    expect(simulate({ ...free, incomes: ss }).fireCross).toBeLessThan(simulate(free).fireCross);
   });
 });
