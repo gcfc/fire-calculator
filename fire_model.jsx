@@ -185,6 +185,35 @@ export const TRACKED_KEYS = [
 
 export const provenanceOf = (prov, key) => (prov && prov[key]) || PROV.DEFAULT;
 
+// ---- values the app chose for you ------------------------------------------
+// Adding a home, a child, an event, a debt or an income stream fills its boxes in, because a blank
+// row simulates as nothing and "your new house costs $0" is worse than a guess. But those figures then
+// sit in the boxes looking exactly like something you typed, and people plan against them.
+//
+// So a row remembers which of its own fields still hold a value the app picked, in `auto`. The UI
+// renders those dim — present, in the arithmetic, visibly not yours — and the first keystroke in a box
+// drops that field from the list, at which point it renders like any other answer. Top-level fields
+// get the same treatment for free from `prov`: PROV.DEFAULT already means "nobody claimed this".
+//
+// `auto` lives on the row rather than in a table beside it because rows have no stable identity —
+// they are positional and can be dropped from the middle — so anything keyed by index goes wrong the
+// first time someone removes their second child. simulate() never reads it.
+export const isAuto = (row, key) => !!(row && Array.isArray(row.auto) && row.auto.includes(key));
+// drop `keys` from a row's auto list — what "you have now answered this one" looks like
+export const claimFields = (row, keys) => {
+  if (!row || !Array.isArray(row.auto)) return row;
+  const auto = row.auto.filter((k) => !keys.includes(k));
+  return auto.length ? { ...row, auto } : (({ auto: _drop, ...rest }) => rest)(row);
+};
+// `auto` is a note-to-self about this tab's session, not a fact about the plan, so it never travels:
+// a shared link carries the numbers, and the recipient did not choose any of them either way.
+const stripAuto = (p) => {
+  const out = { ...p };
+  for (const k of ["homes", "kids", "expenses", "debts", "incomes"])
+    if (Array.isArray(out[k])) out[k] = out[k].map((r) => (r && r.auto ? claimFields(r, r.auto) : r));
+  return out;
+};
+
 // mark a set of keys, leaving the rest of the record alone
 export const markProvenance = (prov, keys, how) => {
   const out = { ...prov };
@@ -1748,7 +1777,10 @@ export const runTrials = (p, opts = {}) => {
 // The one number box everything uses. Two things it gets right that a raw <input type=number> does not:
 // clicking in SELECTS the current value, so typing replaces it instead of landing after the leading 0;
 // and the box is allowed to sit empty while you type, instead of a 0 snapping back in behind the cursor.
-const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small = false }) => {
+// `dim` renders the value the way a placeholder reads — present, in the arithmetic, visibly not yours.
+// It is not an actual `placeholder`: the box holds a real value that the model is using, and an empty
+// box with grey ghost text would say the opposite.
+const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small = false, dim = false }) => {
   const C = usePalette();
   const [draft, setDraft] = useState(null);            // the raw string while editing; null when idle
   const clamp = (n) => Math.min(max, Math.max(min, n));
@@ -1762,6 +1794,8 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
       step={step}
       min={min}
       max={Number.isFinite(max) ? max : undefined}   // let the spinner + native validity know the ceiling too
+      // the explanation belongs where the confusion is, on the box itself
+      title={dim && draft === null ? "A starting figure the model chose — it is being used, but it is not yours yet. Type over it." : undefined}
       value={draft ?? value}
       onFocus={(e) => e.target.select()}
       onChange={(e) => {
@@ -1779,7 +1813,9 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
         setDraft(null);
       }}
       style={{
-        background: C.bg, border: `1px solid ${C.line}`, color: C.ink,
+        background: C.bg, border: `1px solid ${C.line}`,
+        // dim only while idle: the moment there is a draft the person is typing, so it is theirs
+        color: dim && draft === null ? C.mute : C.ink,
         padding: small ? "6px 8px" : "8px 10px", borderRadius: small ? 5 : 6,
         fontFamily: "'JetBrains Mono', monospace", fontSize: small ? 13 : 14,
         width: "100%", boxSizing: "border-box",
@@ -1792,7 +1828,7 @@ const NumberInput = ({ value, onCommit, step = 1, min = 0, max = Infinity, small
 // `yearRef`, when given, marks this value as an age and shows the calendar year it lands in.
 // `labelPrefix` lets a caller put its own interactive node at the head of the label — used by the kid
 // card to make the child's name editable in place, rather than spending a second row on a name field.
-const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef, labelPrefix = null }) => {
+const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef, labelPrefix = null, dim = false }) => {
   const C = usePalette();
   const yr = yearRef != null ? yearAt(value, yearRef) : null;
   return (
@@ -1806,6 +1842,7 @@ const Num = ({ label, value, onChange, step = 1, pct = false, min = 0, yearRef, 
       </span>
       <NumberInput
         small
+        dim={dim}
         step={step}
         min={min}
         value={pct ? Number((value * 100).toFixed(4)) : value}
@@ -2317,6 +2354,8 @@ const makeField = (C) => (label, key, val, set, opts = {}) => {
         step={opts.step || 1}
         min={opts.min ?? 0}
         max={opts.max ?? Infinity}
+        // a top-level field is the app's guess exactly when nobody has claimed it and it is not blank
+        dim={opts.prov === PROV.DEFAULT && val !== "" && val != null}
         onCommit={(v) => set(key, v)}
       />
     </label>
@@ -2345,7 +2384,9 @@ const UnitPill = ({ label, onClick }) => {
 // picking a different unit simply re-renders the same stored value in the new unit, and typing
 // afterwards commits back through that unit. Nothing about the model changes.
 const MONEY_LABEL = { yr: "per year", mo: "per month", pct: "% of income" };
-function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr", "mo"], base = 0, prov }) {
+// `dim` overrides the provenance rule for a field that has no provenance record — a row's amount,
+// which is tracked on the row itself rather than in `prov`.
+function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr", "mo"], base = 0, prov, dim }) {
   const C = usePalette();
   const [mode, setMode] = useState(modes[0]);
   const usablePct = mode === "pct" && base > 0;
@@ -2369,6 +2410,7 @@ function MoneyField({ label, value, onChange, step = 1000, min = 0, modes = ["yr
             value={blank ? "" : Number.isFinite(shown) ? Math.round(shown * 100) / 100 : 0}
             step={mode === "mo" ? Math.max(1, Math.round(step / 12)) : usablePct ? 1 : step}
             min={min}
+            dim={(dim !== undefined ? dim : prov === PROV.DEFAULT) && !blank}
             onCommit={commit}
           />
         </span>
@@ -3388,7 +3430,7 @@ export const underwaterOf = (rows, END) => {
 export const sharePayload = (kind, { p, show, sim }) =>
   kind === "plot"
     ? { v: SHARE_VERSION, mode: "plot", snap: snapshotFromSim(sim, show, p.enforceAccess) }
-    : { v: SHARE_VERSION, mode: "full", p: diffFrom(p, DEFAULTS), show: diffFrom(show, defaultShow()) };
+    : { v: SHARE_VERSION, mode: "full", p: diffFrom(stripAuto(p), DEFAULTS), show: diffFrom(show, defaultShow()) };
 
 // --- tax-advantaged vs. taxable allocation advice ---------------------------
 // In this model the two buckets grow identically; their ONLY difference is the 59.5 lock. So moving
@@ -3864,6 +3906,7 @@ function Calculator({ shared, isMobile }) {
   const [ssEarn, setSsEarn] = useState(70000);
   const [ssYears, setSsYears] = useState(35);
   const [ssClaim, setSsClaim] = useState(67);
+  const [ssTouched, setSsTouched] = useState({});
   const [leversOpen, setLeversOpen] = useState(true);        // …but the levers are the payoff, so open
   // Provenance rides alongside the params, never inside them — simulate() must not be able to see it.
   const [prov, setProv] = useState(() =>
@@ -3886,8 +3929,17 @@ function Calculator({ shared, isMobile }) {
   const setPct = (k, v) => { touch(k); setP((s) => ({ ...s, [k]: v / 100 })); };
 
   // --- add / edit / drop homes and kids -------------------------------------
-  const setHome = (i, k, v) =>
-    setP((s) => ({ ...s, homes: s.homes.map((h, j) => (j === i ? { ...h, [k]: v } : h)) }));
+  // Every row setter goes through this: write the new value AND record that the field is now yours,
+  // so a seeded figure stops rendering dim the moment it is edited. Doing it in one place is the point
+  // — the toggles that patch several keys at once (buy/own, %/$) have to claim all of them too.
+  const editRow = (listKey) => (i, patch) =>
+    setP((s) => ({
+      ...s,
+      [listKey]: (s[listKey] || []).map((row, j) =>
+        (j === i ? { ...claimFields(row, Object.keys(patch)), ...patch } : row)),
+    }));
+  const patchHome = editRow("homes");
+  const setHome = (i, k, v) => patchHome(i, { [k]: v });
   const addHome = () =>
     setP((s) => {
       const last = s.homes[s.homes.length - 1];
@@ -3901,14 +3953,12 @@ function Calculator({ shared, isMobile }) {
         closingPct: last ? last.closingPct : 0.02,
         propTaxRate: last ? last.propTaxRate : 0.011,
         insMaintRate: last ? last.insMaintRate : 0.013,
+        // every one of the above is the app's guess until someone edits it
+        auto: ["price", "purchaseAge", "downPct", "rate", "term", "closingPct", "propTaxRate", "insMaintRate"],
       }] };
     });
   const dropHome = (i) => setP((s) => ({ ...s, homes: s.homes.filter((_, j) => j !== i) }));
-  // merge a patch into one home — used by the buy/own and %/$ mode toggles, which flip several keys at once
-  const patchHome = (i, patch) =>
-    setP((s) => ({ ...s, homes: s.homes.map((h, j) => (j === i ? { ...h, ...patch } : h)) }));
-  const setKid = (i, patch) =>
-    setP((s) => ({ ...s, kids: s.kids.map((k, j) => (j === i ? { ...k, ...patch } : k)) }));
+  const setKid = editRow("kids");
   // Adding a kid seeds the three per-kid cost fields, because a kid with blank costs is a kid that
   // costs nothing — the one thing we know is false. Only blanks are filled: a figure you have already
   // typed (including a deliberate 0) survives adding a second kid untouched.
@@ -3928,7 +3978,8 @@ function Calculator({ shared, isMobile }) {
       const birthAge = usable(prev) ? prev + 2 : "";
       return {
         ...s,
-        kids: [...s.kids, { birthAge }],
+        // a blank birthAge is not a guess, so there is nothing to mark as one
+        kids: [...s.kids, birthAge === "" ? { birthAge } : { birthAge, auto: ["birthAge"] }],
         daycarePerKid: seed("daycarePerKid"),
         ongoingPerKid: seed("ongoingPerKid"),
         collegePerKid: seed("collegePerKid"),
@@ -3937,24 +3988,30 @@ function Calculator({ shared, isMobile }) {
   const dropKid = (i) => setP((s) => ({ ...s, kids: s.kids.filter((_, j) => j !== i) }));
 
   // --- one-off expenses -----------------------------------------------------
-  const setExpense = (i, k, v) =>
-    setP((s) => ({ ...s, expenses: s.expenses.map((e, j) => (j === i ? { ...e, [k]: v } : e)) }));
+  const patchExpense = editRow("expenses");
+  const setExpense = (i, k, v) => patchExpense(i, { [k]: v });
   const addExpense = () =>
-    setP((s) => ({ ...s, expenses: [...(s.expenses || []), { label: "", age: Math.min(s.currentAge + 3, s.endAge), amount: 30000, until: null }] }));
+    setP((s) => ({ ...s, expenses: [...(s.expenses || []),
+      { label: "", age: Math.min(s.currentAge + 3, s.endAge), amount: 30000, until: null,
+        auto: ["age", "amount"] }] }));
   const dropExpense = (i) => setP((s) => ({ ...s, expenses: s.expenses.filter((_, j) => j !== i) }));
 
   // --- debts ----------------------------------------------------------------
-  const setDebt = (i, k, v) =>
-    setP((s) => ({ ...s, debts: s.debts.map((d, j) => (j === i ? { ...d, [k]: v } : d)) }));
+  const patchDebt = editRow("debts");
+  const setDebt = (i, k, v) => patchDebt(i, { [k]: v });
   const addDebt = () =>
-    setP((s) => ({ ...s, debts: [...(s.debts || []), { label: "", balance: 25000, apr: 6, payment: 400, startAge: s.currentAge }] }));
+    setP((s) => ({ ...s, debts: [...(s.debts || []),
+      { label: "", balance: 25000, apr: 6, payment: 400, startAge: s.currentAge,
+        auto: ["balance", "apr", "payment", "startAge"] }] }));
   const dropDebt = (i) => setP((s) => ({ ...s, debts: s.debts.filter((_, j) => j !== i) }));
 
   // --- guaranteed retirement income (pension / Social Security / annuity) ---
-  const setIncome = (i, k, v) =>
-    setP((s) => ({ ...s, incomes: (s.incomes || []).map((inc, j) => (j === i ? { ...inc, [k]: v } : inc)) }));
+  const patchIncome = editRow("incomes");
+  const setIncome = (i, k, v) => patchIncome(i, { [k]: v });
   const addIncome = () =>
-    setP((s) => ({ ...s, incomes: [...(s.incomes || []), { label: "", amount: 30000, startAge: 65, whose: "you", cola: true, until: null }] }));
+    setP((s) => ({ ...s, incomes: [...(s.incomes || []),
+      { label: "", amount: 30000, startAge: 65, whose: "you", cola: true, until: null,
+        auto: ["amount", "startAge"] }] }));
   const dropIncome = (i) => setP((s) => ({ ...s, incomes: (s.incomes || []).filter((_, j) => j !== i) }));
 
   const sim = useMemo(() => simulate(p), [p]);
@@ -4175,6 +4232,14 @@ function Calculator({ shared, isMobile }) {
       <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(240px, 300px) 1fr", gap: isMobile ? 18 : 24, alignItems: "start" }}>
         {/* INPUTS */}
         <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          {/* Adding a child or a house fills its boxes in, because a blank row simulates as nothing.
+              Those figures are then indistinguishable from ones you typed unless the form says so. */}
+          <div style={{ fontSize: 10.5, color: C.mute, lineHeight: 1.6,
+                        border: `1px dashed ${C.line}`, borderRadius: 6, padding: "7px 9px" }}>
+            A figure shown <span style={{ color: C.mute, fontFamily: "'JetBrains Mono', monospace" }}>like this</span>{" "}
+            is one the model chose for you — counted in full, but nobody's answer yet.
+            Type over it and it becomes <span style={{ color: C.ink, fontFamily: "'JetBrains Mono', monospace" }}>yours</span>.
+          </div>
           {[
             ["You", [
               ["Age", "currentAge", {}],
@@ -4301,6 +4366,7 @@ function Calculator({ shared, isMobile }) {
                   </label>
                   {p.partnerWorksAfterRetire &&
                     <MoneyField label="Non-housing expense while they work" value={p.interimLivingToday ?? p.nonHousingLiving}
+                      dim={p.interimLivingToday == null}
                       onChange={(v) => set("interimLivingToday", v)} step={1000} />}
                 </div>
               )}
@@ -4371,33 +4437,33 @@ function Calculator({ shared, isMobile }) {
 
                   {owned ? (
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                      <Num label="What it's worth today" value={h.price ?? 0} step={25000} onChange={(v) => setHome(i, "price", v)} />
-                      <Num label="Mortgage rate %" value={h.rate ?? 0} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
-                      <Num label="Payment / mo (P&I)" value={h.monthlyPI ?? 0} step={100} onChange={(v) => setHome(i, "monthlyPI", v)} />
+                      <Num dim={isAuto(h, "price")} label="What it's worth today" value={h.price ?? 0} step={25000} onChange={(v) => setHome(i, "price", v)} />
+                      <Num dim={isAuto(h, "rate")} label="Mortgage rate %" value={h.rate ?? 0} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
+                      <Num dim={isAuto(h, "monthlyPI")} label="Payment / mo (P&I)" value={h.monthlyPI ?? 0} step={100} onChange={(v) => setHome(i, "monthlyPI", v)} />
                       {/* a duration, not an age — so anchor the year hint at today rather than at
                           your current age, and it reads as the year the mortgage clears */}
-                      <Num label="Years left" value={h.yearsLeft ?? 0} step={1} yearRef={0}
+                      <Num dim={isAuto(h, "yearsLeft")} label="Years left" value={h.yearsLeft ?? 0} step={1} yearRef={0}
                         onChange={(v) => setHome(i, "yearsLeft", v)} />
-                      <Num label="Property tax / yr ($)" value={h.propTaxAnnual ?? 0} step={500} onChange={(v) => setHome(i, "propTaxAnnual", v)} />
-                      <Num label="Ins + maint / yr ($)" value={h.insMaintAnnual ?? 0} step={500} onChange={(v) => setHome(i, "insMaintAnnual", v)} />
+                      <Num dim={isAuto(h, "propTaxAnnual")} label="Property tax / yr ($)" value={h.propTaxAnnual ?? 0} step={500} onChange={(v) => setHome(i, "propTaxAnnual", v)} />
+                      <Num dim={isAuto(h, "insMaintAnnual")} label="Ins + maint / yr ($)" value={h.insMaintAnnual ?? 0} step={500} onChange={(v) => setHome(i, "insMaintAnnual", v)} />
                     </div>
                   ) : (
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                      <Num label="Price" value={h.price} step={25000} onChange={(v) => setHome(i, "price", v)} />
-                      <Num label="Buy at your age" value={h.purchaseAge} yearRef={p.currentAge} onChange={(v) => setHome(i, "purchaseAge", v)} />
-                      <Num label="Down %" value={h.downPct} pct step={1} onChange={(v) => setHome(i, "downPct", v)} />
-                      <Num label="Rate %" value={h.rate} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
-                      <Num label="Term (yrs)" value={h.term} onChange={(v) => setHome(i, "term", v)} />
-                      <Num label="Closing %" value={h.closingPct} pct step={0.5} onChange={(v) => setHome(i, "closingPct", v)} />
+                      <Num dim={isAuto(h, "price")} label="Price" value={h.price} step={25000} onChange={(v) => setHome(i, "price", v)} />
+                      <Num dim={isAuto(h, "purchaseAge")} label="Buy at your age" value={h.purchaseAge} yearRef={p.currentAge} onChange={(v) => setHome(i, "purchaseAge", v)} />
+                      <Num dim={isAuto(h, "downPct")} label="Down %" value={h.downPct} pct step={1} onChange={(v) => setHome(i, "downPct", v)} />
+                      <Num dim={isAuto(h, "rate")} label="Rate %" value={h.rate} pct step={0.125} onChange={(v) => setHome(i, "rate", v)} />
+                      <Num dim={isAuto(h, "term")} label="Term (yrs)" value={h.term} onChange={(v) => setHome(i, "term", v)} />
+                      <Num dim={isAuto(h, "closingPct")} label="Closing %" value={h.closingPct} pct step={0.5} onChange={(v) => setHome(i, "closingPct", v)} />
                       {dollarCarry ? (
                         <>
-                          <Num label="Prop tax / yr ($)" value={h.propTaxAnnual ?? 0} step={500} onChange={(v) => setHome(i, "propTaxAnnual", v)} />
-                          <Num label="Ins + maint / yr ($)" value={h.insMaintAnnual ?? 0} step={500} onChange={(v) => setHome(i, "insMaintAnnual", v)} />
+                          <Num dim={isAuto(h, "propTaxAnnual")} label="Prop tax / yr ($)" value={h.propTaxAnnual ?? 0} step={500} onChange={(v) => setHome(i, "propTaxAnnual", v)} />
+                          <Num dim={isAuto(h, "insMaintAnnual")} label="Ins + maint / yr ($)" value={h.insMaintAnnual ?? 0} step={500} onChange={(v) => setHome(i, "insMaintAnnual", v)} />
                         </>
                       ) : (
                         <>
-                          <Num label="Prop tax %" value={h.propTaxRate} pct step={0.1} onChange={(v) => setHome(i, "propTaxRate", v)} />
-                          <Num label="Ins + maint %" value={h.insMaintRate} pct step={0.1} onChange={(v) => setHome(i, "insMaintRate", v)} />
+                          <Num dim={isAuto(h, "propTaxRate")} label="Prop tax %" value={h.propTaxRate} pct step={0.1} onChange={(v) => setHome(i, "propTaxRate", v)} />
+                          <Num dim={isAuto(h, "insMaintRate")} label="Ins + maint %" value={h.insMaintRate} pct step={0.1} onChange={(v) => setHome(i, "insMaintRate", v)} />
                         </>
                       )}
                     </div>
@@ -4414,9 +4480,9 @@ function Calculator({ shared, isMobile }) {
                       keep it for good. */}
                   <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 9 }}>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                      <Num label="Sell at your age (blank = keep)" value={h.sellAge ?? ""} step={1}
+                      <Num dim={isAuto(h, "sellAge")} label="Sell at your age (blank = keep)" value={h.sellAge ?? ""} step={1}
                         yearRef={p.currentAge} onChange={(v) => setHome(i, "sellAge", v || null)} />
-                      <Num label="Selling costs %" value={h.sellCostPct ?? 6} step={0.5}
+                      <Num dim={h.sellCostPct == null} label="Selling costs %" value={h.sellCostPct ?? 6} step={0.5}
                         onChange={(v) => setHome(i, "sellCostPct", v)} />
                     </div>
                     {m && m.sellAge != null && (
@@ -4482,9 +4548,9 @@ function Calculator({ shared, isMobile }) {
                   <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                     <div style={{ flex: 1 }}>
                       {showNow
-                        ? <Num label=" — age now" labelPrefix={nameField} value={p.currentAge - birthAge} step={1} min={-120}
+                        ? <Num dim={isAuto(k, "birthAge")} label=" — age now" labelPrefix={nameField} value={p.currentAge - birthAge} step={1} min={-120}
                             onChange={(v) => setKid(i, { birthAge: p.currentAge - v, ageNow: undefined })} />
-                        : <Num label=" — your age at birth" labelPrefix={nameField} value={birthAge} yearRef={p.currentAge}
+                        : <Num dim={isAuto(k, "birthAge")} label=" — your age at birth" labelPrefix={nameField} value={birthAge} yearRef={p.currentAge}
                             onChange={(v) => setKid(i, { birthAge: v, ageNow: undefined })} />}
                     </div>
                     <DropButton onClick={() => dropKid(i)} />
@@ -4607,19 +4673,19 @@ function Calculator({ shared, isMobile }) {
                       <option value="income" style={{ background: C.panel, color: C.ink }}>income (money in)</option>
                     </select>
                   </label>
-                  <Num label="amount (today's $)" value={Math.abs(+e.amount || 0)} step={1000} min={0}
+                  <Num dim={isAuto(e, "amount")} label="amount (today's $)" value={Math.abs(+e.amount || 0)} step={1000} min={0}
                     onChange={(v) => setExpense(i, "amount", Math.abs(v) * ((+e.amount || 0) < 0 ? -1 : 1))} />
                   {e.anchor === "retirement" ? (
                     <>
-                      <Num label="years from retirement" value={e.age} step={1} min={-60}
+                      <Num dim={isAuto(e, "age")} label="years from retirement" value={e.age} step={1} min={-60}
                         onChange={(v) => setExpense(i, "age", v)} />
-                      <Num label="until (blank=one-off)" value={e.until ?? ""} step={1} min={-60}
+                      <Num dim={isAuto(e, "until")} label="until (blank=one-off)" value={e.until ?? ""} step={1} min={-60}
                         onChange={(v) => setExpense(i, "until", v === "" ? null : v)} />
                     </>
                   ) : (
                     <>
-                      <Num label="at your age" value={e.age} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "age", v)} />
-                      <Num label="until age (blank=one-off)" value={e.until ?? ""} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "until", v || null)} />
+                      <Num dim={isAuto(e, "age")} label="at your age" value={e.age} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "age", v)} />
+                      <Num dim={isAuto(e, "until")} label="until age (blank=one-off)" value={e.until ?? ""} step={1} yearRef={p.currentAge} onChange={(v) => setExpense(i, "until", v || null)} />
                     </>
                   )}
                 </div>
@@ -4706,12 +4772,14 @@ function Calculator({ shared, isMobile }) {
               </summary>
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <Num label="typical annual earnings" value={ssEarn} step={5000}
-                    onChange={setSsEarn} />
-                  <Num label="years worked (35 counts)" value={ssYears} step={1}
-                    onChange={setSsYears} />
-                  <Num label="claim at age" value={ssClaim} step={1} min={62}
-                    onChange={setSsClaim} />
+                  {/* the estimator opens on plausible figures rather than blanks, so it shows an
+                      answer immediately — but they are its figures until someone edits them */}
+                  <Num dim={!ssTouched.earn} label="typical annual earnings" value={ssEarn} step={5000}
+                    onChange={(v) => { setSsEarn(v); setSsTouched((t) => ({ ...t, earn: true })); }} />
+                  <Num dim={!ssTouched.years} label="years worked (35 counts)" value={ssYears} step={1}
+                    onChange={(v) => { setSsYears(v); setSsTouched((t) => ({ ...t, years: true })); }} />
+                  <Num dim={!ssTouched.claim} label="claim at age" value={ssClaim} step={1} min={62}
+                    onChange={(v) => { setSsClaim(v); setSsTouched((t) => ({ ...t, claim: true })); }} />
                   <div style={{ display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
                     <span style={{ fontSize: 10, color: C.mute, textTransform: "uppercase", letterSpacing: ".03em" }}>
                       estimate
@@ -4754,10 +4822,10 @@ function Calculator({ shared, isMobile }) {
                     </div>
                     <DropButton onClick={() => dropIncome(i)} />
                   </div>
-                  <MoneyField label="amount (today's $)" value={+inc.amount || 0} step={1000} onChange={(v) => setIncome(i, "amount", v)} />
+                  <MoneyField dim={isAuto(inc, "amount")} label="amount (today's $)" value={+inc.amount || 0} step={1000} onChange={(v) => setIncome(i, "amount", v)} />
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <Num label={onPartner ? "starts at their age" : "starts at your age"} value={inc.startAge} step={1} yearRef={refAge} onChange={(v) => setIncome(i, "startAge", v)} />
-                    <Num label="until age (blank=life)" value={inc.until ?? ""} step={1} yearRef={refAge} onChange={(v) => setIncome(i, "until", v || null)} />
+                    <Num dim={isAuto(inc, "startAge")} label={onPartner ? "starts at their age" : "starts at your age"} value={inc.startAge} step={1} yearRef={refAge} onChange={(v) => setIncome(i, "startAge", v)} />
+                    <Num dim={isAuto(inc, "until")} label="until age (blank=life)" value={inc.until ?? ""} step={1} yearRef={refAge} onChange={(v) => setIncome(i, "until", v || null)} />
                   </div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center" }}>
                     <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11, color: C.ink, cursor: "pointer" }}>
@@ -4810,9 +4878,9 @@ function Calculator({ shared, isMobile }) {
                     <DropButton onClick={() => dropDebt(i)} />
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                    <Num label="balance now ($)" value={d.balance} step={1000} onChange={(v) => setDebt(i, "balance", v)} />
-                    <Num label="APR %" value={d.apr} step={0.25} onChange={(v) => setDebt(i, "apr", v)} />
-                    <Num label="payment / mo ($)" value={d.payment} step={50} onChange={(v) => setDebt(i, "payment", v)} />
+                    <Num dim={isAuto(d, "balance")} label="balance now ($)" value={d.balance} step={1000} onChange={(v) => setDebt(i, "balance", v)} />
+                    <Num dim={isAuto(d, "apr")} label="APR %" value={d.apr} step={0.25} onChange={(v) => setDebt(i, "apr", v)} />
+                    <Num dim={isAuto(d, "payment")} label="payment / mo ($)" value={d.payment} step={50} onChange={(v) => setDebt(i, "payment", v)} />
                   </div>
                   {d.balance > 0 && d.payment > 0 && (
                     payoff != null

@@ -6,7 +6,7 @@ import {
   rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
   PRESETS, SCHOOL_TIERS, traceToCsv, outcomeMix, ssPia, ssClaimFactor, ssEstimate, compareScenarios,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
-  allocationAdvice, retiresOnLoan, defaultShow, PALETTES, SERIES,
+  allocationAdvice, retiresOnLoan, defaultShow, PALETTES, SERIES, isAuto, claimFields,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
 } from "./fire_model.jsx";
 
@@ -2797,5 +2797,51 @@ describe("what a lump was", () => {
     const tuition = s.trace.filter((t) => t.college > 0);
     expect(tuition.length).toBeGreaterThan(0);
     for (const t of tuition) expect(t.oneOff).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// figures the app chose for you
+// ---------------------------------------------------------------------------
+describe("seeded values", () => {
+  const withAuto = {
+    ...DEFAULTS,
+    homes: DEFAULTS.homes.map((h) => ({ ...h, auto: ["price", "rate"] })),
+    kids: DEFAULTS.kids.map((k) => ({ ...k, auto: ["birthAge"] })),
+  };
+
+  it("changes nothing about the plan", () => {
+    // `auto` is a UI note riding on the row; the model must not be able to see it
+    const a = simulate(DEFAULTS), b = simulate(withAuto);
+    expect(b.fireCross).toBe(a.fireCross);
+    expect(b.end).toBe(a.end);
+    expect(b.trace.length).toBe(a.trace.length);
+  });
+
+  it("claims a field and drops the marker when the last one goes", () => {
+    const row = { price: 800000, rate: 0.065, auto: ["price", "rate"] };
+    const one = claimFields(row, ["price"]);
+    expect(isAuto(one, "price")).toBe(false);
+    expect(isAuto(one, "rate")).toBe(true);
+    const none = claimFields(one, ["rate"]);
+    expect("auto" in none).toBe(false);
+    expect(none.price).toBe(800000);      // claiming never touches the value itself
+  });
+
+  it("treats a row with no marker as entirely the user's", () => {
+    expect(isAuto({ price: 1 }, "price")).toBe(false);
+    expect(isAuto(null, "price")).toBe(false);
+    expect(claimFields({ price: 1 }, ["price"])).toEqual({ price: 1 });
+  });
+
+  it("never travels in a share link", () => {
+    // the recipient did not choose any of these numbers either way, and a marker that says
+    // "the sender never looked at this" is not a claim the link can support
+    const payload = sharePayload("full", {
+      p: withAuto, show: defaultShow(), sim: simulate(withAuto),
+    });
+    expect(JSON.stringify(payload)).not.toContain("auto");
+    const back = decodeShare("#s=" + encodeShare(payload));
+    for (const h of back.p.homes || []) expect("auto" in h).toBe(false);
   });
 });
