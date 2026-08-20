@@ -1757,6 +1757,18 @@ export const runTrials = (p, opts = {}) => {
   // inside the distribution — a fan without it is a picture of uncertainty with no answer in it
   const planPath = Object.fromEntries(plan.rows.filter((r) => Number.isInteger(r.age)).map((r) => [r.age, r.portfolio]));
 
+  // HOW MUCH OF THE PLAN THIS ACTUALLY TESTS.
+  // A sampled sequence drives `retAt`, which is the INVESTED return. Cash is a separate bucket earning
+  // a flat `cashReturn`, so it returns exactly the same thing in a 1929 trial as in a 1995 one — the
+  // backtest cannot produce a year in which savings lost purchasing power. For most plans the cash
+  // buffer is small and spent early and this is immaterial; for a cash-heavy one the headline success
+  // rate is substantially a statement about a constant, and the panel should say so rather than let it
+  // pass as a market result. Measured at the retirement instant, which is where survival is decided.
+  const fireRow = plan.trace.find((t) => t.phase === "retires");
+  const cashAtFire = Math.max(0, (fireRow && fireRow.endCash) || 0);
+  const wealthAtFire = Math.max(1, ((fireRow && fireRow.endTaxable) || 0) + ((fireRow && fireRow.endTaxAdv) || 0));
+  const unsampledShare = Math.min(1, cashAtFire / wealthAtFire);
+
   return {
     mode: o.mode, trials: results.length, stockPct: o.stockPct, blockYears: o.blockYears,
     planPath,
@@ -1764,7 +1776,7 @@ export const runTrials = (p, opts = {}) => {
     // how many independent windows the horizon actually left room for — a 76-year plan against a
     // century of data leaves barely twenty, and they overlap heavily
     cycleYears: years, dataFrom: HISTORY_FIRST, dataTo: HISTORY_LAST,
-    assumedReal, sampledReal,
+    assumedReal, sampledReal, unsampledShare,
     fireCross: plan.fireCross,
     worst: ends[0], median: pct(0.5), best: ends[ends.length - 1],
     p10: pct(0.1), p90: pct(0.9),
@@ -5396,6 +5408,19 @@ function Calculator({ shared, isMobile }) {
                         zero — that surplus is the margin in your inputs, not a forecast.</>
                     )}
                   </div>
+
+                  {/* What the sampling does NOT reach. Worth saying out loud only when it is a big
+                      enough slice to move the headline figure. */}
+                  {mcShown.unsampledShare > 0.08 && (
+                    <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>
+                      Only the invested buckets ride the sampled sequence.{" "}
+                      <b style={{ color: C.ink }}>{(mcShown.unsampledShare * 100).toFixed(0)}%</b> of what you
+                      hold when you retire is cash, and cash earns your{" "}
+                      <b style={{ color: C.ink }}>{((p.cashReturn ?? 0) * 100).toFixed(1)}%</b> in every single
+                      trial — there is no run here in which savings lost purchasing power. That slice of the
+                      success rate is an assumption, not a result.
+                    </div>
+                  )}
 
                   {mcShown.mode === "randomstart" && (
                     <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>

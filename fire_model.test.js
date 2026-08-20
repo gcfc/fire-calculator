@@ -2845,3 +2845,38 @@ describe("seeded values", () => {
     for (const h of back.p.homes || []) expect("auto" in h).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// what the backtest does NOT sample
+// ---------------------------------------------------------------------------
+describe("the unsampled bucket", () => {
+  it("reports the share of wealth the sequence never touches", () => {
+    const mc = runTrials(DEFAULTS, { mode: "historical" });
+    expect(mc.unsampledShare).toBeGreaterThanOrEqual(0);
+    expect(mc.unsampledShare).toBeLessThanOrEqual(1);
+  });
+
+  it("rises with the size of the cash bucket", () => {
+    const lean = runTrials({ ...DEFAULTS, startCash: 0, partnerCash: 0 }, { mode: "historical" });
+    const heavy = runTrials({ ...DEFAULTS, startCash: 600000, partnerCash: 200000,
+                              homes: [] }, { mode: "historical" });
+    expect(lean.unsampledShare).toBe(0);
+    expect(heavy.unsampledShare).toBeGreaterThan(lean.unsampledShare);
+  });
+
+  it("is exactly the cash share of what you hold on the day you retire", () => {
+    // the figure has to be checkable against the trace the user can read for themselves
+    const p = { ...DEFAULTS, startCash: 400000, partnerCash: 150000, homes: [] };
+    const mc = runTrials(p, { mode: "historical" });
+    const row = simulate(p).trace.find((t) => t.phase === "retires");
+    expect(mc.unsampledShare).toBeCloseTo(row.endCash / (row.endTaxable + row.endTaxAdv), 9);
+  });
+
+  it("does not vary with which sequences were sampled", () => {
+    // it describes the plan, not the trial set — the same plan reports the same share in every mode
+    const p = { ...DEFAULTS, startCash: 400000, homes: [] };
+    const a = runTrials(p, { mode: "historical" });
+    const b = runTrials(p, { mode: "bootstrap", trials: 40 });
+    expect(b.unsampledShare).toBeCloseTo(a.unsampledShare, 9);
+  });
+});

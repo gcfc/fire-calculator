@@ -49,7 +49,7 @@ npm run dev      # http://localhost:5173 — hot-reloads on save
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Dev server with hot reload. |
-| `npm test` | The model's test suite (282 tests, ~8s). |
+| `npm test` | The model's test suite (345 tests, ~25s). |
 | `npm run test:watch` | Same, in watch mode. |
 | `npm run build` | Emits `dist/index.html` — a **single self-contained file** (React and Recharts inlined). Double-click it, email it, or drop it on any static host. |
 | `npm run preview` | Serves the built `dist/` to sanity-check the bundle. |
@@ -136,7 +136,7 @@ Two kinds of link, both encoded into the URL — there is no backend and nothing
 ```
 fire_model.jsx        the model (simulate) and the UI (FireModel) — ~4,000 lines
 history.js            annual US market returns since 1928, bundled not fetched
-fire_model.test.js    282 tests — every one pins a real bug or an invariant
+fire_model.test.js    345 tests — every one pins a real bug or an invariant
 legal.js              privacy/terms copy
 scripts/build-legal.mjs  renders legal.js to dist/<slug>/index.html
 index.html            page shell Vite serves
@@ -480,7 +480,8 @@ Each biases the answer in a known direction:
 | **Deterministic planning rate** | The single retirement age is a midpoint, not a promise. Backtesting is a separate panel, not the headline. |
 | **Borrowing is opt-in and off by default** | A plan that only balances on an implicit loan gets *no* date. Turning it on reports one, with the debt compounding at $r$ rather than a real borrowing rate. |
 | **One flat rate per bucket** | No asset-allocation glide path, no rate tiering. |
-| **Home appreciation is one flat rate** | No regional variation, no cycles. |
+| **Home appreciation is one flat rate** | No regional variation, no cycles — and it does not vary across backtest trials either, so a plan that funds itself by selling the house is leaning on `homeGrowth` being right in *every* run. |
+| **Backtesting reaches only the invested buckets** | A sampled sequence drives the invested return. Cash keeps earning `cashReturn` and a home keeps appreciating at `homeGrowth` in every trial, so there is no run in which savings lost purchasing power — which flatters a cash-heavy plan. Fixing it properly needs a short-rate (T-bill) series the bundle does not carry, so instead the panel reports what share of your wealth at retirement is in that unsampled bucket. |
 | **Lumps accrue continuously** across their year | Understates a point-in-time down payment by ~3%. |
 | **US-shaped** | 59½, 401k, 529, Roth ladders. No other tax regime. |
 
@@ -493,7 +494,7 @@ survivorship bias cannot see.
 ## Tests
 
 ```bash
-npm test     # 282 tests
+npm test     # 345 tests
 ```
 
 Every test pins either a **real bug that was found** or an **invariant that must not break**. Notable
