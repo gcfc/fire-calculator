@@ -2536,6 +2536,38 @@ function FanChart({ bands, isMobile }) {
   );
 }
 
+// ---- scenario comparison -----------------------------------------------------
+// The most-requested capability in every review of every tool in this space, and cheap here for one
+// reason: simulate() is pure and costs about a millisecond, so a second scenario is a second call
+// rather than a second architecture.
+//
+// The deltas are computed against the SAME model, so a difference can only come from the inputs.
+export const compareScenarios = (a, b) => {
+  const A = simulate(a), B = simulate(b);
+  const diff = (x, y) => (x == null || y == null ? null : y - x);
+  return {
+    a: A, b: B,
+    rows: [
+      { key: "fireCross", label: "Retirement age", a: A.fireCross, b: B.fireCross,
+        delta: diff(A.fireCross, B.fireCross), unit: "years", lowerIsBetter: true },
+      { key: "fireCrossValue", label: "The number", a: A.fireCrossValue, b: B.fireCrossValue,
+        delta: diff(A.fireCrossValue, B.fireCrossValue), unit: "$", lowerIsBetter: true },
+      { key: "fireBridge", label: "Must be reachable before 59.5", a: A.fireBridge, b: B.fireBridge,
+        delta: diff(A.fireBridge, B.fireBridge), unit: "$", lowerIsBetter: true },
+      { key: "end", label: "Left at the horizon", a: A.end, b: B.end,
+        delta: diff(A.end, B.end), unit: "$", lowerIsBetter: false },
+      { key: "lastPayoff", label: "Mortgage clear at", a: A.lastPayoff, b: B.lastPayoff,
+        delta: diff(A.lastPayoff, B.lastPayoff), unit: "age", lowerIsBetter: true },
+    ],
+    // which inputs actually differ — a comparison that cannot say WHY is a pair of numbers, not a
+    // comparison
+    changed: Object.keys({ ...a, ...b })
+      .filter((k) => typeof a[k] !== "object" && typeof b[k] !== "object")
+      .filter((k) => a[k] !== b[k])
+      .map((k) => ({ key: k, from: a[k], to: b[k] })),
+  };
+};
+
 // ---- the mortality panel -----------------------------------------------------
 function MortalityPanel({ p, sim, mc, isMobile }) {
   const to = sim.END;
@@ -2670,6 +2702,136 @@ function MortalityPanel({ p, sim, mc, isMobile }) {
         while this audience skews healthier and longer-lived than average; and it is <b>unisex</b>,
         because the app asks for no demographics at all. All three point the same way — you will
         probably live longer than this says.
+      </div>
+    </div>
+  );
+}
+
+// ---- the compare panel -------------------------------------------------------
+function ComparePanel({ p, saved, onSave, onClear, isMobile }) {
+  const cmp = useMemo(() => (saved ? compareScenarios(saved.p, p) : null), [saved, p]);
+  if (!saved) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <p style={{ margin: 0, fontSize: 12.5, color: C.mute, lineHeight: 1.6 }}>
+          Pin the plan as it stands, then change anything you like — the two sit side by side with
+          the difference spelled out. Nothing is stored anywhere; the pinned copy lives in this tab
+          and goes when you close it.
+        </p>
+        <button onClick={onSave}
+          style={{ background: C.teal, color: C.bg, border: "none", borderRadius: 8, cursor: "pointer",
+                   padding: "9px 16px", fontSize: 13, fontFamily: "'Space Grotesk', sans-serif",
+                   fontWeight: 500, alignSelf: "flex-start" }}>
+          Pin this plan as “before”
+        </button>
+      </div>
+    );
+  }
+
+  const W = isMobile ? 380 : 760, H = 230, L = 52, R = 12, T = 12, B = 26;
+  const rowsA = cmp.a.rows.filter((r) => Number.isInteger(r.age));
+  const rowsB = cmp.b.rows.filter((r) => Number.isInteger(r.age));
+  const a0 = Math.min(rowsA[0].age, rowsB[0].age);
+  const a1 = Math.max(rowsA[rowsA.length - 1].age, rowsB[rowsB.length - 1].age);
+  const hi = Math.max(1, ...rowsA.map((r) => r.portfolio), ...rowsB.map((r) => r.portfolio));
+  const x = (a) => L + ((a - a0) / Math.max(1, a1 - a0)) * (W - L - R);
+  const y = (v) => T + (1 - Math.max(0, v) / hi) * (H - T - B);
+  const line = (rows) => `M${rows.map((r) => `${x(r.age)},${y(r.portfolio)}`).join(" L")}`;
+  const ticks = []; for (let a = Math.ceil(a0 / 10) * 10; a <= a1; a += 10) ticks.push(a);
+
+  const fmtVal = (v, unit) =>
+    v == null ? "—" : unit === "$" ? fmtM(v) : unit === "age" ? `age ${Math.round(v)}` : v.toFixed(1);
+  const fmtDelta = (d, unit) =>
+    d == null ? "—" : unit === "$" ? `${d >= 0 ? "+" : "−"}${fmtM(Math.abs(d))}`
+      : `${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(unit === "age" ? 0 : 1)}`;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <button onClick={onSave}
+          style={{ background: "transparent", border: `1px solid ${C.teal}`, color: C.teal, borderRadius: 6,
+                   padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: "'Space Grotesk', sans-serif" }}>
+          Re-pin “before” to now
+        </button>
+        <button onClick={onClear}
+          style={{ background: "transparent", border: `1px solid ${C.line}`, color: C.mute, borderRadius: 6,
+                   padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: "'Space Grotesk', sans-serif" }}>
+          Drop the comparison
+        </button>
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: isMobile ? 340 : 560 }} role="img"
+          aria-label="Both plans' portfolios on one axis">
+          {[0, hi / 2, hi].map((v, i) => (
+            <g key={i}>
+              <line x1={L} y1={y(v)} x2={W - R} y2={y(v)} stroke={C.line} />
+              <text x={L - 6} y={y(v) + 3} fontSize={9} fill={C.mute} textAnchor="end"
+                fontFamily="'JetBrains Mono', monospace">{fmtM(v)}</text>
+            </g>
+          ))}
+          <path d={line(rowsA)} fill="none" stroke={C.mute} strokeWidth={2} strokeDasharray="5 3" />
+          <path d={line(rowsB)} fill="none" stroke={C.teal} strokeWidth={2.5} />
+          {cmp.a.fireCross != null && <circle cx={x(cmp.a.fireCross)} cy={y(cmp.a.fireCrossValue)} r={4} fill={C.mute} />}
+          {cmp.b.fireCross != null && <circle cx={x(cmp.b.fireCross)} cy={y(cmp.b.fireCrossValue)} r={4.5} fill={C.brass} />}
+          {ticks.map((a) => (
+            <text key={a} x={x(a)} y={H - 8} fontSize={9} fill={C.mute} textAnchor="middle"
+              fontFamily="'JetBrains Mono', monospace">{a}</text>
+          ))}
+        </svg>
+        <div style={{ display: "flex", gap: 16, fontSize: 10.5, color: C.mute, marginTop: 4 }}>
+          <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.mute, marginRight: 5, verticalAlign: "middle" }} />before (pinned)</span>
+          <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.teal, marginRight: 5, verticalAlign: "middle" }} />now</span>
+        </div>
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12.5, minWidth: 420 }}>
+          <thead>
+            <tr style={{ color: C.mute, fontSize: 10, letterSpacing: ".06em", textTransform: "uppercase" }}>
+              <th style={{ textAlign: "left", padding: "4px 8px 4px 0" }} />
+              <th style={{ textAlign: "right", padding: "4px 10px" }}>before</th>
+              <th style={{ textAlign: "right", padding: "4px 10px" }}>now</th>
+              <th style={{ textAlign: "right", padding: "4px 0" }}>change</th>
+            </tr>
+          </thead>
+          <tbody style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+            {cmp.rows.map((r) => {
+              const better = r.delta == null || Math.abs(r.delta) < 1e-9 ? null
+                : (r.delta < 0) === r.lowerIsBetter;
+              return (
+                <tr key={r.key} style={{ borderTop: `1px solid ${C.line}` }}>
+                  <td style={{ padding: "6px 8px 6px 0", color: C.ink, fontFamily: "'Space Grotesk', sans-serif" }}>{r.label}</td>
+                  <td style={{ textAlign: "right", padding: "6px 10px", color: C.mute }}>{fmtVal(r.a, r.unit)}</td>
+                  <td style={{ textAlign: "right", padding: "6px 10px", color: C.ink }}>{fmtVal(r.b, r.unit)}</td>
+                  <td style={{ textAlign: "right", padding: "6px 0",
+                               color: better == null ? C.mute : better ? C.teal : C.coral }}>
+                    {fmtDelta(r.delta, r.unit)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* a comparison that cannot say WHY is a pair of numbers, not a comparison */}
+      <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.7 }}>
+        {cmp.changed.length === 0 ? (
+          <>Nothing differs yet — change an input and the two plans separate.</>
+        ) : (
+          <>
+            <b style={{ color: C.ink }}>What changed:</b>{" "}
+            {cmp.changed.slice(0, 8).map((c, i) => (
+              <span key={c.key}>
+                {i > 0 && " · "}
+                <span style={{ color: C.ink }}>{c.key}</span>{" "}
+                {String(c.from)} → <b style={{ color: C.teal }}>{String(c.to)}</b>
+              </span>
+            ))}
+            {cmp.changed.length > 8 && <> · and {cmp.changed.length - 8} more</>}
+          </>
+        )}
       </div>
     </div>
   );
@@ -3316,6 +3478,8 @@ function Calculator({ shared, isMobile }) {
   const [mcOpen, setMcOpen] = useState(false);               // backtesting, on demand — it is not free
   const [sankeyOpen, setSankeyOpen] = useState(false);       // the year-by-year flow diagram
   const [mortOpen, setMortOpen] = useState(false);           // survival curves and the outcome mix
+  const [cmpOpen, setCmpOpen] = useState(false);             // two plans side by side
+  const [pinned, setPinned] = useState(null);                // the "before" plan, this tab only
   // the Social Security estimator's own inputs — deliberately NOT part of `p`, because they describe
   // a calculation you ran, not a fact about the plan; only its output ever becomes an income stream
   const [ssEarn, setSsEarn] = useState(70000);
@@ -4650,6 +4814,17 @@ function Calculator({ shared, isMobile }) {
               open={sankeyOpen} onToggle={() => setSankeyOpen((v) => !v)}
             >
               <SankeyPanel trace={sim.trace} fireCross={sim.fireCross} isMobile={isMobile} />
+            </Collapsible>
+          )}
+
+          {hasPlan && (
+            <Collapsible
+              title="Compare two plans"
+              subtitle="Pin this one, change anything, and see the difference spelled out"
+              open={cmpOpen} onToggle={() => setCmpOpen((v) => !v)}
+            >
+              <ComparePanel p={p} saved={pinned} isMobile={isMobile}
+                onSave={() => setPinned({ p })} onClear={() => setPinned(null)} />
             </Collapsible>
           )}
 

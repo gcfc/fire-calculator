@@ -4,7 +4,7 @@ import { HISTORY, randomStart, blendedReturn, seededRandom,
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
   rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
-  PRESETS, SCHOOL_TIERS, traceToCsv, outcomeMix, ssPia, ssClaimFactor, ssEstimate,
+  PRESETS, SCHOOL_TIERS, traceToCsv, outcomeMix, ssPia, ssClaimFactor, ssEstimate, compareScenarios,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -2633,5 +2633,52 @@ describe("Social Security estimator", () => {
     // on a household that is NOT liquidity-gated, the date does move
     const free = { ...DEFAULTS, enforceAccess: false };
     expect(simulate({ ...free, incomes: ss }).fireCross).toBeLessThan(simulate(free).fireCross);
+  });
+});
+
+describe("scenario comparison", () => {
+  it("is identical to itself, with nothing changed", () => {
+    const c = compareScenarios(DEFAULTS, { ...DEFAULTS });
+    expect(c.changed).toEqual([]);
+    for (const r of c.rows) expect(r.delta === null || Math.abs(r.delta) < 1e-9, r.key).toBe(true);
+  });
+
+  it("names the inputs that differ", () => {
+    const c = compareScenarios(DEFAULTS, { ...DEFAULTS, annualTakeHome: 190000, retirementSpendToday: 70000 });
+    const keys = c.changed.map((x) => x.key).sort();
+    expect(keys).toEqual(["annualTakeHome", "retirementSpendToday"]);
+    const th = c.changed.find((x) => x.key === "annualTakeHome");
+    expect(th.from).toBe(DEFAULTS.annualTakeHome);
+    expect(th.to).toBe(190000);
+  });
+
+  it("signs each row in the direction that is actually better", () => {
+    const c = compareScenarios(DEFAULTS, { ...DEFAULTS, annualTakeHome: 220000 });
+    const age = c.rows.find((r) => r.key === "fireCross");
+    expect(age.delta).toBeLessThan(0);       // retiring earlier
+    expect(age.lowerIsBetter).toBe(true);
+    const left = c.rows.find((r) => r.key === "end");
+    expect(left.lowerIsBetter).toBe(false);  // more left over is better
+  });
+
+  it("compares against the same model, so a difference can only be the inputs", () => {
+    const a = { ...DEFAULTS, nominalReturn: 0.06 };
+    const c = compareScenarios(a, a);
+    expect(c.a.fireCross).toBe(c.b.fireCross);
+    expect(c.a.end).toBe(c.b.end);
+  });
+
+  it("survives a scenario that never retires", () => {
+    const broke = { ...DEFAULTS, startPortfolio: 0, startPortfolioTaxAdv: 0, startCash: 0,
+                    annualTakeHome: 12000, retirementSpendToday: 250000 };
+    const c = compareScenarios(DEFAULTS, broke);
+    expect(c.b.fireCross).toBeNull();
+    expect(c.rows.find((r) => r.key === "fireCross").delta).toBeNull();
+  });
+
+  it("ignores list-valued inputs when naming what changed", () => {
+    // homes/kids/expenses are arrays; diffing them by identity would report a change on every render
+    const c = compareScenarios(DEFAULTS, { ...DEFAULTS, kids: [...DEFAULTS.kids] });
+    expect(c.changed).toEqual([]);
   });
 });
