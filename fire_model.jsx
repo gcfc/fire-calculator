@@ -4,7 +4,8 @@ import {
   ReferenceLine, ReferenceDot, ReferenceArea, ResponsiveContainer,
 } from "recharts";
 import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from "lz-string";
-import { historicalCycles, randomStart, blockBootstrap, seededRandom, HISTORY_FIRST, HISTORY_LAST } from "./history.js";
+import { historicalCycles, randomStart, blockBootstrap, seededRandom, HISTORY_FIRST, HISTORY_LAST,
+         survivalCurve, lastSurvivorCurve, survivalPercentileAge } from "./history.js";
 
 // ---- palette (ledger / instrument) ----
 const C = {
@@ -2366,6 +2367,45 @@ const SERIES = [
 // a series' default visibility changes (which is exactly how the share-link test broke)
 export const defaultShow = () => Object.fromEntries(SERIES.map((s) => [s.key, !!s.on]));
 
+// ---- outcomes: rich, broke, or dead ------------------------------------------
+// Engaging Data's framing, and the one thing in the whole competitive field worth stealing outright.
+// A plan's failure probability is usually quoted as though you are certain to be there to see it.
+// You are not. Overlaying mortality on the outcome distribution shows the wedge that actually
+// dominates a long retirement, and it is not the market.
+//
+// Needs BOTH halves: survival from the life table, and the solvency distribution from the backtest.
+// Each age's column stacks to exactly 1 — dead, plus alive-and-broke, plus alive-and-solvent split
+// into how well it went.
+export const outcomeMix = (mc, survival) => {
+  if (!mc || !mc.bands || !survival) return null;
+  return mc.bands.map((b) => {
+    const alive = Math.max(0, Math.min(1, survival[b.age] ?? 0));
+    // The bands are portfolio percentiles, so the share of runs below any threshold can be read off
+    // them directly by interpolating between the two that straddle it. Every category below is
+    // computed this way against a threshold that means something — zero, and the plan's own path.
+    // An earlier draft split "comfortable" from "lean" using invented constants; it looked richer
+    // and could not be defended, so it is gone.
+    const pts = [[0, 0], [0.1, b.p10], [0.25, b.p25], [0.5, b.p50], [0.75, b.p75], [0.9, b.p90], [1, b.p90]];
+    const shareBelow = (v) => {
+      if (v <= pts[0][1]) return 0;
+      for (let i = 1; i < pts.length; i++) {
+        const [q0, v0] = pts[i - 1], [q1, v1] = pts[i];
+        if (v <= v1) return v1 === v0 ? q1 : q0 + (q1 - q0) * ((v - v0) / (v1 - v0));
+      }
+      return 1;
+    };
+    const broke = Math.max(0, Math.min(1, shareBelow(1)));            // effectively nothing left
+    const belowPlan = Math.max(broke, Math.min(1, shareBelow(Math.max(1, b.plan))));
+    return {
+      age: b.age,
+      dead: 1 - alive,
+      broke: alive * broke,
+      behind: alive * (belowPlan - broke),      // solvent, but running below your own projection
+      ahead: alive * (1 - belowPlan),           // solvent and ahead of it
+    };
+  });
+};
+
 // ---- the percentile fan -----------------------------------------------------
 // Where the plan sits inside the distribution of what history would have done to it.
 //
@@ -2449,6 +2489,145 @@ function FanChart({ bands, isMobile }) {
         The axis is logarithmic — each gridline is ten times the one below. It has to be: these runs
         span a failed $0 to {fmtM(Math.max(...bands.map((b) => b.p90)))}, and on a linear axis your own
         plan would be pinned flat to the bottom. A run that has failed sits on the floor line.
+      </div>
+    </div>
+  );
+}
+
+// ---- the mortality panel -----------------------------------------------------
+function MortalityPanel({ p, sim, mc, isMobile }) {
+  const to = sim.END;
+  const you = useMemo(() => survivalCurve(p.currentAge, to), [p.currentAge, to]);
+  const either = useMemo(
+    () => lastSurvivorCurve(p.currentAge, sim.hasPartner ? p.partnerAge : null, to, sim.partnerOffset),
+    [p.currentAge, p.partnerAge, sim.hasPartner, sim.partnerOffset, to]);
+  const mix = useMemo(() => outcomeMix(mc, either), [mc, either]);
+
+  const W = isMobile ? 380 : 760, H = 210, L = 44, R = 14, T = 12, B = 26;
+  const a0 = Math.floor(p.currentAge), a1 = to;
+  const x = (a) => L + ((a - a0) / Math.max(1, a1 - a0)) * (W - L - R);
+  const y = (v) => T + (1 - v) * (H - T - B);
+  const path = (curve) => `M${Object.keys(curve).map(Number).sort((m, n) => m - n)
+    .map((a) => `${x(a)},${y(curve[a])}`).join(" L")}`;
+
+  const medianYou = survivalPercentileAge(you, 0.5);
+  const medianEither = survivalPercentileAge(either, 0.5);
+  const atEnd = either[to] ?? 0, atEndYou = you[to] ?? 0;
+  const ticks = []; for (let a = Math.ceil(a0 / 10) * 10; a <= a1; a += 10) ticks.push(a);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <p style={{ margin: 0, fontSize: 12.5, color: C.mute, lineHeight: 1.6 }}>
+        You are planning to <b style={{ color: C.ink }}>{to}</b>. Against a general-population life
+        table that is about a{" "}
+        <b style={{ color: C.brass }}>{(atEnd * 100).toFixed(atEnd < 0.1 ? 1 : 0)}%</b> chance
+        {sim.hasPartner ? " that either of you is still there" : " that you are still there"}
+        {sim.hasPartner && <> — and {(atEndYou * 100).toFixed(atEndYou < 0.1 ? 1 : 0)}% for you alone</>}.
+        Half of people are gone by <b style={{ color: C.ink }}>{medianYou}</b>
+        {sim.hasPartner && <>, or <b style={{ color: C.ink }}>{medianEither}</b> for the last survivor</>}.
+        That is not an argument for planning to a shorter horizon — it is the reason the horizon is a
+        planning choice rather than a prediction.
+      </p>
+
+      <div style={{ overflowX: "auto" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: isMobile ? 340 : 560 }} role="img"
+          aria-label="Probability of still being alive, by age">
+          {[0, 0.25, 0.5, 0.75, 1].map((v) => (
+            <g key={v}>
+              <line x1={L} y1={y(v)} x2={W - R} y2={y(v)} stroke={C.line} />
+              <text x={L - 6} y={y(v) + 3} fontSize={9} fill={C.mute} textAnchor="end"
+                fontFamily="'JetBrains Mono', monospace">{Math.round(v * 100)}%</text>
+            </g>
+          ))}
+          {/* the gap between the two curves is the couple premium: years where one of you is likely
+              alive and you individually are not, which is exactly why the horizon runs to the last
+              survivor */}
+          {sim.hasPartner && (
+            <path d={`${path(either)} L${x(a1)},${y(you[a1] ?? 0)} ${Object.keys(you).map(Number).sort((m, n) => n - m).map((a) => `L${x(a)},${y(you[a])}`).join(" ")} Z`}
+              fill={C.teal} opacity={0.12} />
+          )}
+          <path d={path(you)} fill="none" stroke={C.brass} strokeWidth={2} strokeDasharray="5 3" />
+          {sim.hasPartner && <path d={path(either)} fill="none" stroke={C.teal} strokeWidth={2} />}
+          <line x1={x(a1)} y1={T} x2={x(a1)} y2={H - B} stroke={C.brass} strokeDasharray="3 3" opacity={0.7} />
+          {sim.fireCross != null && (
+            <line x1={x(sim.fireCross)} y1={T} x2={x(sim.fireCross)} y2={H - B} stroke={C.mute}
+              strokeDasharray="2 4" opacity={0.6} />
+          )}
+          {ticks.map((a) => (
+            <text key={a} x={x(a)} y={H - 8} fontSize={9} fill={C.mute} textAnchor="middle"
+              fontFamily="'JetBrains Mono', monospace">{a}</text>
+          ))}
+        </svg>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 10.5, color: C.mute, marginTop: 4 }}>
+          <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.brass, marginRight: 5, verticalAlign: "middle" }} />you</span>
+          {sim.hasPartner && <span><span style={{ display: "inline-block", width: 14, height: 2, background: C.teal, marginRight: 5, verticalAlign: "middle" }} />either of you</span>}
+          <span>dotted lines: your retirement date, and the horizon</span>
+        </div>
+      </div>
+
+      {/* ---- rich, broke or dead ---- */}
+      {mix ? (
+        <>
+          <div style={{ fontSize: 12.5, color: C.ink, fontWeight: 500, marginTop: 4 }}>Rich, broke, or dead</div>
+          <p style={{ margin: 0, fontSize: 12, color: C.mute, lineHeight: 1.6 }}>
+            Every column is one age and adds to 100%: the share of runs where you have died, run out,
+            fallen behind your own projection, or stayed ahead of it. A failure probability quoted on
+            its own assumes you are certainly there to see it.
+          </p>
+          <div style={{ overflowX: "auto" }}>
+            <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", minWidth: isMobile ? 340 : 560 }} role="img"
+              aria-label="Share of outcomes at each age: dead, broke, behind plan, ahead of plan">
+              {mix.map((m, i) => {
+                const w = (W - L - R) / mix.length + 0.6;
+                const xx = L + (i * (W - L - R)) / mix.length;
+                const seg = [
+                  [m.ahead, C.teal, 0.75], [m.behind, C.brass, 0.6],
+                  [m.broke, C.coral, 0.85], [m.dead, C.mute, 0.42],
+                ];
+                // stacked from the BOTTOM: a segment starting at cumulative `acc` and worth `v`
+                // runs from y(acc+v) down to y(acc). Ordering puts "dead" last so it grows downward
+                // from the top of the column, which is the whole point of the picture.
+                let acc = 0;
+                return seg.map(([v, col, op], k) => {
+                  const yy = y(acc + v), hh = Math.max(0, v * (H - T - B));
+                  acc += v;
+                  return <rect key={`${i}-${k}`} x={xx} y={yy} width={w} height={hh} fill={col} opacity={op} />;
+                });
+              })}
+              {[0, 0.5, 1].map((v) => (
+                <text key={v} x={L - 6} y={y(v) + 3} fontSize={9} fill={C.mute} textAnchor="end"
+                  fontFamily="'JetBrains Mono', monospace">{Math.round(v * 100)}%</text>
+              ))}
+              {ticks.map((a) => (
+                <text key={a} x={x(a)} y={H - 8} fontSize={9} fill={C.mute} textAnchor="middle"
+                  fontFamily="'JetBrains Mono', monospace">{a}</text>
+              ))}
+            </svg>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 10.5, color: C.mute, marginTop: 4 }}>
+              {[["ahead of plan", C.teal, 0.75], ["behind plan", C.brass, 0.6],
+                ["ran out", C.coral, 0.85], ["died", C.mute, 0.42]].map(([lbl, col, op]) => (
+                <span key={lbl}>
+                  <span style={{ display: "inline-block", width: 14, height: 8, background: col,
+                                 opacity: op, marginRight: 5, verticalAlign: "middle" }} />{lbl}
+                </span>
+              ))}
+            </div>
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 11.5, color: C.mute, lineHeight: 1.6 }}>
+          Run a backtest under <b>Will it survive history?</b> and the outcome mix appears here — the
+          solvency half of this picture comes from those trials.
+        </div>
+      )}
+
+      <div style={{ fontSize: 10.5, color: C.mute, lineHeight: 1.6, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+        Shaped from the SSA period life table, blended across sexes. Three things it gets wrong, each
+        larger than the arithmetic: a <b>period</b> table freezes today's rates and ignores future
+        improvement, so it understates longevity for anyone young; it is <b>general population</b>,
+        while this audience skews healthier and longer-lived than average; and it is <b>unisex</b>,
+        because the app asks for no demographics at all. All three point the same way — you will
+        probably live longer than this says.
       </div>
     </div>
   );
@@ -3094,6 +3273,7 @@ function Calculator({ shared, isMobile }) {
   const [traceOpen, setTraceOpen] = useState(false);         // the year-by-year arithmetic, on demand
   const [mcOpen, setMcOpen] = useState(false);               // backtesting, on demand — it is not free
   const [sankeyOpen, setSankeyOpen] = useState(false);       // the year-by-year flow diagram
+  const [mortOpen, setMortOpen] = useState(false);           // survival curves and the outcome mix
   const [leversOpen, setLeversOpen] = useState(true);        // …but the levers are the payoff, so open
   // Provenance rides alongside the params, never inside them — simulate() must not be able to see it.
   const [prov, setProv] = useState(() =>
@@ -4377,6 +4557,16 @@ function Calculator({ shared, isMobile }) {
               open={sankeyOpen} onToggle={() => setSankeyOpen((v) => !v)}
             >
               <SankeyPanel trace={sim.trace} fireCross={sim.fireCross} isMobile={isMobile} />
+            </Collapsible>
+          )}
+
+          {hasPlan && (
+            <Collapsible
+              title="How long will you be here?"
+              subtitle="Survival against your planning horizon, and what actually ends a retirement"
+              open={mortOpen} onToggle={() => setMortOpen((v) => !v)}
+            >
+              <MortalityPanel p={p} sim={sim} mc={mcShown} isMobile={isMobile} />
             </Collapsible>
           )}
 

@@ -139,3 +139,72 @@ export const seededRandom = (seed) => {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 };
+
+// ---- mortality ---------------------------------------------------------------
+// Annual probability of death, qx, by exact age. Shaped from the SSA Actuarial Life Table (the
+// period table at ssa.gov/oact/STATS/table4c6.html), which is a US government work and so public
+// domain — the same reason the market data above is bundled rather than fetched.
+//
+// THREE CAVEATS THE UI REPEATS, because each one moves the answer by more than the arithmetic does:
+//
+//  1. PERIOD, NOT COHORT. This freezes today's age-specific rates forever and ignores future
+//     improvement, so it understates how long someone currently in their twenties will live.
+//  2. GENERAL POPULATION. A FIRE audience skews high-income, high-education and non-smoking, all of
+//     which carry materially lower mortality. Insurers use annuitant tables (SOA 2012 IAM) for
+//     exactly this reason; those show longer lives still.
+//  3. UNISEX BLEND. The app asks for no demographics at all and this keeps it that way. The male /
+//     female spread is around two to three years — smaller than either bias above.
+//
+// Values are a blended male/female qx at five-year anchors, interpolated between.
+const QX_ANCHORS = [
+  [20, 0.00085], [25, 0.00105], [30, 0.00125], [35, 0.00160], [40, 0.00215],
+  [45, 0.00310], [50, 0.00460], [55, 0.00680], [60, 0.00990], [65, 0.01430],
+  [70, 0.02180], [75, 0.03500], [80, 0.05800], [85, 0.09600], [90, 0.15600],
+  [95, 0.23500], [100, 0.33000], [105, 0.42000], [110, 0.50000], [115, 0.60000], [120, 1.0],
+];
+
+export const qxAt = (age) => {
+  if (age <= QX_ANCHORS[0][0]) return QX_ANCHORS[0][1];
+  for (let i = 1; i < QX_ANCHORS.length; i++) {
+    const [a1, q1] = QX_ANCHORS[i], [a0, q0] = QX_ANCHORS[i - 1];
+    if (age <= a1) return q0 + (q1 - q0) * ((age - a0) / (a1 - a0));
+  }
+  return 1;
+};
+
+// Probability of surviving from `from` to each age up to `to`, as { age -> p }. Conditional on being
+// alive at `from`, which is the only useful framing for someone using this: you have already made it
+// this far, so the risk you care about starts now.
+export const survivalCurve = (from, to) => {
+  const out = {};
+  let p = 1;
+  for (let age = Math.floor(from); age <= to; age++) {
+    out[age] = p;
+    p *= 1 - qxAt(age);
+  }
+  return out;
+};
+
+// For a couple: the probability that AT LEAST ONE is still alive. This is the horizon the model
+// already plans to — money must outlive the last survivor — so it is the curve that belongs beside
+// the plan, with the single-life curve for contrast.
+export const lastSurvivorCurve = (yourFrom, partnerFrom, to, partnerOffset) => {
+  const you = survivalCurve(yourFrom, to);
+  const out = {};
+  for (let age = Math.floor(yourFrom); age <= to; age++) {
+    const sYou = you[age] ?? 0;
+    if (partnerFrom == null) { out[age] = sYou; continue; }
+    // the partner is on their own clock; their age when you are `age`
+    const theirAge = age - partnerOffset;
+    const theirs = survivalCurve(partnerFrom, to + Math.abs(partnerOffset) + 1)[Math.floor(theirAge)] ?? 0;
+    out[age] = 1 - (1 - sYou) * (1 - theirs);
+  }
+  return out;
+};
+
+// The age by which survival has fallen to `p` — "half of people are gone by here".
+export const survivalPercentileAge = (curve, p) => {
+  const ages = Object.keys(curve).map(Number).sort((a, b) => a - b);
+  for (const a of ages) if (curve[a] <= p) return a;
+  return ages[ages.length - 1];
+};

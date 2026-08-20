@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { HISTORY, randomStart, blendedReturn, seededRandom } from "./history.js";
+import { HISTORY, randomStart, blendedReturn, seededRandom,
+         survivalCurve, lastSurvivorCurve, survivalPercentileAge } from "./history.js";
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
   rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
-  PRESETS, SCHOOL_TIERS, traceToCsv,
+  PRESETS, SCHOOL_TIERS, traceToCsv, outcomeMix,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -2528,5 +2529,59 @@ describe("the percentile fan", () => {
     const mc = runTrials(DEFAULTS, { mode: "randomstart", trials: 200, seed: 9 });
     const early = mc.bands.find((b) => b.age === 35), late = mc.bands.find((b) => b.age === 85);
     expect(late.p90 - late.p10).toBeGreaterThan(early.p90 - early.p10);
+  });
+});
+
+describe("mortality", () => {
+  it("survival falls monotonically and starts at 1", () => {
+    const c = survivalCurve(30, 110);
+    expect(c[30]).toBe(1);
+    const ages = Object.keys(c).map(Number).sort((a, b) => a - b);
+    for (let i = 1; i < ages.length; i++) expect(c[ages[i]]).toBeLessThanOrEqual(c[ages[i - 1]]);
+    expect(c[110]).toBeLessThan(0.02);
+  });
+
+  it("puts the median in a plausible place", () => {
+    // half of 30-year-olds gone by their early eighties, against a general-population period table
+    const m = survivalPercentileAge(survivalCurve(30, 120), 0.5);
+    expect(m).toBeGreaterThan(75);
+    expect(m).toBeLessThan(92);
+  });
+
+  it("a couple outlives either of them", () => {
+    const solo = survivalCurve(30, 105);
+    const both = lastSurvivorCurve(30, 30, 105, 0);
+    for (const a of [70, 85, 95]) expect(both[a]).toBeGreaterThan(solo[a]);
+    expect(survivalPercentileAge(both, 0.5)).toBeGreaterThan(survivalPercentileAge(solo, 0.5));
+  });
+
+  it("puts a horizon of 100 in tail territory, which is the point of showing it", () => {
+    const s = survivalCurve(27, 101);
+    expect(s[100]).toBeLessThan(0.15);
+    expect(s[100]).toBeGreaterThan(0);
+  });
+
+  it("outcome columns stack to exactly one", () => {
+    const mc = runTrials(DEFAULTS, { mode: "historical" });
+    const mix = outcomeMix(mc, survivalCurve(DEFAULTS.currentAge, simulate(DEFAULTS).END));
+    expect(mix.length).toBe(mc.bands.length);
+    for (const m of mix) {
+      expect(m.dead + m.broke + m.behind + m.ahead, `age ${m.age}`).toBeCloseTo(1, 6);
+      for (const k of ["dead", "broke", "behind", "ahead"]) expect(m[k]).toBeGreaterThanOrEqual(-1e-9);
+    }
+  });
+
+  it("the dead wedge grows and eventually dominates", () => {
+    const mc = runTrials(DEFAULTS, { mode: "historical" });
+    const mix = outcomeMix(mc, survivalCurve(DEFAULTS.currentAge, simulate(DEFAULTS).END));
+    const at = (age) => mix.find((m) => m.age === age);
+    expect(at(40).dead).toBeLessThan(at(70).dead);
+    expect(at(70).dead).toBeLessThan(at(95).dead);
+    expect(at(95).dead).toBeGreaterThan(at(95).broke);     // the calendar beats the market
+  });
+
+  it("gives nothing back without a backtest", () => {
+    expect(outcomeMix(null, survivalCurve(30, 90))).toBeNull();
+    expect(outcomeMix(runTrials(DEFAULTS, { mode: "historical" }), null)).toBeNull();
   });
 });
