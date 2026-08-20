@@ -3,6 +3,7 @@ import { HISTORY, randomStart, blendedReturn, seededRandom } from "./history.js"
 import {
   simulate, DEFAULTS, EMPTY, isRunnable, planReadiness, kidName, runTrials, sankeyYear,
   rmdDivisor, rmdFraction, PROV, TRACKED_KEYS, provenanceOf, markProvenance, provenanceCount,
+  PRESETS, SCHOOL_TIERS,
   encodeShare, decodeShare, sharePayload, snapshotFromSim, rehydrateRows, underwaterOf,
   allocationAdvice, retiresOnLoan, defaultShow,
   toAnnual, toShown, dollarsFromPct, pctFromDollars, netFromGross, grossFromNet,
@@ -2352,5 +2353,60 @@ describe("input provenance", () => {
     const withNoise = { ...DEFAULTS, provenance: markProvenance({}, TRACKED_KEYS, PROV.PRESET) };
     expect(simulate(withNoise).fireCross).toBe(simulate(DEFAULTS).fireCross);
     expect(TRACKED_KEYS.every((k) => k in DEFAULTS)).toBe(true);   // and every tracked key is real
+  });
+});
+
+describe("presets", () => {
+  it("every persona produces a plan the app will actually show", () => {
+    for (const ps of PRESETS) {
+      const p = { ...DEFAULTS, ...ps.params };
+      expect(planReadiness(p).ready, ps.key).toBe(true);
+      const s = simulate(p);
+      expect(s.rows.length, ps.key).toBeGreaterThan(0);
+      expect(s.rows.every((r) => Number.isFinite(r.portfolio)), ps.key).toBe(true);
+    }
+  });
+
+  it("covers the shapes it claims to", () => {
+    const by = Object.fromEntries(PRESETS.map((x) => [x.key, { ...DEFAULTS, ...x.params }]));
+    expect(by.single.partnerEnabled).toBe(false);
+    expect(by.dink.kids).toEqual([]);
+    expect(by.family.kids.length).toBe(2);
+    expect(by.oneincome.partnerEnabled).toBe(false);
+    expect(by.oneincome.kids.length).toBe(2);
+    expect(by.retired.annualTakeHome).toBe(0);
+    expect(by.retired.incomes.length).toBeGreaterThan(0);
+    // the already-retired household has no income at all, so savings alone must satisfy readiness
+    expect(planReadiness(by.retired).ready).toBe(true);
+  });
+
+  it("a preset starting from DEFAULTS leaves nothing behind from a previous one", () => {
+    // applying family then single must not keep the family's children
+    const family = { ...DEFAULTS, ...PRESETS.find((x) => x.key === "family").params };
+    const single = { ...DEFAULTS, ...PRESETS.find((x) => x.key === "single").params };
+    expect(family.kids.length).toBe(2);
+    expect(single.kids.length).toBe(0);
+    expect(single.homes.length).toBe(0);
+  });
+
+  it("school tiers set all three child costs and order sensibly", () => {
+    const by = Object.fromEntries(SCHOOL_TIERS.map((t) => [t.key, t]));
+    for (const t of SCHOOL_TIERS) {
+      for (const k of ["daycarePerKid", "ongoingPerKid", "collegePerKid"]) {
+        expect(typeof t[k], `${t.key}.${k}`).toBe("number");
+      }
+    }
+    expect(by.private.ongoingPerKid).toBeGreaterThan(by.public.ongoingPerKid);
+    expect(by.private.collegePerKid).toBeGreaterThan(by.public.collegePerKid);
+    // the mixed tier is public schooling with a private university
+    expect(by.mixed.ongoingPerKid).toBeLessThan(by.private.ongoingPerKid);
+    expect(by.mixed.collegePerKid).toBe(by.private.collegePerKid);
+  });
+
+  it("a dearer school tier retires you later", () => {
+    const base = { ...DEFAULTS, ...PRESETS.find((x) => x.key === "family").params };
+    const cheap = simulate({ ...base, ...SCHOOL_TIERS.find((t) => t.key === "public") });
+    const dear = simulate({ ...base, ...SCHOOL_TIERS.find((t) => t.key === "private") });
+    expect(dear.fireCross).toBeGreaterThan(cheap.fireCross);
   });
 });

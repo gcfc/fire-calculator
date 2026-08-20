@@ -2188,6 +2188,102 @@ export const DEFAULTS = {
   homeGrowth: 0.04,
 };
 
+// ---- presets -----------------------------------------------------------------
+// Six households that between them cover most of who turns up. A preset is a partial parameter
+// override, not a whole plan: it fills the shape of a life so the chart has something to say, and
+// every figure it sets is marked as a preset rather than as yours.
+//
+// These are the on-ramp the empty state needed. Opening blank is honest but it is also a wall, and
+// "which of these looks like you" is a far smaller ask than forty empty boxes.
+export const PRESETS = [
+  {
+    key: "single", label: "Single, renting", blurb: "One income, no dependants, renting for now.",
+    params: {
+      currentAge: 30, startCash: 15000, startPortfolio: 60000, startPortfolioTaxAdv: 90000,
+      annualTakeHome: 95000, annualTaxAdv: 12000, nonHousingLiving: 34000, rentAnnual: 24000,
+      partnerEnabled: false, homes: [], kids: [], retirementSpendToday: 60000,
+    },
+  },
+  {
+    key: "dink", label: "Two incomes, no kids", blurb: "Both earning, buying a place, no children planned.",
+    params: {
+      currentAge: 32, startCash: 30000, startPortfolio: 180000, startPortfolioTaxAdv: 220000,
+      annualTakeHome: 110000, annualTaxAdv: 20000, nonHousingLiving: 46000, rentAnnual: 30000,
+      partnerEnabled: true, partnerAge: 31, partnerCash: 12000, partnerPortfolio: 90000,
+      partnerPortfolioTaxAdv: 130000, partnerIncome: 98000, partnerTaxAdv: 18000,
+      partnerStart: 31, partnerEnd: 62,
+      kids: [], homes: [{ price: 650000, purchaseAge: 34, downPct: 0.2, rate: 0.065, term: 30,
+                          closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }],
+      retirementSpendToday: 80000,
+    },
+  },
+  {
+    key: "family", label: "Family, two kids", blurb: "Two incomes, two children, a house and college ahead.",
+    params: {
+      currentAge: 34, startCash: 25000, startPortfolio: 150000, startPortfolioTaxAdv: 240000,
+      annualTakeHome: 120000, annualTaxAdv: 20000, nonHousingLiving: 58000, rentAnnual: 30000,
+      partnerEnabled: true, partnerAge: 33, partnerCash: 10000, partnerPortfolio: 70000,
+      partnerPortfolioTaxAdv: 120000, partnerIncome: 85000, partnerTaxAdv: 14000,
+      partnerStart: 33, partnerEnd: 62,
+      kids: [{ birthAge: 35 }, { birthAge: 37 }],
+      homes: [{ price: 550000, purchaseAge: 36, downPct: 0.15, rate: 0.065, term: 30,
+                closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }],
+      retirementSpendToday: 85000,
+    },
+  },
+  {
+    key: "oneincome", label: "One income, two kids", blurb: "A single earner carrying the whole household.",
+    params: {
+      currentAge: 36, startCash: 20000, startPortfolio: 90000, startPortfolioTaxAdv: 160000,
+      annualTakeHome: 130000, annualTaxAdv: 20000, nonHousingLiving: 60000, rentAnnual: 28000,
+      partnerEnabled: false,
+      kids: [{ birthAge: 34 }, { birthAge: 37 }],
+      homes: [{ price: 520000, purchaseAge: 38, downPct: 0.15, rate: 0.065, term: 30,
+                closingPct: 0.02, propTaxRate: 0.011, insMaintRate: 0.013 }],
+      retirementSpendToday: 80000,
+    },
+  },
+  {
+    key: "latestart", label: "Starting late", blurb: "Mid-forties, a mortgage running, catching up.",
+    params: {
+      currentAge: 46, startCash: 20000, startPortfolio: 70000, startPortfolioTaxAdv: 210000,
+      annualTakeHome: 105000, annualTaxAdv: 23000, nonHousingLiving: 48000, rentAnnual: 0,
+      partnerEnabled: true, partnerAge: 45, partnerCash: 8000, partnerPortfolio: 40000,
+      partnerPortfolioTaxAdv: 95000, partnerIncome: 72000, partnerTaxAdv: 12000,
+      partnerStart: 45, partnerEnd: 65,
+      kids: [{ birthAge: 34 }],
+      homes: [{ owned: true, price: 480000, rate: 0.045, monthlyPI: 2100, yearsLeft: 18,
+                propTaxAnnual: 5300, insMaintAnnual: 6200, carryMode: "dollar" }],
+      retirementSpendToday: 70000,
+    },
+  },
+  {
+    key: "retired", label: "Already retired", blurb: "No income, a pot and a pension. Will it hold?",
+    params: {
+      currentAge: 66, startCash: 60000, startPortfolio: 420000, startPortfolioTaxAdv: 880000,
+      annualTakeHome: 0, annualTaxAdv: 0, nonHousingLiving: 55000, rentAnnual: 0,
+      partnerEnabled: false, kids: [],
+      homes: [{ owned: true, price: 400000, rate: 0.04, monthlyPI: 0, yearsLeft: 0,
+                propTaxAnnual: 4400, insMaintAnnual: 5200, carryMode: "dollar" }],
+      incomes: [{ label: "Social Security", amount: 30000, startAge: 67, whose: "you", cola: true, until: null }],
+      retirementSpendToday: 55000, useCoast: false,
+    },
+  },
+];
+
+// Schooling is orthogonal to who the household IS — any of the presets above could send children to
+// any of these — so it is a second, smaller picker rather than a combinatorial explosion of
+// "family, private" and "one income, public" personas. Figures are per child per year in today's
+// dollars, with college as a four-year total.
+export const SCHOOL_TIERS = [
+  { key: "public", label: "Public school", daycarePerKid: 22000, ongoingPerKid: 6000, collegePerKid: 120000,
+    blurb: "Daycare until school, then state school and a public university." },
+  { key: "private", label: "Private day school", daycarePerKid: 28000, ongoingPerKid: 32000, collegePerKid: 260000,
+    blurb: "Fee-paying from reception onwards, and a private university." },
+  { key: "mixed", label: "Public school, private college", daycarePerKid: 24000, ongoingPerKid: 7000, collegePerKid: 260000,
+    blurb: "State school throughout, then a private university." },
+];
+
 // What the app opens on: every box you'd type a figure into is blank, and there is no home, no kid
 // and no partner until you add one. The chart has nothing to draw and says so, rather than showing a
 // stranger's projection you then have to overwrite field by field.
@@ -2848,6 +2944,19 @@ function Calculator({ shared, isMobile }) {
   const [prov, setProv] = useState(() =>
     (shared && shared.mode === "full" ? markProvenance({}, Object.keys(shared.p || {}), PROV.TYPED) : {}));
   const touch = (k) => setProv((s) => (s[k] === PROV.TYPED ? s : { ...s, [k]: PROV.TYPED }));
+  // A preset starts from DEFAULTS so no field is left over from whatever was there before, then
+  // marks exactly the keys it supplied. Anything it did not mention stays a model default, honestly
+  // labelled as one.
+  const applyPreset = (preset) => {
+    setP({ ...DEFAULTS, ...preset.params });
+    setProv(markProvenance({}, TRACKED_KEYS.filter((k) => k in preset.params), PROV.PRESET));
+    setShow(defaultShow());
+  };
+  const applySchool = (tier) => {
+    setP((s) => ({ ...s, daycarePerKid: tier.daycarePerKid, ongoingPerKid: tier.ongoingPerKid,
+                   collegePerKid: tier.collegePerKid }));
+    setProv((s) => markProvenance(s, ["daycarePerKid", "ongoingPerKid", "collegePerKid"], PROV.PRESET));
+  };
   const set = (k, v) => { touch(k); setP((s) => ({ ...s, [k]: v })); };
   const setPct = (k, v) => { touch(k); setP((s) => ({ ...s, [k]: v / 100 })); };
 
@@ -3479,9 +3588,23 @@ function Calculator({ shared, isMobile }) {
                     parent of teenagers for a daycare figure is asking for a number that cannot
                     affect the answer. Ages are measured from today, since the past is already in
                     your current balances. */}
-                {kidPhases.daycare && field("Daycare / kid / yr (ages 0–5)", "daycarePerKid", p.daycarePerKid, set, { step: 1000 })}
-                {kidPhases.ongoing && field("Ongoing / kid / yr (ages 6–17)", "ongoingPerKid", p.ongoingPerKid, set, { step: 1000 })}
-                {kidPhases.college && field("College / kid (today's $)", "collegePerKid", p.collegePerKid, set, { step: 10000 })}
+                {/* Schooling is orthogonal to who the household is, so it is its own small picker
+                    rather than doubling the persona list into "family, private" and the rest. */}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 2 }}>
+                  {SCHOOL_TIERS.map((tier) => (
+                    <button key={tier.key} onClick={() => applySchool(tier)} title={tier.blurb}
+                      style={{
+                        background: "transparent", border: `1px solid ${C.line}`, color: C.teal,
+                        borderRadius: 999, padding: "3px 9px", cursor: "pointer", fontSize: 10,
+                        fontFamily: "'Space Grotesk', sans-serif", whiteSpace: "nowrap",
+                      }}>
+                      {tier.label}
+                    </button>
+                  ))}
+                </div>
+                {kidPhases.daycare && field("Daycare / kid / yr (ages 0–5)", "daycarePerKid", p.daycarePerKid, set, { step: 1000, prov: provenanceOf(prov, "daycarePerKid") })}
+                {kidPhases.ongoing && field("Ongoing / kid / yr (ages 6–17)", "ongoingPerKid", p.ongoingPerKid, set, { step: 1000, prov: provenanceOf(prov, "ongoingPerKid") })}
+                {kidPhases.college && field("College / kid (today's $)", "collegePerKid", p.collegePerKid, set, { step: 10000, prov: provenanceOf(prov, "collegePerKid") })}
                 {!kidPhases.daycare && !kidPhases.ongoing && !kidPhases.college && (
                   <div style={{ fontSize: 10, color: C.mute, lineHeight: 1.6 }}>
                     Everyone's grown — no daycare, school or college costs left to plan for.
@@ -4016,14 +4139,40 @@ function Calculator({ shared, isMobile }) {
                   </div>
                 ))}
               </div>
+              {/* "Which of these looks like you" is a far smaller ask than forty empty boxes. Opening
+                  blank is honest, but on its own it is also a wall. */}
+              <div style={{ marginTop: 8, width: "100%", maxWidth: 520 }}>
+                <div style={{ fontSize: 10, letterSpacing: ".08em", textTransform: "uppercase",
+                              color: C.mute, marginBottom: 8 }}>
+                  or start from a household like yours
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center" }}>
+                  {PRESETS.map((ps) => (
+                    <button key={ps.key} onClick={() => applyPreset(ps)} title={ps.blurb}
+                      style={{
+                        background: "transparent", border: `1px solid ${C.line}`, color: C.ink,
+                        borderRadius: 999, padding: "6px 12px", cursor: "pointer", fontSize: 12,
+                        fontFamily: "'Space Grotesk', sans-serif", whiteSpace: "nowrap",
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.teal; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.line; }}>
+                      {ps.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: C.mute, marginTop: 10, lineHeight: 1.55 }}>
+                  Every figure a preset fills in is marked with a dot, so you can see at a glance which
+                  numbers are still someone else's guess rather than yours.
+                </div>
+              </div>
               <button
                 onClick={() => { setP(DEFAULTS); setProv(markProvenance({}, TRACKED_KEYS, PROV.PRESET)); setShow(defaultShow()); }}
                 style={{
-                  marginTop: 4, background: C.brass, color: C.bg, border: "none", borderRadius: 8,
-                  cursor: "pointer", padding: "9px 16px", fontFamily: "'Space Grotesk', sans-serif",
-                  fontSize: 13, fontWeight: 500,
+                  marginTop: 4, background: "transparent", color: C.brass, border: `1px solid ${C.brass}`,
+                  borderRadius: 8, cursor: "pointer", padding: "8px 14px",
+                  fontFamily: "'Space Grotesk', sans-serif", fontSize: 12,
                 }}>
-                ▶ Load the demo household instead
+                ▶ Or load the fully worked demo
               </button>
             </div>
           )}
